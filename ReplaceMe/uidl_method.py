@@ -13,6 +13,11 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 from .utils import (select_non_overlapping_blocks, truncate_model, 
                     seed_all)
 
+from huggingface_hub import login
+
+# Token of authorized huggingface account
+login(token = '')
+
 # Initialize colorama for Windows compatibility
 init(autoreset=True)
 

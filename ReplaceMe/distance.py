@@ -21,6 +21,13 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 from .utils import (compute_block_distances, get_calib_dataloader,
                     get_last_non_padded_tokens, seed_all)
 
+
+from huggingface_hub import login
+
+# Token of the authorized huggingface account
+login(token = '')
+
+
 # Initialize colorama for Windows compatibility
 init(autoreset=True)
 

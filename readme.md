@@ -1,26 +1,13 @@
 # ReplaceMe: Training-Free Depth Pruning via Block Pruning & Linear Transformations 🔥
 
-[![arXiv](https://img.shields.io/badge/arXiv-2310.12345-b31b1b.svg)](https://arxiv.org/abs/2505.02819)
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
-[![HuggingFace Collection](https://img.shields.io/badge/HuggingFace-Collection-yellow.svg?logo=huggingface)](https://huggingface.co/collections/MTSAIR/replaceme-67ea8226e3feca5a57a9de51)
-[![Kaggle](https://img.shields.io/badge/Kaggle-Notebook-20beff?logo=kaggle&logoColor=white)](https://www.kaggle.com/code/ammarali32/replaceme-prune-your-transformer-efficiently)
-![ReplaceMe Architecture](figs/logo2.jpg)
-
 **The first training-free depth pruning method for transformer-based LLMs** - Achieve model compression while preserving performance through innovative block pruning and learned linear transformations.
 
-## 🚀 Quick Start
-It is highly recommended to use this docker image
-```
-nvcr.io#nvidia/pytorch:23.10-py3
-```
-### Installation
+## Installation
 ```bash
-git clone https://github.com/mts-ai/ReplaceMe.git
-cd patchme
+cd ReplaceMe
 pip install -e .
 ```
-### Basic Usage
+## Basic Usage
 ```bash
 # LSTSQ method (recommended)
 run_replaceme --config ./reproduce/Replace_Me_pipeline_lstsq.yaml
@@ -28,8 +15,7 @@ run_replaceme --config ./reproduce/Replace_Me_pipeline_lstsq.yaml
 # Cosine similarity method
 run_replaceme --config ./reproduce/Replace_Me_pipeline_cosine.yaml
 ```
-### Update
-- 11/05/2025 Add support [(unofficial implementation)](https://github.com/arcee-ai/PruneMe) for [UIDL method](https://arxiv.org/abs/2403.17887) 
+
 ## 🔧 Advanced Configuration
 Sample Configuration File
 ```yaml
@@ -94,20 +80,3 @@ get_distance_analysis --model meta-llama/Llama-2-7b
 get_lt_with_lstsq --dataset slimorca --layers 8
 get_lt_with_solvers --method cosine --alpha 0.1
 ```
-# 📚 Citation
-If you use ReplaceMe in your research, please cite our paper:
-
-```bibtex
-@article{shopkhoev2025replaceme0,
-  title   = {ReplaceMe: Network Simplification via Layer Pruning and Linear Transformations},
-  author  = {Dmitriy Shopkhoev and Ammar Ali and Magauiya Zhussip and Valentin Malykh and Stamatios Lefkimmiatis and Nikos Komodakis and Sergey Zagoruyko},
-  year    = {2025},
-  journal = {arXiv preprint arXiv: 2505.02819}
-}
-```
-# 🤝 Contributing
-We welcome contributions! Please see our contribution guidelines and open an issue before submitting major changes.
-
-Maintained by MTS AI Research 
-- Documentation
-- Paper

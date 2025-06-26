@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 # Dependencies required for this project
 dependencies = [
-    'torch==2.5.1',
+    'torch==2.6.0',
     'torchvision',
     'torchaudio',
     'transformers==4.46.3',
