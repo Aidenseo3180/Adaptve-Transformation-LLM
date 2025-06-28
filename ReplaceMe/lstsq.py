@@ -137,7 +137,7 @@ def lstsq(
             hooks.append(layer.mlp.register_forward_hook(save_mlp_activation(f'layer_{i}_mlp')))
 
     # Load precomputed distances and select blocks
-    average_distances = torch.load(distances_path)
+    average_distances = torch.load(distances_path, weights_only=False)
     selected_blocks = select_non_overlapping_blocks(
         average_distances,
         layers_to_skip,
