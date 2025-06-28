@@ -348,7 +348,7 @@ def run_from_config():
     config = read_config(args.config)
     
     # Load precomputed distances between layers (from distance profiling step)
-    average_distances = torch.load(config['distances_path'])
+    average_distances = torch.load(config['distances_path'], weights_only=False)
     
     # Select non-overlapping blocks of layers to prune based on distance analysis
     # This identifies which consecutive layers can be safely removed
