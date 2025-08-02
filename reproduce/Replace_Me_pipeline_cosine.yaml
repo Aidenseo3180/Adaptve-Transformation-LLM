@@ -1,11 +1,11 @@
 method: "cosine"
-model_path: "meta-llama/Meta-Llama-3-8B-Instruct"
+model_path: "meta-llama/Meta-Llama-3-8B-Instruct" # meta-llama/Llama-3.2-3B-Instruct
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
-batch_size: 8
-max_length: 1024
-layers_to_skip: 8
-dataset_size: 8000
+batch_size: 4 # 8ss
+max_length: 512 # 1024
+layers_to_skip: 4
+dataset_size: 4000 # 8000
 dataset_subset: "train"
 use_4bit: True
 save_path: null
@@ -18,6 +18,5 @@ solver: "adam" # adam, cg, l-bfgs, trust-ncg are supported
 loss: "cosine" # cosine, mse, elasticnet are supported
 distances_path: null
 num_A: 1
-layers_to_skip: 8
 merge_consecutive: False 
 accurate: False # False will run cosine(xA, y - z) where z is the residual attention info, True to run cosine(xA + z, y)
