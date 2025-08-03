@@ -52,6 +52,13 @@ def ReplaceMe_pipeline(config):
         from transformers import AutoModelForCausalLM, AutoTokenizer
         import os
 
+        # Hardcoded paths
+        a1_path = "./activations/a1.pt"
+        a2_path = "./activations/a2.pt"
+        iclt_save_dir = "./ICLT_weights/"
+        os.makedirs(iclt_save_dir, exist_ok=True)
+        save_root = "./outputs"
+
         # Use cosine_dist for hidden state extraction
         signature = inspect.signature(cosine_dist)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
@@ -77,8 +84,8 @@ def ReplaceMe_pipeline(config):
 
             print("[ICLT] Fitting T_k matrices...")
             fit_iclt(
-                x_path=config["a1_path"],
-                y_path=config["a2_path"],
+                x_path="./activations/a1.pt",
+                y_path="./activations/a2.pt",
                 save_dir="./ICLT_weights/",
                 K=config["k"],
                 rank=config.get("rank", 256)
