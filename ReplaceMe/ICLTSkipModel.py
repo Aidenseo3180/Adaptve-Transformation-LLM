@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
-from ICLTAdapter import ICLTAdapter
+from .ICLTAdapter import ICLTAdapter
 
 class ICLTSkipModel(nn.Module):
     def __init__(self, base_model, adapter_dir, K, rank, start_idx=3, end_idx=8):
