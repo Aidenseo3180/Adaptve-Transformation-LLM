@@ -28,6 +28,11 @@ seed_all()
 
 def ReplaceMe_pipeline(config):
     # Extract the relevant parameters based on function signatures
+    from .cosine_dist import cosine_dist
+    from .distance import profile_distances
+    from .evaluator import evaluator
+    from .lstsq import lstsq
+    from .distance import profile_distances
     signature = inspect.signature(profile_distances)
     filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
     if config['distances_path'] is None:
@@ -41,84 +46,69 @@ def ReplaceMe_pipeline(config):
         path = lstsq(**filtered_config)
 
     elif config["method"] == "iclt":
+        from .cosine_dist import cosine_dist
+        from .iclt_fit import fit_iclt
+        from .ICLTSkipModel import ICLTSkipModel
         from transformers import AutoModelForCausalLM, AutoTokenizer
-        from iclt_fit import fit_iclt
-        from ICLTSkipModel import ICLTSkipModel
-        from distance import profile_distances
-        from utils import select_non_overlapping_blocks
-        from cosine_dist import cosine_dist
-        from evaluator import evaluator
-        import torch
         import os
 
-        # 하드코딩된 디렉토리
-        iclt_save_dir = "./ICLT_weights/"
-        save_path = "./outputs/iclt_model"
-        os.makedirs(iclt_save_dir, exist_ok=True)
-        os.makedirs(save_path, exist_ok=True)
+        # Use cosine_dist for hidden state extraction
+        signature = inspect.signature(cosine_dist)
+        filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
 
-        # 1. 모델 로딩
-        print("[ICLT] Loading base model...")
-        model = AutoModelForCausalLM.from_pretrained(
-            config["model_name"],
-            torch_dtype=torch.bfloat16,
-            device_map="auto"
+        # Load average distances and select non-overlapping blocks
+        average_distances = torch.load(filtered_config['distances_path'], weights_only=False)
+        selected_blocks = select_non_overlapping_blocks(
+            average_distances,
+            filtered_config['layers_to_skip'],
+            num_blocks=filtered_config['num_A'],
+            merge_consecutive=filtered_config['merge_consecutive']
         )
 
-        # 2. cosine distance 기반 block pair 선택
-        if isinstance(config["layer_to_skip"], int):
-            print("[ICLT] Profiling distances to select best block pair...")
-            profile_distances(config)
-            distances = torch.load(config["distances_path"])
-            selected_pairs = select_non_overlapping_blocks(distances, num_blocks=config["layer_to_skip"])
-            start_idx, end_idx = selected_pairs[0]
-            print(f"[ICLT] Selected skip block: {start_idx} → {end_idx}")
-        else:
-            start_idx, end_idx = config["layer_to_skip"]
+        # Calculate start and end IDs, and number of layers
+        start_ids = sorted([x[0] for x in selected_blocks])
+        end_ids = sorted([x[1] for x in selected_blocks])
+        num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
+        num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
 
-        # 3. hidden state 없을 시 자동 생성
-        if not os.path.exists(config["a1_path"]) or not os.path.exists(config["a2_path"]):
-            print("[ICLT] a1/a2 hidden states not found. Extracting from model...")
-            cosine_dist(config)
+        for i in range(len(selected_blocks)):
+            print(f"[ICLT] Extracting hidden states for block {start_ids[i]} to {end_ids[i]}")
+            cosine_dist(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
 
-        # 4. ICLT 학습
-        print("[ICLT] Fitting ICLT transforms...")
-        fit_iclt(
-            x_path=config["a1_path"],
-            y_path=config["a2_path"],
-            save_dir=iclt_save_dir,
-            K=config["k"],
-            rank=config.get("rank", 256)
-        )
+            print("[ICLT] Fitting T_k matrices...")
+            fit_iclt(
+                x_path=config["a1_path"],
+                y_path=config["a2_path"],
+                save_dir="./ICLT_weights/",
+                K=config["k"],
+                rank=config.get("rank", 256)
+            )
 
-        # 5. 모델에 adapter 삽입
-        model = ICLTSkipModel(
-            base_model=model,
-            adapter_dir=iclt_save_dir,
-            K=config["k"],
-            rank=config.get("rank", 256),
-            start_idx=start_idx,
-            end_idx=end_idx
-        )
+            print("[ICLT] Loading base model and applying ICLT...")
+            model = AutoModelForCausalLM.from_pretrained(
+                config["model_name"],
+                torch_dtype=torch.bfloat16,
+                device_map="auto"
+            )
+            model = ICLTSkipModel(
+                base_model=model,
+                adapter_dir="./ICLT_weights/",
+                K=config["k"],
+                rank=config.get("rank", 256),
+                start_idx=start_ids[i],
+                end_idx=end_ids[i]
+            )
 
-        # 6. 저장 후 evaluator 호출
-        print(f"[ICLT] Saving model to {save_path}...")
-        model.save_pretrained(save_path)
+            tokenizer = AutoTokenizer.from_pretrained(config["model_name"])
+            tokenizer.pad_token = tokenizer.eos_token
 
-        tokenizer = AutoTokenizer.from_pretrained(config["model_name"])
-        tokenizer.pad_token = tokenizer.eos_token
-        tokenizer.save_pretrained(save_path)
+            save_path = f"./outputs/iclt_model_block_{start_ids[i]}_{end_ids[i]}"
+            os.makedirs(save_path, exist_ok=True)
+            model.save_pretrained(save_path)
+            tokenizer.save_pretrained(save_path)
 
-        print("[ICLT] Running evaluator...")
-        results = evaluator(
-            model_path=save_path,
-            tasks=config.get("tasks", "default"),
-            **config
-        )
-
-        print("[ICLT] Evaluation Results:")
-        print(results)
-        return
+            # store latest model path for evaluator
+            path = save_path
 
     else:
         signature = inspect.signature(cosine_dist)
