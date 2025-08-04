@@ -11,6 +11,7 @@ from .cosine_dist import cosine_dist
 from .distance import profile_distances
 from .evaluator import evaluator
 from .lstsq import lstsq
+from .arm import arm    # New ARM module
 from .utils import seed_all, select_non_overlapping_blocks
 
 # Initialize colorama for Windows compatibility
@@ -28,101 +29,40 @@ seed_all()
 
 def ReplaceMe_pipeline(config):
     # Extract the relevant parameters based on function signatures
-    from .cosine_dist import cosine_dist
-    from .distance import profile_distances
-    from .evaluator import evaluator
-    from .lstsq import lstsq
-    from .distance import profile_distances
     signature = inspect.signature(profile_distances)
     filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-    if config['distances_path'] is None:
+    
+    # ARM doesn't need distance profiling, it does its own analysis
+    if config["method"] != "arm" and config['distances_path'] is None:
         # Profile distances using filtered configuration
         profile_distances(**filtered_config)
         config['distances_path'] = "./distances.pth"
+    
     # Determine method and apply configurations accordingly
     if config["method"] == "lstsq":
         signature = inspect.signature(lstsq)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         path = lstsq(**filtered_config)
-
-    elif config["method"] == "iclt":
-        from .cosine_dist import cosine_dist
-        from .iclt_fit import fit_iclt
-        from .ICLTSkipModel import ICLTSkipModel
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-        import os
-
-        # Hardcoded paths
-        a1_path = "./activations/a1.pt"
-        a2_path = "./activations/a2.pt"
-        iclt_save_dir = "./ICLT_weights/"
-        os.makedirs(iclt_save_dir, exist_ok=True)
-        save_root = "./outputs"
-
-        # Use cosine_dist for hidden state extraction
-        signature = inspect.signature(cosine_dist)
+    elif config["method"] == "arm":
+        # ARM method - completely different approach
+        signature = inspect.signature(arm)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-
-        # Load average distances and select non-overlapping blocks
-        average_distances = torch.load(filtered_config['distances_path'], weights_only=False)
-        selected_blocks = select_non_overlapping_blocks(
-            average_distances,
-            filtered_config['layers_to_skip'],
-            num_blocks=filtered_config['num_A'],
-            merge_consecutive=filtered_config['merge_consecutive']
-        )
-
-        # Calculate start and end IDs, and number of layers
-        start_ids = sorted([x[0] for x in selected_blocks])
-        end_ids = sorted([x[1] for x in selected_blocks])
-        num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
-        num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
-
-        for i in range(len(selected_blocks)):
-            print(f"[ICLT] Extracting hidden states for block {start_ids[i]} to {end_ids[i]}")
-            cosine_dist(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
-
-            print("[ICLT] Fitting T_k matrices...")
-            fit_iclt(
-                x_path="./activations/a1.pt",
-                y_path="./activations/a2.pt",
-                save_dir="./ICLT_weights/",
-                K=config["k"],
-                rank=config.get("rank", 256)
-            )
-
-            print("[ICLT] Loading base model and applying ICLT...")
-            model = AutoModelForCausalLM.from_pretrained(
-                config["model_name"],
-                torch_dtype=torch.bfloat16,
-                device_map="auto"
-            )
-            model = ICLTSkipModel(
-                base_model=model,
-                adapter_dir="./ICLT_weights/",
-                K=config["k"],
-                rank=config.get("rank", 256),
-                start_idx=start_ids[i],
-                end_idx=end_ids[i]
-            )
-
-            tokenizer = AutoTokenizer.from_pretrained(config["model_name"])
-            tokenizer.pad_token = tokenizer.eos_token
-
-            save_path = f"./outputs/iclt_model_block_{start_ids[i]}_{end_ids[i]}"
-            os.makedirs(save_path, exist_ok=True)
-            model.save_pretrained(save_path)
-            tokenizer.save_pretrained(save_path)
-
-            # store latest model path for evaluator
-            path = save_path
-
+        
+        logging.info(f"{Fore.GREEN}🚀 Starting Adaptive ReplaceMe (ARM){Fore.RESET}")
+        logging.info(f"  SoC Temperature: {config.get('soc_temperature', 70.0)}°C")
+        logging.info(f" Attention Gating: {config.get('use_attention_gating', True)}")
+        logging.info(f" Multi-Scale: {config.get('use_multi_scale', True)}")
+        logging.info(f" Residual-Aware: {config.get('use_residual_aware', True)}")
+        
+        # ARM does its own block selection based on temperature and attention patterns
+        path = arm(**filtered_config)
     else:
+        # Original cosine/other methods
         signature = inspect.signature(cosine_dist)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
         # Load average distances and select non-overlapping blocks
-        average_distances = torch.load(filtered_config['distances_path'], weights_only=False)  
+        average_distances = torch.load(filtered_config['distances_path'])  
         selected_blocks = select_non_overlapping_blocks(
             average_distances, 
             filtered_config['layers_to_skip'], 
@@ -146,20 +86,3 @@ def ReplaceMe_pipeline(config):
     filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
     filtered_config["model_path"] = path
     evaluator(**filtered_config)
-
-def read_config(config_path: str):
-    # Read and return the YAML configuration
-    with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
-
-def run_from_config():
-    # Parse command-line arguments for configuration file path
-    parser = argparse.ArgumentParser(
-        description="Run LSTSQ for linear transform estimation based on a configuration file."
-    )
-    parser.add_argument("--config", type=str, required=True, help="Path to the configuration file.")
-    
-    # Execute pipeline based on parsed configuration
-    args = parser.parse_args()
-    config = read_config(args.config)
-    ReplaceMe_pipeline(config)
