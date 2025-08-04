@@ -44,18 +44,43 @@ def ReplaceMe_pipeline(config):
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         path = lstsq(**filtered_config)
     elif config["method"] == "arm":
-        # ARM method - completely different approach
+        # ARM method - uses ReplaceMe's proven cosine distance analysis FIRST
         signature = inspect.signature(arm)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
-        logging.info(f"{Fore.GREEN}🚀 Starting Adaptive ReplaceMe (ARM){Fore.RESET}")
+        logging.info(f"{Fore.GREEN} Starting Adaptive ReplaceMe (ARM){Fore.RESET}")
         logging.info(f"  SoC Temperature: {config.get('soc_temperature', 70.0)}°C")
         logging.info(f" Attention Gating: {config.get('use_attention_gating', True)}")
         logging.info(f" Multi-Scale: {config.get('use_multi_scale', True)}")
         logging.info(f" Residual-Aware: {config.get('use_residual_aware', True)}")
         
-        # ARM does its own block selection based on temperature and attention patterns
-        path = arm(**filtered_config)
+        # ARM ALSO needs distance profiling for block selection (like ReplaceMe)
+        if config['distances_path'] is None:
+            profile_distances(**{k: v for k, v in config.items() if k in inspect.signature(profile_distances).parameters})
+            config['distances_path'] = "./distances.pth"
+        
+        # Load average distances and select non-overlapping blocks (SAME as ReplaceMe)
+        average_distances = torch.load(config['distances_path'])  
+        selected_blocks = select_non_overlapping_blocks(
+            average_distances, 
+            config['layers_to_skip'], 
+            num_blocks=config['num_A'], 
+            merge_consecutive=config['merge_consecutive']
+        )
+        
+        logging.info(f" Selected {len(selected_blocks)} blocks based on cosine distance: {selected_blocks}")
+        
+        # Calculate start and end IDs, and number of layers (SAME as ReplaceMe)
+        start_ids = sorted([x[0] for x in selected_blocks])
+        end_ids = sorted([x[1] for x in selected_blocks])
+        num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
+        num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
+        
+        # Iterate over each selected block using ARM (like ReplaceMe but with ARM function)
+        for i in range(len(selected_blocks)):
+            logging.info(f"🎯 Applying ARM to block {start_ids[i]}-{end_ids[i]} (#{i+1}/{len(selected_blocks)})")
+            path = arm(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
+            filtered_config["model_path"] = path
     else:
         # Original cosine/other methods
         signature = inspect.signature(cosine_dist)

@@ -1,4 +1,3 @@
-import argparse
 import gc
 import logging
 import os
@@ -339,60 +338,48 @@ def arm_streaming(
     save_path: Optional[str] = None,
     token: Optional[str] = None,
     save_transform_only: bool = False,
-    # Compatibility parameters
+    # ReplaceMe compatibility parameters - for cosine distance based block selection
+    start_id: int = 0,
+    end_id: int = 0,
+    num_layer: int = 0,
+    distances_path: str = "./distances.pth",
+    num_A: int = 1,
+    merge_consecutive: bool = True,
+    accurate: bool = False,
+    # Additional compatibility
     **kwargs
 ) -> str:
     """
     Memory-efficient streaming ARM implementation
+    Now works with ReplaceMe's cosine distance block selection!
+    
+    Args:
+        start_id: Starting layer index (from ReplaceMe block selection)
+        end_id: Ending layer index (from ReplaceMe block selection)  
+        num_layer: Number of previous layers removed (from ReplaceMe)
+        ... (other args same as before)
     """
     
-    log_memory_usage("Initial")
+    log_memory_usage("ARM Initial")
     
-    device_map = "auto" if torch.cuda.is_available() else "cpu"
-    quantization_config = None
-    
-    if use_4bit:
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16
+    # If start_id and end_id are provided (from ReplaceMe pipeline), use them directly
+    if start_id > 0 and end_id > start_id:
+        target_blocks = [(start_id, end_id)]
+        logging.info(f"🎯 ARM using ReplaceMe-selected block: {start_id}-{end_id}")
+    else:
+        # Fallback to temperature-based selection (old behavior)
+        logging.warning("⚠️  No ReplaceMe block selection found, using temperature-based selection")
+        
+        # Initialize temperature selector for fallback
+        temp_selector = TemperatureAdaptiveSelector()
+        initial_complexities = [0.5] * 32  # Assume 32 layers for fallback
+        target_blocks = temp_selector.get_blocks_to_replace(
+            soc_temperature, 32, initial_complexities, layers_to_skip
         )
-
-    # Load model
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        device_map=device_map,
-        quantization_config=quantization_config,
-        output_hidden_states=True,
-        output_attentions=use_attention_gating,
-        token=token
-    )
-
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    if not tokenizer.pad_token:
-        tokenizer.pad_token = tokenizer.eos_token
-    
-    model.eval()
-    
-    log_memory_usage("Model loaded")
-    
-    # Initialize streaming processors
-    hidden_size = model.config.hidden_size
-    num_layers = model.config.num_hidden_layers
-    
-    # Temperature-based selection (we need to do a quick pass first to get rough estimates)
-    temp_selector = TemperatureAdaptiveSelector()
-    
-    # For initial block selection, use uniform complexity
-    initial_complexities = [0.5] * num_layers
-    target_blocks = temp_selector.get_blocks_to_replace(
-        soc_temperature, num_layers, initial_complexities, layers_to_skip
-    )
-    
-    if not target_blocks:
-        logging.info(f"🌡️ Temperature {soc_temperature}°C too low, no compression needed")
-        return model_path
+        
+        if not target_blocks:
+            logging.info(f"🌡️ Temperature {soc_temperature}°C too low, no compression needed")
+            return model_path
     
     # Initialize streaming processors
     attention_analyzer = StreamingAttentionAnalyzer(num_layers) if use_attention_gating else None
