@@ -11,7 +11,7 @@ from .cosine_dist import cosine_dist
 from .distance import profile_distances
 from .evaluator import evaluator
 from .lstsq import lstsq
-from .arm import arm    # New ARM module
+from .arm_streaming import arm    # New ARM module
 from .utils import seed_all, select_non_overlapping_blocks
 
 # Initialize colorama for Windows compatibility
