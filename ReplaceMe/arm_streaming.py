@@ -1,3 +1,4 @@
+import argparse
 import gc
 import logging
 import os
@@ -381,6 +382,39 @@ def arm_streaming(
             logging.info(f"🌡️ Temperature {soc_temperature}°C too low, no compression needed")
             return model_path
     
+    device_map = "auto" if torch.cuda.is_available() else "cpu"
+    quantization_config = None
+    
+    if use_4bit:
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16
+        )
+
+    # Load model
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        device_map=device_map,
+        quantization_config=quantization_config,
+        output_hidden_states=True,
+        output_attentions=use_attention_gating,
+        token=token
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    if not tokenizer.pad_token:
+        tokenizer.pad_token = tokenizer.eos_token
+    
+    model.eval()
+    
+    log_memory_usage("Model loaded")
+    
+    # Get model dimensions
+    hidden_size = model.config.hidden_size
+    num_layers = model.config.num_hidden_layers
+    
     # Initialize streaming processors
     attention_analyzer = StreamingAttentionAnalyzer(num_layers) if use_attention_gating else None
     activation_processor = StreamingActivationProcessor(hidden_size, target_blocks)
@@ -475,16 +509,18 @@ def arm_streaming(
     # Get final results from streaming processors
     if use_attention_gating and attention_analyzer:
         final_complexities = attention_analyzer.get_final_complexities()
-        # Re-select blocks based on actual attention complexity
-        target_blocks = temp_selector.get_blocks_to_replace(
-            soc_temperature, num_layers, final_complexities, layers_to_skip
-        )
+        # Re-select blocks based on actual attention complexity (optional refinement)
+        # target_blocks = temp_selector.get_blocks_to_replace(
+        #     soc_temperature, num_layers, final_complexities, layers_to_skip
+        # )
     
     # Compute transforms from accumulated statistics
     transforms = activation_processor.compute_final_transforms()
     
     # Clean up processors
-    del activation_processor, attention_analyzer
+    del activation_processor
+    if attention_analyzer:
+        del attention_analyzer
     force_cleanup()
     log_memory_usage("Transforms computed")
     
@@ -524,10 +560,14 @@ def arm_streaming(
     
     final_path = f"{save_path}_streaming"
     model.save_pretrained(final_path)
-    tokenizer.save_pretrained(final_path)
+    
+    # Reload tokenizer for saving (in case it was modified)
+    tokenizer_for_save = AutoTokenizer.from_pretrained(model_path)
+    tokenizer_for_save.save_pretrained(final_path)
     
     if save_transform_only:
         # Save minimal results only
+        temp_selector = TemperatureAdaptiveSelector()  # Reinitialize for compression ratio
         results = {
             'temperature': soc_temperature,
             'blocks_replaced': target_blocks,
