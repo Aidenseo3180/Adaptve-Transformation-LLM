@@ -148,7 +148,7 @@ class StreamingAttentionAnalyzer:
                 avg_complexity = 0.5  # Default
             final_complexities.append(avg_complexity)
         
-        logging.info(f"🧠 Processed attention patterns: {self.sample_counts}")
+        print(f" Processed attention patterns: {self.sample_counts}")
         return final_complexities
 
 
@@ -251,14 +251,14 @@ class StreamingActivationProcessor:
                     
                     transforms[block_key] = transform.t().to(torch.float16)  # Convert back to float16
                     
-                    logging.info(f"✅ Computed transform for block {start_idx}-{end_idx} "
+                    print(f" Computed transform for block {start_idx}-{end_idx} "
                                f"({processor['sample_count']} samples)")
                     
                 except Exception as e:
-                    logging.warning(f"Failed to compute transform for {block_key}: {e}")
+                    print(f"Failed to compute transform for {block_key}: {e}")
                     transforms[block_key] = torch.eye(self.hidden_size, dtype=torch.float16)
             else:
-                logging.warning(f"Not enough samples for block {block_key}, using identity")
+                print(f"Not enough samples for block {block_key}, using identity")
                 transforms[block_key] = torch.eye(self.hidden_size, dtype=torch.float16)
         
         return transforms
@@ -288,8 +288,8 @@ class TemperatureAdaptiveSelector:
         compression_ratio = self.select_compression_ratio(temperature)
         num_layers_to_remove = int(total_layers * compression_ratio)
         
-        logging.info(f"🌡️ Temperature: {temperature}°C → {compression_ratio:.1%} compression")
-        logging.info(f"📊 Removing {num_layers_to_remove} out of {total_layers} layers")
+        print(f" Temperature: {temperature}°C → {compression_ratio:.1%} compression")
+        print(f" Removing {num_layers_to_remove} out of {total_layers} layers")
         
         if num_layers_to_remove == 0:
             return []
@@ -317,7 +317,7 @@ class TemperatureAdaptiveSelector:
                 best_blocks.append((start_idx, end_idx))
                 used_layers.update(block_layers)
                 remaining_to_remove -= (end_idx - start_idx)
-                logging.info(f"🎯 Selected block {start_idx}-{end_idx} (complexity: {complexity:.3f})")
+                print(f" Selected block {start_idx}-{end_idx} (complexity: {complexity:.3f})")
         
         return best_blocks
 
@@ -366,10 +366,10 @@ def arm_streaming(
     # If start_id and end_id are provided (from ReplaceMe pipeline), use them directly
     if start_id > 0 and end_id > start_id:
         target_blocks = [(start_id, end_id)]
-        logging.info(f"🎯 ARM using ReplaceMe-selected block: {start_id}-{end_id}")
+        print(f" ARM using ReplaceMe-selected block: {start_id}-{end_id}")
     else:
         # Fallback to temperature-based selection (old behavior)
-        logging.warning("⚠️  No ReplaceMe block selection found, using temperature-based selection")
+        print("⚠️  No ReplaceMe block selection found, using temperature-based selection")
         
         # Initialize temperature selector for fallback
         temp_selector = TemperatureAdaptiveSelector()
@@ -379,7 +379,7 @@ def arm_streaming(
         )
         
         if not target_blocks:
-            logging.info(f"🌡️ Temperature {soc_temperature}°C too low, no compression needed")
+            print(f". Temperature {soc_temperature}°C too low, no compression needed")
             return model_path
     
     device_map = "auto" if torch.cuda.is_available() else "cpu"
@@ -463,7 +463,7 @@ def arm_streaming(
     batch_count = 0
     max_batches = min(50, len(dataloader))  # Limit for memory safety
     
-    logging.info(f"🚀 Starting streaming processing of {max_batches} batches")
+    print(f" Starting streaming processing of {max_batches} batches")
     
     for batch in tqdm(dataloader, desc=f"{Fore.GREEN}Streaming ARM Processing{Fore.RESET}"):
         if batch_count >= max_batches:
@@ -550,7 +550,7 @@ def arm_streaming(
             new_weight = (transform @ original_weight).to(torch.bfloat16)
             target_layer.weight = nn.Parameter(new_weight)
             
-            logging.info(f"✅ Applied streaming transform to block {start_idx}-{end_idx}")
+            print(f" Applied streaming transform to block {start_idx}-{end_idx}")
     
     # Save model
     if save_path is None:
@@ -575,7 +575,7 @@ def arm_streaming(
         }
         torch.save(results, f"{final_path}_results.pth")
     
-    logging.info(f"🎉 Streaming ARM completed! Model saved to: {final_path}")
+    print(f" Streaming ARM completed! Model saved to: {final_path}")
     log_memory_usage("Final")
     
     # Final cleanup

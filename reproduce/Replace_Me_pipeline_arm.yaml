@@ -28,13 +28,13 @@ min_distance_layer: 20
 tasks: 
   winogrande:
     fewshots: 5
-  boolq:
-    fewshots: 0
-  piqa:
-    fewshots: 0
-  race:
-    fewshots: 0
-  openbookqa:
-    fewshots: 0
-  sciq:
-    fewshots: 0
+  # boolq:
+  #   fewshots: 0
+  # piqa:
+  #   fewshots: 0
+  # race:
+  #   fewshots: 0
+  # openbookqa:
+  #   fewshots: 0
+  # sciq:
+  #   fewshots: 0

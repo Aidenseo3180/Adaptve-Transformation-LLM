@@ -48,11 +48,11 @@ def ReplaceMe_pipeline(config):
         signature = inspect.signature(arm)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
-        logging.info(f"{Fore.GREEN} Starting Adaptive ReplaceMe (ARM){Fore.RESET}")
-        logging.info(f"  SoC Temperature: {config.get('soc_temperature', 70.0)}°C")
-        logging.info(f" Attention Gating: {config.get('use_attention_gating', True)}")
-        logging.info(f" Multi-Scale: {config.get('use_multi_scale', True)}")
-        logging.info(f" Residual-Aware: {config.get('use_residual_aware', True)}")
+        print(f"{Fore.GREEN} Starting Adaptive ReplaceMe (ARM){Fore.RESET}")
+        print(f"  SoC Temperature: {config.get('soc_temperature', 70.0)}°C")
+        print(f" Attention Gating: {config.get('use_attention_gating', True)}")
+        print(f" Multi-Scale: {config.get('use_multi_scale', True)}")
+        print(f" Residual-Aware: {config.get('use_residual_aware', True)}")
         
         # ARM ALSO needs distance profiling for block selection (like ReplaceMe)
         if config['distances_path'] is None:
@@ -68,7 +68,7 @@ def ReplaceMe_pipeline(config):
             merge_consecutive=config['merge_consecutive']
         )
         
-        logging.info(f" Selected {len(selected_blocks)} blocks based on cosine distance: {selected_blocks}")
+        print(f" Selected {len(selected_blocks)} blocks based on cosine distance: {selected_blocks}")
         
         # Calculate start and end IDs, and number of layers (SAME as ReplaceMe)
         start_ids = sorted([x[0] for x in selected_blocks])
@@ -78,7 +78,7 @@ def ReplaceMe_pipeline(config):
         
         # Iterate over each selected block using ARM (like ReplaceMe but with ARM function)
         for i in range(len(selected_blocks)):
-            logging.info(f"🎯 Applying ARM to block {start_ids[i]}-{end_ids[i]} (#{i+1}/{len(selected_blocks)})")
+            print(f" Applying ARM to block {start_ids[i]}-{end_ids[i]} (#{i+1}/{len(selected_blocks)})")
             path = arm(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
     else:
