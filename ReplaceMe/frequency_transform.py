@@ -331,7 +331,7 @@ def frequency_transform(
     # Compute Frequency Domain Transform
     print(f" Computing Frequency Domain Transform...")
     transform = freq_transform.compute_frequency_transform(a1.float(), a2.float())
-    
+    print(f" Computing Frequency Domain Transform Completed...")
     # Clean up activations
     del model, a1, a2
     gc.collect()
