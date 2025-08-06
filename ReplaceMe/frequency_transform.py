@@ -34,7 +34,7 @@ class FrequencyDomainTransform:
         
     def compute_frequency_transform(self, X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
         """
-        Compute transform in frequency domain for better conditioning
+        Compute transform in frequency domain using chunked processing for memory efficiency
         
         Args:
             X: Input activations [samples, hidden_size]
@@ -44,76 +44,211 @@ class FrequencyDomainTransform:
             T_spatial: Transform matrix [hidden_size, hidden_size] in spatial domain
         """
         
-        print(f" Computing Frequency Domain Transform for {X.shape[0]} samples")
+        num_samples, hidden_size = X.shape
+        print(f"Computing Chunked Frequency Domain Transform for {num_samples} samples")
         
-        # Convert to float64 for numerical precision in FFT
-        X_f64 = X.to(torch.float64)
-        Y_f64 = Y.to(torch.float64)
+        # Calculate optimal chunk size based on available memory
+        chunk_size = self._calculate_optimal_chunk_size(num_samples, hidden_size)
+        total_chunks = (num_samples + chunk_size - 1) // chunk_size
         
-        # 1. Forward FFT - transform to frequency domain
-        X_freq = torch.fft.fft(X_f64, dim=-1)  # [samples, hidden_size] complex
-        Y_freq = torch.fft.fft(Y_f64, dim=-1)  # [samples, hidden_size] complex
+        print(f"Processing in {total_chunks} chunks of size {chunk_size}")
         
-        print(f" FFT completed - X_freq: {X_freq.shape}, dtype: {X_freq.dtype}")
+        # Initialize accumulators for frequency-wise statistics
+        gram_accumulator = torch.zeros(hidden_size, dtype=torch.complex64, device='cpu')
+        cross_accumulator = torch.zeros(hidden_size, dtype=torch.complex64, device='cpu')
         
-        # 2. Frequency-wise least squares (each frequency independently)
-        T_freq = self._solve_frequency_wise(X_freq, Y_freq)
+        # Process in chunks to avoid memory overflow
+        for chunk_idx in tqdm(range(total_chunks), desc="Chunked Frequency Transform"):
+            start_idx = chunk_idx * chunk_size
+            end_idx = min(start_idx + chunk_size, num_samples)
+            
+            # Extract chunk (keep small!)
+            X_chunk = X[start_idx:end_idx].clone()  # [chunk_size, hidden_size]
+            Y_chunk = Y[start_idx:end_idx].clone()
+            
+            # Process this chunk
+            gram_chunk, cross_chunk = self._process_frequency_chunk(X_chunk, Y_chunk)
+            
+            # Accumulate statistics
+            gram_accumulator += gram_chunk.cpu()
+            cross_accumulator += cross_chunk.cpu()
+            
+            # Aggressive cleanup
+            del X_chunk, Y_chunk, gram_chunk, cross_chunk
+            
+            # Memory cleanup every few chunks
+            if chunk_idx % 5 == 0:
+                torch.cuda.empty_cache()
+                self._log_memory_usage(f"Chunk {chunk_idx + 1}/{total_chunks}")
         
-        # 3. Convert back to spatial domain
+        print(f"Completed chunked processing of {total_chunks} chunks")
+        
+        # Solve frequency-wise transforms from accumulated statistics
+        T_freq = self._solve_from_accumulated_stats(gram_accumulator, cross_accumulator)
+        
+        # Convert back to spatial domain
         T_spatial = self._frequency_to_spatial_transform(T_freq)
         
-        # 4. Validation
-        self._validate_transform(X_f64, Y_f64, T_spatial)
+        # Validation with a small subset (to avoid memory issues)
+        self._validate_transform_chunked(X, Y, T_spatial, chunk_size=min(10000, num_samples))
         
-        # Convert back to original precision
         return T_spatial.to(X.dtype)
     
-    def _solve_frequency_wise(self, X_freq: torch.Tensor, Y_freq: torch.Tensor) -> torch.Tensor:
-        """
-        Solve least squares independently for each frequency bin
+    def _calculate_optimal_chunk_size(self, num_samples: int, hidden_size: int) -> int:
+        """Calculate optimal chunk size based on available memory"""
         
-        Args:
-            X_freq, Y_freq: [samples, hidden_size] complex tensors
+        # Estimate memory per sample in MB
+        # Each sample: hidden_size * (2 complex64 for FFT) * 8 bytes ≈ hidden_size * 16 bytes
+        memory_per_sample_mb = hidden_size * 16 / (1024 * 1024)
+        
+        # Target: Use max 2GB for chunk processing
+        target_memory_gb = 2.0
+        target_memory_mb = target_memory_gb * 1024
+        
+        optimal_chunk_size = int(target_memory_mb / memory_per_sample_mb)
+        
+        # Reasonable bounds
+        min_chunk_size = 1000
+        max_chunk_size = min(100000, num_samples)
+        
+        chunk_size = max(min_chunk_size, min(optimal_chunk_size, max_chunk_size))
+        
+        print(f"Calculated chunk size: {chunk_size} (~{chunk_size * memory_per_sample_mb:.1f}MB per chunk)")
+        
+        return chunk_size
+    
+    def _process_frequency_chunk(self, X_chunk: torch.Tensor, Y_chunk: torch.Tensor) -> tuple:
+        """Process a single chunk in frequency domain"""
+        
+        # Convert to float32 for FFT (good balance of precision and memory)
+        X_f32 = X_chunk.to(torch.float32)
+        Y_f32 = Y_chunk.to(torch.float32)
+        
+        # FFT transform
+        X_freq = torch.fft.fft(X_f32, dim=-1)  # [chunk_size, hidden_size] complex64
+        Y_freq = torch.fft.fft(Y_f32, dim=-1)
+        
+        # Clean up float32 tensors immediately
+        del X_f32, Y_f32
+        
+        chunk_size, hidden_size = X_freq.shape
+        
+        # Compute gram and cross-correlation for this chunk
+        gram_chunk = torch.zeros(hidden_size, dtype=torch.complex64, device=X_freq.device)
+        cross_chunk = torch.zeros(hidden_size, dtype=torch.complex64, device=X_freq.device)
+        
+        # Frequency-wise computation (vectorized for efficiency)
+        for k in range(hidden_size):
+            x_k = X_freq[:, k]  # [chunk_size] complex
+            y_k = Y_freq[:, k]  # [chunk_size] complex
             
-        Returns:
-            T_freq: [hidden_size] complex tensor
-        """
+            # Accumulate: gram_k += x_k^H @ x_k, cross_k += x_k^H @ y_k
+            gram_chunk[k] = torch.conj(x_k) @ x_k
+            cross_chunk[k] = torch.conj(x_k) @ y_k
         
-        num_samples, hidden_size = X_freq.shape
-        T_freq = torch.zeros(hidden_size, dtype=torch.complex128, device=X_freq.device)
+        # Clean up frequency domain tensors
+        del X_freq, Y_freq
         
-        print(f" Solving frequency-wise transforms for {hidden_size} frequency bins")
+        return gram_chunk, cross_chunk
+    
+    def _solve_from_accumulated_stats(self, gram_accum: torch.Tensor, cross_accum: torch.Tensor) -> torch.Tensor:
+        """Solve frequency transforms from accumulated statistics"""
         
-        for k in tqdm(range(hidden_size), desc=f"{Fore.BLUE}Frequency Transform{Fore.RESET}"):
-            # Extract k-th frequency bin across all samples
-            x_k = X_freq[:, k]  # [samples] complex
-            y_k = Y_freq[:, k]  # [samples] complex
-            
-            # Compute least squares: T_k = (x_k^H * x_k)^(-1) * x_k^H * y_k
-            # where ^H denotes conjugate transpose
-            
-            gram = torch.conj(x_k) @ x_k  # x_k^H * x_k (complex scalar)
-            cross = torch.conj(x_k) @ y_k  # x_k^H * y_k (complex scalar)
+        hidden_size = len(gram_accum)
+        T_freq = torch.zeros(hidden_size, dtype=torch.complex64)
+        
+        print(f"Solving frequency-wise transforms from accumulated statistics")
+        
+        # Solve for each frequency independently
+        for k in range(hidden_size):
+            gram_k = gram_accum[k]
+            cross_k = cross_accum[k]
             
             # Regularization for numerical stability
-            reg_strength = 1e-8 * torch.abs(gram)
-            gram_reg = gram + reg_strength
+            gram_magnitude = torch.abs(gram_k)
+            reg_strength = 1e-8 * gram_magnitude
+            gram_reg = gram_k + reg_strength
             
-            # Solve for T_k
-            if torch.abs(gram_reg) > 1e-12:  # Check for numerical stability
-                t_k = cross / gram_reg
+            # Solve: T_k = cross_k / gram_k
+            if torch.abs(gram_reg) > 1e-12:
+                T_freq[k] = cross_k / gram_reg
             else:
-                t_k = torch.complex(torch.tensor(0.0), torch.tensor(0.0))
-                logging.warning(f"Frequency bin {k} has near-zero gram matrix, using zero transform")
-            
-            T_freq[k] = t_k
+                T_freq[k] = torch.complex(torch.tensor(0.0), torch.tensor(0.0))
+                if k < 10:  # Only log first few warnings
+                    print(f"Warning: Frequency bin {k} has near-zero gram matrix")
         
         # Log frequency domain statistics
         magnitude_stats = torch.abs(T_freq)
-        print(f" Frequency transform stats - Mean: {magnitude_stats.mean():.4f}, "
-                    f"Std: {magnitude_stats.std():.4f}, Max: {magnitude_stats.max():.4f}")
+        print(f"Frequency transform stats:")
+        print(f"   Mean magnitude: {magnitude_stats.mean():.4f}")
+        print(f"   Std magnitude: {magnitude_stats.std():.4f}")
+        print(f"   Max magnitude: {magnitude_stats.max():.4f}")
+        print(f"   Num zeros: {(magnitude_stats < 1e-10).sum()}/{len(magnitude_stats)}")
         
         return T_freq
+    
+    def _validate_transform_chunked(self, X: torch.Tensor, Y: torch.Tensor, 
+                                  T_spatial: torch.Tensor, chunk_size: int = 10000):
+        """Validate transform using a subset to avoid memory issues"""
+        
+        # Use only a subset for validation
+        subset_size = min(chunk_size, len(X))
+        indices = torch.randperm(len(X))[:subset_size]
+        
+        X_subset = X[indices]
+        Y_subset = Y[indices]
+        
+        # Test reconstruction
+        Y_pred = X_subset @ T_spatial.t()
+        
+        # Compute errors
+        mse_error = torch.mean((Y_pred - Y_subset) ** 2).item()
+        relative_error = (torch.norm(Y_pred - Y_subset) / torch.norm(Y_subset)).item()
+        
+        # Compute correlation
+        Y_flat = Y_subset.flatten()
+        Y_pred_flat = Y_pred.flatten()
+        
+        if len(Y_flat) > 1:
+            correlation = torch.corrcoef(torch.stack([Y_flat, Y_pred_flat]))[0, 1].item()
+        else:
+            correlation = 1.0
+        
+        print(f"Transform validation (subset of {subset_size} samples):")
+        print(f"   MSE Error: {mse_error:.6f}")
+        print(f"   Relative Error: {relative_error:.4f} ({relative_error*100:.2f}%)")
+        print(f"   Correlation: {correlation:.4f}")
+        
+        # Quality assessment
+        if relative_error < 0.1:
+            print("Excellent transform quality!")
+        elif relative_error < 0.2:
+            print("Good transform quality")
+        else:
+            print("Warning: Transform quality may be suboptimal")
+        
+        # Clean up
+        del X_subset, Y_subset, Y_pred
+    
+    def _log_memory_usage(self, stage: str = ""):
+        """Log current memory usage"""
+        try:
+            import psutil
+            
+            # RAM usage
+            ram_info = psutil.virtual_memory()
+            ram_used_gb = ram_info.used / (1024**3)
+            ram_percent = ram_info.percent
+            
+            # GPU usage
+            gpu_used_gb = 0
+            if torch.cuda.is_available():
+                gpu_used_gb = torch.cuda.memory_allocated() / (1024**3)
+            
+            print(f"Memory usage - {stage} - RAM: {ram_used_gb:.1f}GB ({ram_percent:.1f}%), GPU: {gpu_used_gb:.1f}GB")
+            
+        except Exception as e:
+            print(f"Could not log memory usage: {e}")
     
     def _frequency_to_spatial_transform(self, T_freq: torch.Tensor) -> torch.Tensor:
         """
@@ -129,7 +264,7 @@ class FrequencyDomainTransform:
             T_spatial: [hidden_size, hidden_size] real tensor
         """
         
-        print(f" Converting frequency transform to spatial domain")
+        logging.info(f"Converting frequency transform to spatial domain")
         
         # Method: Use the fact that multiplication in frequency domain 
         # corresponds to circular convolution in spatial domain
@@ -147,41 +282,13 @@ class FrequencyDomainTransform:
                 shift = (i - j) % hidden_size
                 T_spatial[i, j] = impulse_response[shift]
         
-        print(f" Spatial transform matrix constructed: {T_spatial.shape}")
+        logging.info(f"Spatial transform matrix constructed: {T_spatial.shape}")
         
         # Log spatial domain statistics
-        print(f" Spatial transform stats - Mean: {T_spatial.mean():.4f}, "
+        logging.info(f"Spatial transform stats - Mean: {T_spatial.mean():.4f}, "
                     f"Std: {T_spatial.std():.4f}, Frobenius norm: {torch.norm(T_spatial):.4f}")
         
         return T_spatial
-    
-    def _validate_transform(self, X: torch.Tensor, Y: torch.Tensor, T_spatial: torch.Tensor):
-        """Validate the computed transform"""
-        
-        # Test reconstruction
-        Y_pred = X @ T_spatial.t()  # Apply transform
-        
-        # Compute reconstruction error
-        mse_error = torch.mean((Y_pred - Y) ** 2).item()
-        relative_error = (torch.norm(Y_pred - Y) / torch.norm(Y)).item()
-        
-        # Compute correlation
-        Y_flat = Y.flatten()
-        Y_pred_flat = Y_pred.flatten()
-        correlation = torch.corrcoef(torch.stack([Y_flat, Y_pred_flat]))[0, 1].item()
-        
-        print(f" Transform validation:")
-        print(f"   MSE Error: {mse_error:.6f}")
-        print(f"   Relative Error: {relative_error:.4f} ({relative_error*100:.2f}%)")
-        print(f"   Correlation: {correlation:.4f}")
-        
-        # Quality assessment
-        if relative_error < 0.1:
-            print(f" {Fore.GREEN}Excellent transform quality!{Fore.RESET}")
-        elif relative_error < 0.2:
-            print(f" {Fore.YELLOW}Good transform quality{Fore.RESET}")
-        else:
-            print(f"  {Fore.RED}Transform quality may be suboptimal{Fore.RESET}")
 
 
 def frequency_transform(
@@ -222,8 +329,8 @@ def frequency_transform(
         Path where transformed model is saved
     """
     
-    print(f" {Fore.GREEN}Starting Frequency Domain Transform{Fore.RESET}")
-    print(f" Target block: {start_id}-{end_id} (selected by cosine distance)")
+    logging.info(f"Starting Frequency Domain Transform")
+    logging.info(f"Target block: {start_id}-{end_id} (selected by cosine distance)")
     
     device_map = "auto" if torch.cuda.is_available() else "cpu"
     quantization_config = None
@@ -282,9 +389,9 @@ def frequency_transform(
     a2 = torch.empty((dataset_size * max_length, hidden_size), dtype=torch.bfloat16, device='cpu')
     
     cnt = 0
-    print(f" Collecting activations for frequency domain analysis...")
+    logging.info(f"Collecting activations for frequency domain analysis...")
     
-    for batch in tqdm(dataloader, desc=f"{Fore.CYAN}Gathering Activations{Fore.RESET}"):
+    for batch in tqdm(dataloader, desc="Gathering Activations"):
         inputs = tokenizer(
             batch, return_tensors="pt", padding="longest", 
             max_length=max_length, truncation=True
@@ -326,19 +433,19 @@ def frequency_transform(
     a1 = a1[:cnt]
     a2 = a2[:cnt]
     
-    print(f" Collected {cnt} activation samples")
+    logging.info(f"Collected {cnt} activation samples")
     
     # Compute Frequency Domain Transform
-    print(f" Computing Frequency Domain Transform...")
+    logging.info(f"Computing Frequency Domain Transform...")
     transform = freq_transform.compute_frequency_transform(a1.float(), a2.float())
-    print(f" Computing Frequency Domain Transform Completed...")
+    
     # Clean up activations
     del model, a1, a2
     gc.collect()
     torch.cuda.empty_cache()
     
     # Reload model for transformation
-    print(f" Reloading model for transformation...")
+    logging.info(f"Reloading model for transformation...")
     model = AutoModelForCausalLM.from_pretrained(
         model_path, device_map='cpu', torch_dtype=torch.bfloat16
     )
@@ -355,7 +462,7 @@ def frequency_transform(
     new_weight = (transform_64 @ original_weight).to(torch.bfloat16)
     target_layer.weight = nn.Parameter(new_weight)
     
-    print(f" Applied Frequency Domain Transform to layer {start_id}")
+    logging.info(f"Applied Frequency Domain Transform to layer {start_id}")
     
     # Save model
     if save_path is None:
@@ -379,8 +486,8 @@ def frequency_transform(
             'hidden_size': hidden_size
         }, f"{final_path}_freq_transform.pth")
     
-    print(f" {Fore.GREEN}Frequency Domain Transform completed!{Fore.RESET}")
-    print(f" Model saved to: {final_path}")
+    logging.info(f"Frequency Domain Transform completed!")
+    logging.info(f"Model saved to: {final_path}")
     
     # Final cleanup
     del model, transform
