@@ -433,10 +433,10 @@ def frequency_transform(
     a1 = a1[:cnt]
     a2 = a2[:cnt]
     
-    logging.info(f"Collected {cnt} activation samples")
+    print(f"Collected {cnt} activation samples")
     
     # Compute Frequency Domain Transform
-    logging.info(f"Computing Frequency Domain Transform...")
+    print(f"Computing Frequency Domain Transform...")
     transform = freq_transform.compute_frequency_transform(a1.float(), a2.float())
     
     # Clean up activations
@@ -445,7 +445,7 @@ def frequency_transform(
     torch.cuda.empty_cache()
     
     # Reload model for transformation
-    logging.info(f"Reloading model for transformation...")
+    print(f"Reloading model for transformation...")
     model = AutoModelForCausalLM.from_pretrained(
         model_path, device_map='cpu', torch_dtype=torch.bfloat16
     )
@@ -462,7 +462,7 @@ def frequency_transform(
     new_weight = (transform_64 @ original_weight).to(torch.bfloat16)
     target_layer.weight = nn.Parameter(new_weight)
     
-    logging.info(f"Applied Frequency Domain Transform to layer {start_id}")
+    print(f"Applied Frequency Domain Transform to layer {start_id}")
     
     # Save model
     if save_path is None:
@@ -486,8 +486,8 @@ def frequency_transform(
             'hidden_size': hidden_size
         }, f"{final_path}_freq_transform.pth")
     
-    logging.info(f"Frequency Domain Transform completed!")
-    logging.info(f"Model saved to: {final_path}")
+    print(f"Frequency Domain Transform completed!")
+    print(f"Model saved to: {final_path}")
     
     # Final cleanup
     del model, transform
