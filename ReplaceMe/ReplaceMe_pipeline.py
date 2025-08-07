@@ -8,12 +8,11 @@ from colorama import Fore, Style, init
 
 # Import local modules
 from .cosine_dist import cosine_dist
+from .enhanced_cosine_dist import enhanced_cosine_dist  # NEW: Import our enhanced method
 from .distance import profile_distances
 from .evaluator import evaluator
 from .lstsq import lstsq
-from .arm_streaming import arm    # New ARM module
 from .utils import seed_all, select_non_overlapping_blocks
-from .frequency_transform import frequency_transform
 
 # Initialize colorama for Windows compatibility
 init(autoreset=True)
@@ -44,94 +43,42 @@ def ReplaceMe_pipeline(config):
         signature = inspect.signature(lstsq)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         path = lstsq(**filtered_config)
-    elif config["method"] == "arm":
-        # ARM method - uses ReplaceMe's proven cosine distance analysis FIRST
-        signature = inspect.signature(arm)
+    elif config["method"] == "enhanced_cosine":  # NEW: Our enhanced method
+        signature = inspect.signature(enhanced_cosine_dist)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
-        print(f"{Fore.GREEN} Starting Adaptive ReplaceMe (ARM){Fore.RESET}")
-        print(f"  SoC Temperature: {config.get('soc_temperature', 70.0)}°C")
-        print(f" Attention Gating: {config.get('use_attention_gating', True)}")
-        print(f" Multi-Scale: {config.get('use_multi_scale', True)}")
-        print(f" Residual-Aware: {config.get('use_residual_aware', True)}")
+        logging.info(f"{Fore.GREEN}=== Using Enhanced Cosine Method ==={Fore.RESET}")
+        logging.info(f"{Fore.YELLOW}Max Rank: {filtered_config.get('max_rank', 512)}{Fore.RESET}")
+        logging.info(f"{Fore.YELLOW}Variance Threshold: {filtered_config.get('variance_threshold', 0.95)}{Fore.RESET}")
         
-        # ARM ALSO needs distance profiling for block selection (like ReplaceMe)
-        if config['distances_path'] is None:
-            profile_distances(**{k: v for k, v in config.items() if k in inspect.signature(profile_distances).parameters})
-            config['distances_path'] = "./distances.pth"
-        
-        # Load average distances and select non-overlapping blocks (SAME as ReplaceMe)
-        average_distances = torch.load(config['distances_path'], weights_only=False)  
+        # Load average distances and select non-overlapping blocks
+        average_distances = torch.load(filtered_config['distances_path'])  
         selected_blocks = select_non_overlapping_blocks(
             average_distances, 
-            config['layers_to_skip'], 
-            num_blocks=config['num_A'], 
-            merge_consecutive=config['merge_consecutive']
+            filtered_config['layers_to_skip'], 
+            num_blocks=filtered_config['num_A'], 
+            merge_consecutive=filtered_config['merge_consecutive']
         )
         
-        print(f" Selected {len(selected_blocks)} blocks based on cosine distance: {selected_blocks}")
-        
-        # Calculate start and end IDs, and number of layers (SAME as ReplaceMe)
+        # Calculate start and end IDs, and number of layers
         start_ids = sorted([x[0] for x in selected_blocks])
         end_ids = sorted([x[1] for x in selected_blocks])
         num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
         num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
         
-        # Iterate over each selected block using ARM (like ReplaceMe but with ARM function)
+        logging.info(f"{Fore.CYAN}Selected blocks: {selected_blocks}{Fore.RESET}")
+        
+        # Iterate over each selected block
         for i in range(len(selected_blocks)):
-            print(f" Applying ARM to block {start_ids[i]}-{end_ids[i]} (#{i+1}/{len(selected_blocks)})")
-            path = arm(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
-            filtered_config["model_path"] = path
+            logging.info(f"{Fore.MAGENTA}Processing block {i+1}/{len(selected_blocks)}: "
+                        f"layers {start_ids[i]} to {end_ids[i]}{Fore.RESET}")
             
-    elif config["method"] == "frequency":
-        # Frequency Domain Transform 시작!
-        
-        # 2-1. Function signature 확인
-        signature = inspect.signature(frequency_transform)
-        filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-        
-        print(f"{Fore.GREEN} Starting Frequency Domain Transform{Fore.RESET}")
-        print(f" Using cosine distance for optimal block selection")
-        print(f" Applying frequency domain optimization")
-        
-        # 2-2. Distance profiling (cosine similarity로 block 선택)
-        if config['distances_path'] is None:
-            # distance.py의 profile_distances() 실행
-            profile_distances(**{k: v for k, v in config.items() 
-                              if k in inspect.signature(profile_distances).parameters})
-            config['distances_path'] = "./distances.pth"
-        
-        # 2-3. 가장 linear한 block 선택 (ReplaceMe와 동일)
-        average_distances = torch.load(config['distances_path'], weights_only=False)
-        selected_blocks = select_non_overlapping_blocks(
-            average_distances,           # [0.25, 0.18, 0.12, 0.31, ...]
-            config['layers_to_skip'],    # 4 (4-layer blocks)
-            num_blocks=config['num_A'],  # 1 (1개 block만 선택)
-            merge_consecutive=config['merge_consecutive']  # False
-        )
-        # selected_blocks = [(24, 28)]  # 예: 24-28번 layer가 가장 linear
-        
-        print(f" Selected {len(selected_blocks)} blocks based on cosine distance: {selected_blocks}")
-        
-        # 2-4. Block 정보 계산
-        start_ids = sorted([x[0] for x in selected_blocks])    # [24]
-        end_ids = sorted([x[1] for x in selected_blocks])      # [28] 
-        num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]  # [4]
-        num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]    # [0, 4]
-        
-        # 2-5. 각 선택된 block에 Frequency Transform 적용
-        for i in range(len(selected_blocks)):  # i = 0 (1개 block)
-            print(f" Applying Frequency Transform to block {start_ids[i]}-{end_ids[i]} (#{i+1}/{len(selected_blocks)})")
-            
-            # 🔥 frequency_transform.py의 frequency_transform() 함수 호출!
-            path = frequency_transform(
-                **filtered_config,           # 모든 config 파라미터들
-                start_id=start_ids[i],       # 24
-                end_id=end_ids[i],           # 28  
-                num_layer=num_layers[i]      # 0 (첫 번째 block)
+            path = enhanced_cosine_dist(
+                **filtered_config, 
+                start_id=start_ids[i], 
+                end_id=end_ids[i], 
+                num_layer=num_layers[i]
             )
-            
-            # 변환된 모델 경로로 업데이트
             filtered_config["model_path"] = path
     else:
         # Original cosine/other methods
