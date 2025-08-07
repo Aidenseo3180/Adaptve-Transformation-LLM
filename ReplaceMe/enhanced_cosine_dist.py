@@ -41,15 +41,16 @@ def find_optimal_rank_with_performance(
     device = M_i.device
     dtype = M_i.dtype  # Use same dtype as input (bfloat16)
     
-    print(f"Input shapes: M_i={M_i.shape}, dtype={M_i.dtype}")
+    print(f"Input shapes: M_i={M_i.shape}, Y_i={Y_i.shape}, L_i_n={L_i_n.shape}, dtype={M_i.dtype}")
+    print(f"Computing transformation matrix for M_i @ T ≈ (L_i_n - Y_i)")
     
     # Step 1: Memory-efficient covariance computation
     # Use chunked computation for large matrices
     chunk_size = min(4096, M_i.shape[0])
     
-    # Initialize accumulators
+    # Initialize accumulators for solving M_i @ T ≈ (L_i_n - Y_i)
     AtA = torch.zeros(M_i.shape[1], M_i.shape[1], device=device, dtype=dtype)
-    Atb = torch.zeros(M_i.shape[1], device=device, dtype=dtype)
+    AtB = torch.zeros(M_i.shape[1], M_i.shape[1], device=device, dtype=dtype)
     
     # Chunked computation to avoid OOM
     for i in range(0, M_i.shape[0], chunk_size):
@@ -58,30 +59,59 @@ def find_optimal_rank_with_performance(
         Y_chunk = Y_i[i:end_idx]
         L_chunk = L_i_n[i:end_idx]
         
-        # Accumulate A^T A and A^T b
+        # Target matrix B = L_chunk - Y_chunk
+        B_chunk = L_chunk - Y_chunk
+        
+        # Accumulate A^T A and A^T B for solving A @ T = B
         AtA += M_chunk.T @ M_chunk
-        Atb += M_chunk.T @ (L_chunk - Y_chunk)
+        AtB += M_chunk.T @ B_chunk
         
         # Clear chunks from memory
-        del M_chunk, Y_chunk, L_chunk
+        del M_chunk, Y_chunk, L_chunk, B_chunk
     
     # Add regularization
     AtA += 1e-6 * torch.eye(M_i.shape[1], device=device, dtype=dtype)
     
+    print(f"AtA shape: {AtA.shape}, AtB shape: {AtB.shape}")
+    print(f"Condition number of AtA: {torch.linalg.cond(AtA.float()).item():.2e}")
+    
     try:
-        T_init = torch.linalg.solve(AtA, Atb.unsqueeze(1)).squeeze(1)
-        T_init = T_init.unsqueeze(0).expand(M_i.shape[1], -1)  # Make it square
-    except:
-        # Fallback: use identity + small perturbation
-        T_init = torch.eye(M_i.shape[1], device=device, dtype=dtype)
-        T_init += 0.01 * torch.randn_like(T_init)
+        # Solve for transformation matrix T: AtA @ T = AtB
+        T_init = torch.linalg.solve(AtA, AtB)
+        print(f"Successfully solved linear system, T_init shape: {T_init.shape}")
+    except Exception as e:
+        print(f"Linear solve failed: {e}, trying pseudo-inverse")
+        # Fallback: use pseudo-inverse
+        try:
+            T_init = torch.pinverse(AtA) @ AtB
+            print(f"Pseudo-inverse successful, T_init shape: {T_init.shape}")
+        except Exception as e2:
+            print(f"Pseudo-inverse also failed: {e2}, using identity fallback")
+            # Final fallback: use identity + small perturbation
+            T_init = torch.eye(M_i.shape[1], device=device, dtype=dtype)
+            T_init += 0.01 * torch.randn_like(T_init)
+            print(f"Using identity fallback, T_init shape: {T_init.shape}")
     
     # Step 2: SVD decomposition (on CPU to save GPU memory)
-    T_cpu = T_init.float().cpu()
-    U_cpu, S_cpu, Vt_cpu = torch.svd(T_cpu)
+    try:
+        T_cpu = T_init.float().cpu()
+        U_cpu, S_cpu, Vt_cpu = torch.svd(T_cpu)
+        
+        # Check if SVD was successful
+        if torch.isnan(S_cpu).any() or torch.isinf(S_cpu).any():
+            raise RuntimeError("SVD produced NaN or Inf values")
+            
+    except Exception as e:
+        print(f"SVD failed: {e}, using identity matrix fallback")
+        # Use identity matrix as fallback
+        T_cpu = torch.eye(M_i.shape[1]).float()
+        U_cpu, S_cpu, Vt_cpu = torch.svd(T_cpu)
     
     # Move back to GPU only what we need
     S = S_cpu.to(device, dtype=dtype)
+    
+    # Ensure we have valid singular values
+    S = torch.clamp(S, min=1e-8)  # Avoid zero singular values
     
     # Step 3: Variance-based initial rank selection
     total_variance = torch.sum(S**2)
