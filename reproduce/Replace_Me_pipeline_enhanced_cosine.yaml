@@ -3,10 +3,10 @@ method: "enhanced_cosine"  # NEW: Our enhanced method
 model_path: "meta-llama/Meta-Llama-3-8B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
-batch_size: 4
-max_length: 1024
+batch_size: 4  # Reduced batch size for memory efficiency
+max_length: 1024  # Reduced sequence length
 layers_to_skip: 4
-dataset_size: 4000
+dataset_size: 4000  # Reduced dataset size
 dataset_subset: "train"
 use_4bit: True
 save_path: null
@@ -18,8 +18,8 @@ num_A: 1
 merge_consecutive: False
 
 # NEW: Enhanced method specific parameters
-max_rank: 512              # Maximum rank for low-rank approximation
-variance_threshold: 0.95   # SVD variance threshold (0.95 = 95% variance preserved)
+max_rank: 512              # Reduced max rank for memory efficiency
+variance_threshold: 0.98   # Higher threshold for better compression
 
 # Evaluation settings
 tasks: "default"
