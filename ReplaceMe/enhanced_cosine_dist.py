@@ -31,162 +31,176 @@ def find_optimal_rank_with_performance(
     Y_i: torch.Tensor, 
     L_i_n: torch.Tensor, 
     variance_threshold: float = 0.95, 
-    max_rank: int = 512,
+    max_rank: int = 256,
     alpha_range: list = [0.0, 0.05, 0.1, 0.15, 0.2],
-    batch_size: int = 2048
+    sample_ratio: float = 0.05  # NEW: Sample only 5% of data for efficiency
 ) -> Tuple[int, torch.Tensor, torch.Tensor, torch.Tensor, float]:
     """
-    Memory-efficient performance-based optimal rank selection with residual enhancement
+    Efficient performance-based optimal rank selection with smart sampling and mixed precision
     """
     device = M_i.device
-    dtype = M_i.dtype  # Use same dtype as input (bfloat16)
+    original_dtype = M_i.dtype
     
-    print(f"Input shapes: M_i={M_i.shape}, Y_i={Y_i.shape}, L_i_n={L_i_n.shape}, dtype={M_i.dtype}")
-    print(f"Computing transformation matrix for M_i @ T ≈ (L_i_n - Y_i)")
+    print(f"Input shapes: M_i={M_i.shape}, Y_i={Y_i.shape}, L_i_n={L_i_n.shape}, dtype={original_dtype}")
     
-    # Step 1: Memory-efficient covariance computation
-    # Use chunked computation for large matrices
-    chunk_size = min(4096, M_i.shape[0])
+    # Step 1: Smart sampling for efficiency
+    total_samples = M_i.shape[0]
+    sample_size = min(int(total_samples * sample_ratio), 50000)  # Max 50k samples
     
-    # Initialize accumulators for solving M_i @ T ≈ (L_i_n - Y_i)
-    AtA = torch.zeros(M_i.shape[1], M_i.shape[1], device=device, dtype=dtype)
-    AtB = torch.zeros(M_i.shape[1], M_i.shape[1], device=device, dtype=dtype)
+    print(f"Sampling {sample_size} out of {total_samples} samples ({sample_ratio*100:.1f}%)")
     
-    # Chunked computation to avoid OOM
-    for i in range(0, M_i.shape[0], chunk_size):
-        end_idx = min(i + chunk_size, M_i.shape[0])
-        M_chunk = M_i[i:end_idx]
-        Y_chunk = Y_i[i:end_idx]
-        L_chunk = L_i_n[i:end_idx]
-        
-        # Target matrix B = L_chunk - Y_chunk
-        B_chunk = L_chunk - Y_chunk
-        
-        # Accumulate A^T A and A^T B for solving A @ T = B
-        AtA += M_chunk.T @ M_chunk
-        AtB += M_chunk.T @ B_chunk
-        
-        # Clear chunks from memory
-        del M_chunk, Y_chunk, L_chunk, B_chunk
+    # Random sampling for representative data
+    indices = torch.randperm(total_samples)[:sample_size]
+    M_sample = M_i[indices]
+    Y_sample = Y_i[indices]
+    L_sample = L_i_n[indices]
     
-    # Add regularization
-    AtA += 1e-6 * torch.eye(M_i.shape[1], device=device, dtype=dtype)
+    print(f"Sampled data shapes: M={M_sample.shape}, Y={Y_sample.shape}, L={L_sample.shape}")
     
-    print(f"AtA shape: {AtA.shape}, AtB shape: {AtB.shape}")
-    print(f"Condition number of AtA: {torch.linalg.cond(AtA.float()).item():.2e}")
+    # Step 2: Mixed precision computation (Float32 for numerical stability)
+    print("Converting to Float32 for numerical stability...")
+    M_f32 = M_sample.float()
+    Y_f32 = Y_sample.float()
+    L_f32 = L_sample.float()
     
-    try:
-        # Solve for transformation matrix T: AtA @ T = AtB
-        T_init = torch.linalg.solve(AtA, AtB)
-        print(f"Successfully solved linear system, T_init shape: {T_init.shape}")
-    except Exception as e:
-        print(f"Linear solve failed: {e}, trying pseudo-inverse")
-        # Fallback: use pseudo-inverse
+    # Step 3: Solve linear system M @ T ≈ (L - Y) with better conditioning
+    target = L_f32 - Y_f32
+    
+    # Use batched least squares for better numerical stability
+    batch_size = min(8192, M_f32.shape[0])
+    
+    if M_f32.shape[0] <= batch_size:
+        # Small enough to solve directly
         try:
-            T_init = torch.pinverse(AtA) @ AtB
-            print(f"Pseudo-inverse successful, T_init shape: {T_init.shape}")
-        except Exception as e2:
-            print(f"Pseudo-inverse also failed: {e2}, using identity fallback")
-            # Final fallback: use identity + small perturbation
-            T_init = torch.eye(M_i.shape[1], device=device, dtype=dtype)
-            T_init += 0.01 * torch.randn_like(T_init)
-            print(f"Using identity fallback, T_init shape: {T_init.shape}")
-    
-    # Step 2: SVD decomposition (on CPU to save GPU memory)
-    try:
-        T_cpu = T_init.float().cpu()
-        U_cpu, S_cpu, Vt_cpu = torch.svd(T_cpu)
-        
-        # Check if SVD was successful
-        if torch.isnan(S_cpu).any() or torch.isinf(S_cpu).any():
-            raise RuntimeError("SVD produced NaN or Inf values")
+            # Add ridge regression for stability
+            ridge_alpha = 1e-4
+            AtA = M_f32.T @ M_f32 + ridge_alpha * torch.eye(M_f32.shape[1], device=device)
+            AtB = M_f32.T @ target
             
+            print(f"Condition number: {torch.linalg.cond(AtA).item():.2e}")
+            
+            T_init = torch.linalg.solve(AtA, AtB)
+            print(f"Successfully solved linear system, T_init shape: {T_init.shape}")
+            
+        except Exception as e:
+            print(f"Direct solve failed: {e}, using SVD-based pseudo-inverse")
+            T_init, _ = torch.linalg.lstsq(M_f32, target, rcond=1e-4)
+            print(f"SVD-based solution successful, T_init shape: {T_init.shape}")
+    else:
+        # Use iterative method for large data
+        print("Using iterative least squares for large data...")
+        T_init = torch.zeros(M_f32.shape[1], M_f32.shape[1], device=device)
+        weight_sum = 0
+        
+        for i in range(0, M_f32.shape[0], batch_size):
+            end_idx = min(i + batch_size, M_f32.shape[0])
+            M_batch = M_f32[i:end_idx]
+            target_batch = target[i:end_idx]
+            
+            try:
+                ridge_alpha = 1e-4
+                AtA = M_batch.T @ M_batch + ridge_alpha * torch.eye(M_batch.shape[1], device=device)
+                AtB = M_batch.T @ target_batch
+                T_batch = torch.linalg.solve(AtA, AtB)
+                
+                batch_weight = M_batch.shape[0]
+                T_init += batch_weight * T_batch
+                weight_sum += batch_weight
+                
+            except:
+                continue
+        
+        if weight_sum > 0:
+            T_init /= weight_sum
+            print(f"Iterative solution successful, T_init shape: {T_init.shape}")
+        else:
+            print("All batches failed, using identity fallback")
+            T_init = torch.eye(M_f32.shape[1], device=device)
+    
+    # Step 4: SVD decomposition
+    try:
+        U, S, Vt = torch.svd(T_init)
+        print(f"SVD successful, singular values range: [{S.min():.2e}, {S.max():.2e}]")
+        
+        # Remove very small singular values for stability
+        valid_mask = S > S.max() * 1e-6
+        S = S[valid_mask]
+        U = U[:, valid_mask]
+        Vt = Vt[valid_mask, :]
+        
     except Exception as e:
-        print(f"SVD failed: {e}, using identity matrix fallback")
-        # Use identity matrix as fallback
-        T_cpu = torch.eye(M_i.shape[1]).float()
-        U_cpu, S_cpu, Vt_cpu = torch.svd(T_cpu)
+        print(f"SVD failed: {e}, using identity decomposition")
+        U = torch.eye(M_f32.shape[1], device=device)
+        S = torch.ones(M_f32.shape[1], device=device)
+        Vt = torch.eye(M_f32.shape[1], device=device)
     
-    # Move back to GPU only what we need
-    S = S_cpu.to(device, dtype=dtype)
-    
-    # Ensure we have valid singular values
-    S = torch.clamp(S, min=1e-8)  # Avoid zero singular values
-    
-    # Step 3: Variance-based initial rank selection
+    # Step 5: Smart rank selection
     total_variance = torch.sum(S**2)
     cumsum_variance = torch.cumsum(S**2, dim=0) / total_variance
     
+    # Find initial rank based on variance threshold
     rank_candidates = torch.where(cumsum_variance >= variance_threshold)[0]
     if len(rank_candidates) > 0:
-        initial_rank = min(rank_candidates[0].item() + 1, max_rank)
+        initial_rank = min(rank_candidates[0].item() + 1, max_rank, len(S))
     else:
         initial_rank = min(max_rank, len(S))
     
-    print(f"Initial rank from SVD: {initial_rank} (max_rank: {max_rank})")
+    print(f"Initial rank from variance threshold: {initial_rank}")
     
-    # Step 4: Performance-based rank refinement (batch-wise)
+    # Step 6: Binary search for optimal rank (much more efficient)
+    def evaluate_rank_performance(rank, alpha):
+        """Evaluate performance for given rank and alpha"""
+        if rank <= 0 or rank > len(S):
+            return float('inf')
+            
+        # Low-rank approximation
+        U_r = U[:, :rank]
+        S_r = S[:rank]
+        Vt_r = Vt[:rank, :]
+        T_r = U_r @ torch.diag(S_r) @ Vt_r
+        
+        # Apply transformation with residual connection
+        transformed = M_f32 @ T_r + alpha * M_f32 + Y_f32
+        
+        # Compute cosine distance loss
+        return compute_cosine_distance_loss(transformed, L_f32).item()
+    
+    # Smart rank search: test only promising candidates
+    rank_candidates = [
+        max(1, initial_rank // 4),
+        max(1, initial_rank // 2), 
+        initial_rank,
+        min(len(S), initial_rank * 2),
+        min(len(S), max_rank)
+    ]
+    # Remove duplicates and sort
+    rank_candidates = sorted(list(set(rank_candidates)))
+    
+    print(f"Testing rank candidates: {rank_candidates}")
+    
     best_rank = initial_rank
     best_alpha = 0.1
     best_loss = float('inf')
     
-    search_range = max(1, int(0.1 * initial_rank))  # Reduced search range
-    ranks_to_test = range(
-        max(16, initial_rank - search_range),  # Minimum rank of 16
-        min(len(S), initial_rank + search_range + 1)
-    )
-    
-    print(f"Testing ranks: {list(ranks_to_test)}")
-    
-    for r in ranks_to_test:
-        # Get low-rank components (keep on CPU until needed)
-        U_r = U_cpu[:, :r].to(device, dtype=dtype)
-        S_r = S[:r]
-        Vt_r = Vt_cpu[:r, :].to(device, dtype=dtype)
-        
-        # Test different alpha values with batch processing
+    for rank in rank_candidates:
         for alpha in alpha_range:
-            total_loss = 0.0
-            num_batches = 0
+            loss = evaluate_rank_performance(rank, alpha)
             
-            # Batch processing to avoid OOM
-            for i in range(0, M_i.shape[0], batch_size):
-                end_idx = min(i + batch_size, M_i.shape[0])
-                
-                # Get batch
-                M_batch = M_i[i:end_idx]
-                Y_batch = Y_i[i:end_idx]
-                L_batch = L_i_n[i:end_idx]
-                
-                # Compute transformation for this batch
-                T_r = U_r @ torch.diag(S_r) @ Vt_r
-                transformed = M_batch @ T_r + alpha * M_batch + Y_batch
-                
-                # Compute loss
-                batch_loss = compute_cosine_distance_loss(transformed, L_batch)
-                total_loss += batch_loss.item()
-                num_batches += 1
-                
-                # Clear batch from memory
-                del M_batch, Y_batch, L_batch, transformed
-            
-            avg_loss = total_loss / num_batches
-            
-            if avg_loss < best_loss:
-                best_loss = avg_loss
-                best_rank = r
+            if loss < best_loss:
+                best_loss = loss
+                best_rank = rank
                 best_alpha = alpha
-        
-        # Clear rank-specific tensors
-        del U_r, Vt_r
-        torch.cuda.empty_cache()
     
     print(f"Optimal rank: {best_rank}, Optimal alpha: {best_alpha:.3f}, Best loss: {best_loss:.6f}")
     
-    # Return optimal low-rank factors
-    U_optimal = U_cpu[:, :best_rank].to(device, dtype=dtype)
-    S_optimal = S[:best_rank]
-    Vt_optimal = Vt_cpu[:best_rank, :].to(device, dtype=dtype)
+    # Return optimal low-rank factors (convert back to original dtype)
+    U_optimal = U[:, :best_rank].to(original_dtype)
+    S_optimal = S[:best_rank].to(original_dtype)
+    Vt_optimal = Vt[:best_rank, :].to(original_dtype)
+    
+    # Clean up
+    del M_f32, Y_f32, L_f32, M_sample, Y_sample, L_sample
+    torch.cuda.empty_cache()
     
     return best_rank, U_optimal, S_optimal, Vt_optimal, best_alpha
 
@@ -195,39 +209,36 @@ def enhanced_adam_method(
     a2: torch.Tensor,
     a3: torch.Tensor = None,
     loss: str = "cosine",
-    max_rank: int = 512,
+    max_rank: int = 256,
     variance_threshold: float = 0.95,
-    lr: float = 1e-4,
-    max_epochs: int = 5  # Reduced epochs to save time
+    lr: float = 1e-3,  # Higher learning rate for faster convergence
+    max_epochs: int = 3,  # Fewer epochs for efficiency
+    sample_ratio: float = 0.05  # Sample only 5% for rank selection
 ) -> torch.Tensor:
     """
-    Memory-efficient enhanced Adam optimization with rank-adaptive and residual connections
+    Efficient enhanced Adam optimization with smart sampling and mixed precision
     """
-    # Keep everything in the same dtype as input (bfloat16)
     original_device = a1.device
     original_dtype = a1.dtype
     
     print(f"Enhanced Adam Method - Input shapes: a1={a1.shape}, a2={a2.shape}, dtype={original_dtype}")
+    print(f"Using sample ratio: {sample_ratio*100:.1f}% for rank selection")
     
-    # Move to CPU for rank selection to save GPU memory
-    a1_cpu = a1.cpu()
-    a2_cpu = a2.cpu()
-    
-    # Find optimal rank (this will handle memory efficiently)
+    # Find optimal rank using sampled data for efficiency
     optimal_rank, U_opt, S_opt, Vt_opt, optimal_alpha = find_optimal_rank_with_performance(
-        a1, a1, a2, variance_threshold, max_rank
+        a1, a1, a2, variance_threshold, max_rank, sample_ratio=sample_ratio
     )
     
     print(f"Using rank {optimal_rank} out of {a1.shape[1]} (compression: {optimal_rank/a1.shape[1]*100:.1f}%)")
     
     # Initialize low-rank factors with proper dtype
-    U = nn.Parameter(U_opt.clone().detach())
-    S = nn.Parameter(S_opt.clone().detach()) 
-    V = nn.Parameter(Vt_opt.T.clone().detach())  # Transpose Vt to get V
-    alpha = nn.Parameter(torch.tensor(optimal_alpha, device=original_device, dtype=original_dtype))
+    U = nn.Parameter(U_opt.clone().detach().requires_grad_(True))
+    S = nn.Parameter(S_opt.clone().detach().requires_grad_(True)) 
+    V = nn.Parameter(Vt_opt.T.clone().detach().requires_grad_(True))  # Transpose Vt to get V
+    alpha = nn.Parameter(torch.tensor(optimal_alpha, device=original_device, dtype=original_dtype).requires_grad_(True))
     
-    # Optimizer
-    optimizer = torch.optim.Adam([U, S, V, alpha], lr=lr)
+    # Optimizer with higher learning rate
+    optimizer = torch.optim.Adam([U, S, V, alpha], lr=lr, weight_decay=1e-5)
     
     # Loss function
     def cosine_loss_batch(XA: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
@@ -235,9 +246,11 @@ def enhanced_adam_method(
         Y_norm = Y / (Y.norm(dim=1, keepdim=True) + 1e-8)
         return 1 - (XA_norm * Y_norm).sum(dim=1).mean()
     
-    # Training with batch processing
-    batch_size = 2048  # Smaller batch size
+    # Training with larger batch processing for efficiency
+    batch_size = 4096  # Larger batch size for efficiency
     num_samples = a1.shape[0]
+    
+    print(f"Training with batch size {batch_size} for {max_epochs} epochs")
     
     with tqdm(range(max_epochs), desc="Enhanced Optimization") as pbar:
         for epoch in pbar:
@@ -285,6 +298,8 @@ def enhanced_adam_method(
                 # Clamp alpha to reasonable range
                 with torch.no_grad():
                     alpha.data = torch.clamp(alpha.data, 0.0, 0.3)
+                    # Ensure S stays positive
+                    S.data = torch.clamp(S.data, min=1e-8)
                 
                 epoch_loss += loss_val.item()
                 num_batches += 1
@@ -298,17 +313,26 @@ def enhanced_adam_method(
             pbar.set_postfix({
                 f'{loss} Loss': f'{avg_loss:.6f}',
                 'Rank': optimal_rank,
-                'Alpha': f'{alpha.item():.3f}'
+                'Alpha': f'{alpha.item():.3f}',
+                'S_range': f'[{S.min().item():.2e}, {S.max().item():.2e}]'
             })
             
+            # Early stopping if loss is very low
+            if avg_loss < 1e-6:
+                print(f"Early stopping at epoch {epoch+1} due to low loss")
+                break
+                
             # Clear cache every epoch
             torch.cuda.empty_cache()
     
     # Reconstruct final transformation matrix
     with torch.no_grad():
         final_T = U @ torch.diag(S) @ V.T
+        final_rank = torch.matrix_rank(final_T.float()).item()
+        
         print(f"Final residual weight: {alpha.item():.4f}")
-        print(f"Final transformation matrix rank: {torch.matrix_rank(final_T.float()).item()}")
+        print(f"Final transformation matrix rank: {final_rank}")
+        print(f"Compression ratio: {optimal_rank}/{a1.shape[1]} = {optimal_rank/a1.shape[1]*100:.1f}%")
     
     return final_T.cpu().to(torch.float64)
 
