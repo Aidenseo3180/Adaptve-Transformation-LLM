@@ -328,7 +328,7 @@ def enhanced_adam_method(
     # Reconstruct final transformation matrix
     with torch.no_grad():
         final_T = U @ torch.diag(S) @ V.T
-        final_rank = torch.matrix_rank(final_T.float()).item()
+        final_rank = torch.linalg.matrix_rank(final_T.float()).item()
         
         print(f"Final residual weight: {alpha.item():.4f}")
         print(f"Final transformation matrix rank: {final_rank}")
