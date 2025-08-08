@@ -18,7 +18,7 @@ num_A: 1
 merge_consecutive: False
 
 # Enhanced method specific parameters - Optimized
-max_rank: 128              # Reduced for faster computation
+max_rank: 1024              # Reduced for faster computation
 variance_threshold: 0.98   # Higher threshold for better compression
 
 # Evaluation settings
