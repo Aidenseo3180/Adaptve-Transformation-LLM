@@ -186,6 +186,7 @@ def find_optimal_rank_with_performance(
         for alpha in alpha_range:
             loss = evaluate_rank_performance(rank, alpha)
             
+            print(f".    Current rank: {rank} - loss: {loss}")
             if loss < best_loss:
                 best_loss = loss
                 best_rank = rank
