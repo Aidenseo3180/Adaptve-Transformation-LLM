@@ -45,7 +45,7 @@ def find_optimal_rank_with_performance(
     
     # Step 1: Smart sampling for efficiency
     total_samples = M_i.shape[0]
-    sample_size = min(int(total_samples * sample_ratio), 50000)  # Max 50k samples
+    sample_size = min(int(total_samples * sample_ratio), 500000)  # Max 500k samples
     
     print(f"Sampling {sample_size} out of {total_samples} samples ({sample_ratio*100:.1f}%)")
     
