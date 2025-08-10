@@ -216,13 +216,25 @@ def enhanced_evaluator(
         print(f"Saving reconstructed model to: {temp_model_path}")
         model.save_pretrained(temp_model_path)
         
+        # IMPORTANT: Also copy tokenizer files from original model
+        print(f"Copying tokenizer files from original model...")
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(model_path)
+            tokenizer.save_pretrained(temp_model_path)
+            print(f"Successfully copied tokenizer to: {temp_model_path}")
+        except Exception as e:
+            print(f"Warning: Could not copy tokenizer: {e}")
+            print("Evaluation might fail due to missing tokenizer files")
+        
         # Now evaluate using the reconstructed model
         try:
             if tasks == "default":
-                logging.info(f"{Fore.GREEN}Running default evaluation on reconstructed TwoStage model{Fore.RESET}")
+                print(f"{Fore.GREEN}Running default evaluation on reconstructed TwoStage model{Fore.RESET}")
+                print(f"{Fore.YELLOW}Using temp model path: {temp_model_path}{Fore.RESET}")
                 results = eval_model(temp_model_path, **kwargs)
             else:
-                logging.info(f"{Fore.GREEN}Running task-specific evaluation on reconstructed TwoStage model{Fore.RESET}")
+                print(f"{Fore.GREEN}Running task-specific evaluation on reconstructed TwoStage model{Fore.RESET}")
+                print(f"{Fore.YELLOW}Using temp model path: {temp_model_path}{Fore.RESET}")
                 results = eval_model_specific(temp_model_path, tasks, **kwargs)
         finally:
             # Clean up temporary model
@@ -234,12 +246,43 @@ def enhanced_evaluator(
     else:
         # Regular evaluation for non-TwoStage models
         if tasks == "default":
-            logging.info(f"{Fore.GREEN}Running default evaluation on {model_path}{Fore.RESET}")
+            print(f"{Fore.GREEN}Running default evaluation on {model_path}{Fore.RESET}")
             results = eval_model(model_path, **kwargs)
         else:
-            logging.info(f"{Fore.GREEN}Running task-specific evaluation on {model_path}{Fore.RESET}")
+            print(f"{Fore.GREEN}Running task-specific evaluation on {model_path}{Fore.RESET}")
             results = eval_model_specific(model_path, tasks, **kwargs)
     
-    logging.info(f"{Fore.GREEN}Evaluation completed{Fore.RESET}")
+    print(f"{Fore.GREEN}Evaluation completed{Fore.RESET}")
     return results
 
+def read_config(config_path: str) -> dict:
+    """Read and parse YAML configuration file."""
+    try:
+        with open(config_path, "r") as f:
+            return yaml.safe_load(f)
+    except FileNotFoundError as e:
+        logging.error(f"{Fore.RED}Config file not found: {config_path}{Fore.RESET}")
+        raise
+    except yaml.YAMLError as e:
+        logging.error(f"{Fore.RED}Invalid YAML in config file: {config_path}{Fore.RESET}")
+        raise
+
+def run_from_config() -> None:
+    """Run enhanced evaluation from configuration file."""
+    parser = argparse.ArgumentParser(
+        description="Run enhanced model evaluation that handles TwoStageMLP models."
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help="Path to the configuration YAML file.",
+    )
+    args = parser.parse_args()
+    
+    try:
+        config = read_config(args.config)
+        enhanced_evaluator(**config)
+    except Exception as e:
+        logging.error(f"{Fore.RED}Evaluation failed: {str(e)}{Fore.RESET}")
+        raise
