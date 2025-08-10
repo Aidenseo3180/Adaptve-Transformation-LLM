@@ -18,7 +18,7 @@ num_A: 1
 merge_consecutive: False
 
 # Two-stage method specific parameters
-max_rank: 256              # Will create 256-rank factorization
+max_rank: 1024              # Will create 256-rank factorization
 variance_threshold: 0.98   
 
 # Evaluation settings

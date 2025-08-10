@@ -32,7 +32,7 @@ def find_optimal_rank_with_performance(
     L_i_n: torch.Tensor, 
     variance_threshold: float = 0.95, 
     max_rank: int = 256,
-    alpha_range: list = [0.0, 0.05, 0.1, 0.15, 0.2],
+    alpha_range: list = [0.01, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3],
     sample_ratio: float = 0.05
 ) -> Tuple[int, torch.Tensor, torch.Tensor, torch.Tensor, float]:
     """
@@ -186,6 +186,7 @@ def find_optimal_rank_with_performance(
         for alpha in alpha_range:
             loss = evaluate_rank_performance(rank, alpha)
             
+            print(f"Current rank: {rank}, alpha: {alpha}, loss: {loss}")
             if loss < best_loss:
                 best_loss = loss
                 best_rank = rank
