@@ -88,6 +88,8 @@ def ReplaceMe_pipeline(config):
         
         logging.info(f"{Fore.GREEN}Starting enhanced evaluation of compressed model...{Fore.RESET}")
         enhanced_evaluator(**filtered_config)
+
+        return
             
     else:  # Original cosine/other methods
         signature = inspect.signature(cosine_dist)
