@@ -134,30 +134,32 @@ def reconstruct_two_stage_model(model, model_path: str):
         print(f"Failed to load transform factors: {e}")
         return model
     
-    # Find which layer to replace (look for the one that was modified)
+    # Find which layer to replace (adapted for truncated models)
     target_layer_idx = None
+    total_layers = len(model.model.layers)
     
-    # Method 1: Try to find layer with unusual weight patterns
-    for i, layer in enumerate(model.model.layers):
-        down_proj = layer.mlp.down_proj
-        if hasattr(down_proj, 'weight'):
-            # Check if this layer's weights look like they were modified
-            weight_norm = torch.norm(down_proj.weight.float())
-            print(f"Layer {i} down_proj weight norm: {weight_norm:.2f}")
-            
-            # Usually the modified layer will have different statistics
-            # This is a heuristic - you might need to adjust based on your specific case
-            if i >= 20:  # Assuming later layers were more likely modified
-                target_layer_idx = i
-                break
+    print(f"Model has {total_layers} layers total")
     
-    # Method 2: If we can't detect automatically, use a reasonable guess
+    # For truncated models, the target layer is likely the one just before the removed section
+    # Based on the naming pattern: "24_28" means layers 24-27 were removed
+    # So we want to modify the layer just before the gap (layer 23 in original numbering)
+    
+    # Method 1: Try to detect from model path which layers were removed
+    import re
+    path_parts = model_path.split('_')
+    for part in path_parts:
+        if re.match(r'\d+_\d+', part):  # Find pattern like "24_28"
+            start_removed, end_removed = map(int, part.split('_'))
+            # Target should be the layer just before the removed section
+            target_layer_idx = start_removed - 1
+            print(f"Detected removed layers: {start_removed}-{end_removed}")
+            print(f"Target layer index: {target_layer_idx}")
+            break
+    
     if target_layer_idx is None:
-        # Based on your error message, it looks like layer 23 was the target
-        target_layer_idx = 23
-        print(f"Using heuristic target layer: {target_layer_idx}")
-    
-    print(f"Replacing layer {target_layer_idx} down_proj with TwoStageMLP")
+        raise ValueError("Could not determine target layer for TwoStageMLP replacement")
+        
+    print(f"Using target layer index: {target_layer_idx} out of {total_layers} total layers")
     
     # Get original down_proj info
     original_down_proj = model.model.layers[target_layer_idx].mlp.down_proj
