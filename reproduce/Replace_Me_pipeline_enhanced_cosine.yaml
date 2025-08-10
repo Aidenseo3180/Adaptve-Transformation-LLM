@@ -1,12 +1,12 @@
-# Enhanced Cosine Method Configuration - Optimized for Speed and Stability
-method: "enhanced_cosine"
+# Two-Stage Enhanced Cosine Method Configuration
+method: "two_stage_enhanced"
 model_path: "meta-llama/Meta-Llama-3-8B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
 batch_size: 4
 max_length: 1024
 layers_to_skip: 4
-dataset_size: 4000  # Further reduced for faster testing
+dataset_size: 4000
 dataset_subset: "train"
 use_4bit: True
 save_path: null
@@ -17,9 +17,9 @@ distances_path: null
 num_A: 1
 merge_consecutive: False
 
-# Enhanced method specific parameters - Optimized
-max_rank: 1024              # Reduced for faster computation
-variance_threshold: 0.98   # Higher threshold for better compression
+# Two-stage method specific parameters
+max_rank: 256              # Will create 256-rank factorization
+variance_threshold: 0.98   
 
 # Evaluation settings
 tasks: "default"

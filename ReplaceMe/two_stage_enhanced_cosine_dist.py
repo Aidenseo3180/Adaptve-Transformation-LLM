@@ -33,7 +33,7 @@ def find_optimal_rank_with_performance(
     variance_threshold: float = 0.95, 
     max_rank: int = 256,
     alpha_range: list = [0.0, 0.05, 0.1, 0.15, 0.2],
-    sample_ratio: float = 0.05  # NEW: Sample only 5% of data for efficiency
+    sample_ratio: float = 0.05
 ) -> Tuple[int, torch.Tensor, torch.Tensor, torch.Tensor, float]:
     """
     Efficient performance-based optimal rank selection with smart sampling and mixed precision
@@ -186,7 +186,6 @@ def find_optimal_rank_with_performance(
         for alpha in alpha_range:
             loss = evaluate_rank_performance(rank, alpha)
             
-            print(f".    Current rank: {rank} - loss: {loss}")
             if loss < best_loss:
                 best_loss = loss
                 best_rank = rank
@@ -212,12 +211,12 @@ def enhanced_adam_method(
     loss: str = "cosine",
     max_rank: int = 256,
     variance_threshold: float = 0.95,
-    lr: float = 1e-3,  # Higher learning rate for faster convergence
-    max_epochs: int = 3,  # Fewer epochs for efficiency
-    sample_ratio: float = 0.05  # Sample only 5% for rank selection
-) -> torch.Tensor:
+    lr: float = 1e-3,
+    max_epochs: int = 3,
+    sample_ratio: float = 0.05
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Efficient enhanced Adam optimization with smart sampling and mixed precision
+    Enhanced Adam optimization returning separate U, S, V factors for two-stage implementation
     """
     original_device = a1.device
     original_dtype = a1.dtype
@@ -248,7 +247,7 @@ def enhanced_adam_method(
         return 1 - (XA_norm * Y_norm).sum(dim=1).mean()
     
     # Training with larger batch processing for efficiency
-    batch_size = 4096  # Larger batch size for efficiency
+    batch_size = 4096
     num_samples = a1.shape[0]
     
     print(f"Training with batch size {batch_size} for {max_epochs} epochs")
@@ -326,18 +325,62 @@ def enhanced_adam_method(
             # Clear cache every epoch
             torch.cuda.empty_cache()
     
-    # Reconstruct final transformation matrix
+    # Return separate factors for two-stage implementation
     with torch.no_grad():
-        final_T = U @ torch.diag(S) @ V.T
-        final_rank = torch.linalg.matrix_rank(final_T.float()).item()
+        final_U = U.clone().detach()
+        final_S = S.clone().detach()
+        final_V = V.clone().detach()
+        final_alpha = alpha.item()
         
-        print(f"Final residual weight: {alpha.item():.4f}")
-        print(f"Final transformation matrix rank: {final_rank}")
+        print(f"Final residual weight: {final_alpha:.4f}")
+        print(f"Final rank: {optimal_rank}")
         print(f"Compression ratio: {optimal_rank}/{a1.shape[1]} = {optimal_rank/a1.shape[1]*100:.1f}%")
+        
+        # Verify reconstruction
+        reconstructed_T = final_U @ torch.diag(final_S) @ final_V.T
+        reconstruction_rank = torch.linalg.matrix_rank(reconstructed_T.float()).item()
+        print(f"Reconstructed matrix rank: {reconstruction_rank}")
     
-    return final_T.cpu().to(torch.float64)
+    return final_U.cpu().to(torch.float64), final_S.cpu().to(torch.float64), final_V.cpu().to(torch.float64)
 
-def enhanced_cosine_dist(
+class TwoStageMLP(nn.Module):
+    """
+    Two-stage MLP to replace the original down_proj with low-rank factorization
+    """
+    def __init__(self, input_size: int, output_size: int, rank: int, 
+                 U: torch.Tensor, S: torch.Tensor, V: torch.Tensor, dtype=torch.bfloat16):
+        super().__init__()
+        
+        # First stage: input_size -> rank
+        self.first_proj = nn.Linear(input_size, rank, bias=False, dtype=dtype)
+        
+        # Second stage: rank -> output_size  
+        self.second_proj = nn.Linear(rank, output_size, bias=False, dtype=dtype)
+        
+        # Initialize weights from factorization
+        # For down_proj transformation: input @ (U @ diag(S) @ V.T)
+        # Split into: input @ first_proj @ second_proj
+        # where first_proj = V @ diag(S), second_proj = U.T
+        
+        with torch.no_grad():
+            # First projection: apply V and S
+            self.first_proj.weight.data = (torch.diag(S.to(dtype)) @ V.to(dtype)).T  # [rank, input_size]
+            
+            # Second projection: apply U
+            self.second_proj.weight.data = U.T.to(dtype)  # [output_size, rank]
+            
+        print(f"TwoStageMLP initialized:")
+        print(f"  First proj: {self.first_proj.weight.shape}")
+        print(f"  Second proj: {self.second_proj.weight.shape}")
+        print(f"  Total parameters: {self.first_proj.weight.numel() + self.second_proj.weight.numel()}")
+        
+    def forward(self, x):
+        # Two-stage transformation
+        x = self.first_proj(x)
+        x = self.second_proj(x)
+        return x
+
+def two_stage_enhanced_cosine_dist(
     model_path: str,
     dataset: str,
     dataset_column: str,
@@ -359,14 +402,14 @@ def enhanced_cosine_dist(
     distances_path: str = "./distances.pth",
     num_A: int = 1,
     merge_consecutive: bool = True,
-    max_rank: int = 512,
+    max_rank: int = 256,
     variance_threshold: float = 0.95,
     **kwargs
 ) -> str:
     """
-    Enhanced cosine distance method with rank-adaptive and residual connections
+    Enhanced cosine distance method with two-stage MLP implementation for true low-rank inference
     """
-    print(f"=== Enhanced Cosine Distance Method ===")
+    print(f"=== Two-Stage Enhanced Cosine Distance Method ===")
     print(f"Model: {model_path}")
     print(f"Layers to replace: {start_id} to {end_id} (skipping {layers_to_skip} layers)")
     print(f"Max rank: {max_rank}, Variance threshold: {variance_threshold}")
@@ -407,7 +450,7 @@ def enhanced_cosine_dist(
         tokenizer
     )
     
-    # Setup activation hooks (same as original)
+    # Setup activation hooks
     def save_mlp_activation(name):
         def hook(module, input, output):
             mlp_activations[name] = output.detach()
@@ -423,12 +466,12 @@ def enhanced_cosine_dist(
 
     mlp_activations = {}
     
-    # Collect activations (use bfloat16 like original ReplaceMe)
+    # Collect activations
     a1 = torch.empty((dataset_size * max_length, hidden_size), dtype=torch.bfloat16, device='cpu')
     a2 = torch.empty((dataset_size * max_length, hidden_size), dtype=torch.bfloat16, device='cpu')
     
     cnt = 0
-    for batch in tqdm(dataloader, desc="Gathering Activations for Enhanced Method"):
+    for batch in tqdm(dataloader, desc="Gathering Activations for Two-Stage Method"):
         inputs = tokenizer(
             batch,
             return_tensors="pt",
@@ -447,7 +490,7 @@ def enhanced_cosine_dist(
         ]
         hidden_states_mlp = hidden_states_mlp_list[start_id - num_layer - 1]
 
-        # Reshape activations (keep in bfloat16)
+        # Reshape activations
         hidden_states_mlp = hidden_states_mlp.view(-1, hidden_size).to(torch.bfloat16)
         hidden_states_i = hidden_states[start_id - num_layer - 1].view(-1, hidden_size).to(torch.bfloat16)
         hidden_states_n = hidden_states[end_id - num_layer - 1].view(-1, hidden_size).to(torch.bfloat16)
@@ -471,13 +514,18 @@ def enhanced_cosine_dist(
     
     print(f"Collected {cnt} activation samples")
     
-    # Apply enhanced optimization
-    transform = enhanced_adam_method(
+    # Apply enhanced optimization to get U, S, V factors
+    U_factor, S_factor, V_factor = enhanced_adam_method(
         a1, a2, 
         loss=loss, 
         max_rank=max_rank,
         variance_threshold=variance_threshold
     )
+    
+    print(f"Low-rank factors obtained:")
+    print(f"  U: {U_factor.shape}")
+    print(f"  S: {S_factor.shape}") 
+    print(f"  V: {V_factor.shape}")
     
     # Clean up activations
     del a1, a2
@@ -497,6 +545,36 @@ def enhanced_cosine_dist(
     )
     model = truncate_model(model, start_id - num_layer, end_id - num_layer)
     
+    # Get original down_proj info
+    target_layer_idx = start_id - num_layer - 1
+    original_down_proj = model.model.layers[target_layer_idx].mlp.down_proj
+    
+    print(f"Original down_proj shape: {original_down_proj.weight.shape}")
+    print(f"Original parameters: {original_down_proj.weight.numel()}")
+    
+    # Create two-stage MLP replacement
+    input_size = original_down_proj.weight.shape[1]  # Usually intermediate_size (e.g., 14336)
+    output_size = original_down_proj.weight.shape[0]  # Usually hidden_size (e.g., 4096)
+    rank = S_factor.shape[0]
+    
+    two_stage_mlp = TwoStageMLP(
+        input_size=input_size,
+        output_size=output_size, 
+        rank=rank,
+        U=U_factor,
+        S=S_factor,
+        V=V_factor,
+        dtype=torch.bfloat16
+    )
+    
+    # Replace the down_proj with two-stage MLP
+    model.model.layers[target_layer_idx].mlp.down_proj = two_stage_mlp
+    
+    print(f"Replaced down_proj with TwoStageMLP")
+    print(f"Memory reduction: {original_down_proj.weight.numel()} -> {two_stage_mlp.first_proj.weight.numel() + two_stage_mlp.second_proj.weight.numel()}")
+    memory_reduction = 1 - (two_stage_mlp.first_proj.weight.numel() + two_stage_mlp.second_proj.weight.numel()) / original_down_proj.weight.numel()
+    print(f"Memory reduction percentage: {memory_reduction*100:.1f}%")
+    
     # Set save path
     if save_path is None:
         if not os.path.exists('output_models'):
@@ -506,34 +584,23 @@ def enhanced_cosine_dist(
             f"{end_id}_{dataset}_{dataset_size}"
         ).replace("/", "_")
     
-    # Apply transformation to down_proj
-    target_layer_idx = start_id - num_layer - 1
-    current_weight = model.model.layers[target_layer_idx].mlp.down_proj.weight.to(torch.float64)
-    new_weight = (transform.T @ current_weight).to(torch.bfloat16)
-    
-    # For Debugging Purposes
-    print(f"Transform shape: {transform.shape}")
-    print(f"Current weight shape: {current_weight.shape}")
-    print(f"New weight shape: {new_weight.shape}")
-    weight_diff = torch.norm(new_weight - current_weight)
-    print(f"Weight change magnitude: {weight_diff}")
-
-    model.model.layers[target_layer_idx].mlp.down_proj.load_state_dict({
-        "weight": new_weight
-    })
-    
     # Save model
-    output_path = f"{save_path}_EnhancedCosine_{loss}"
+    output_path = f"{save_path}_TwoStageEnhanced_{loss}_rank{rank}"
     model.save_pretrained(output_path)
     tokenizer.save_pretrained(output_path)
     
     if save_transform_only:
-        torch.save(transform, f"{output_path}_transform")
+        torch.save({
+            'U': U_factor,
+            'S': S_factor, 
+            'V': V_factor,
+            'rank': rank
+        }, f"{output_path}_transform")
     
-    print(f"Enhanced model saved to: {output_path}")
+    print(f"Two-stage enhanced model saved to: {output_path}")
     
     # Final cleanup
-    del model, transform
+    del model, U_factor, S_factor, V_factor
     gc.collect()
     torch.cuda.empty_cache()
     
