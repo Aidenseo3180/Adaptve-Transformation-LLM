@@ -140,26 +140,43 @@ def reconstruct_two_stage_model(model, model_path: str):
     
     print(f"Model has {total_layers} layers total")
     
-    # For truncated models, the target layer is likely the one just before the removed section
-    # Based on the naming pattern: "24_28" means layers 24-27 were removed
-    # So we want to modify the layer just before the gap (layer 23 in original numbering)
+    # Find which layer to replace (now working with original 32-layer model)
+    total_layers = len(model.model.layers)
+    print(f"Original model has {total_layers} layers total")
     
-    # Method 1: Try to detect from model path which layers were removed
+    # Extract layer information from the truncated model path
+    # Pattern: "24_28" means layers 24-27 were originally skipped
+    target_layer_idx = None
+    
     import re
     path_parts = model_path.split('_')
+    
     for part in path_parts:
         if re.match(r'\d+_\d+', part):  # Find pattern like "24_28"
             start_removed, end_removed = map(int, part.split('_'))
             # Target should be the layer just before the removed section
-            target_layer_idx = start_removed - 1
-            print(f"Detected removed layers: {start_removed}-{end_removed}")
-            print(f"Target layer index: {target_layer_idx}")
+            target_layer_idx = start_removed - 1  # Layer 23 for "24_28"
+            print(f"Detected originally skipped layers: {start_removed}-{end_removed-1}")
+            print(f"Target layer for TwoStageMLP: {target_layer_idx}")
             break
     
+    # Fallback if pattern not found
     if target_layer_idx is None:
-        raise ValueError("Could not determine target layer for TwoStageMLP replacement")
-        
-    print(f"Using target layer index: {target_layer_idx} out of {total_layers} total layers")
+        target_layer_idx = 23  # Default assumption
+        print(f"Could not detect layer pattern, using default target layer: {target_layer_idx}")
+    
+    # Verify target layer exists and has correct structure
+    if target_layer_idx >= total_layers:
+        raise ValueError(f"Target layer {target_layer_idx} doesn't exist in {total_layers}-layer model")
+    
+    target_layer = model.model.layers[target_layer_idx]
+    target_down_proj = target_layer.mlp.down_proj
+    
+    if not hasattr(target_down_proj, 'weight'):
+        raise ValueError(f"Target layer {target_layer_idx} down_proj does not have weight attribute")
+    
+    print(f"Target layer {target_layer_idx} down_proj shape: {target_down_proj.weight.shape}")
+    print(f"Successfully identified target layer {target_layer_idx} for TwoStageMLP replacement")
     
     # Get original down_proj info
     original_down_proj = model.model.layers[target_layer_idx].mlp.down_proj
@@ -206,11 +223,29 @@ def enhanced_evaluator(
     print(f"TwoStage model detected: {is_two_stage}")
     
     if is_two_stage:
-        # Load model normally first
-        print("Loading base model...")
-        model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16)
+        # Extract original model path from the truncated model path
+        # Pattern: "meta-llama_Meta-Llama-3-8B-Instruct_4_layers_24_28_..."
+        # We want: "meta-llama/Meta-Llama-3-8B-Instruct"
         
-        # Reconstruct TwoStageMLP
+        path_parts = model_path.split('/')[-1].split('_')  # Get filename and split
+        
+        # Reconstruct original model path
+        if path_parts[0] == 'meta-llama' and len(path_parts) >= 2:
+            original_model_path = f"{path_parts[0]}/{'-'.join(path_parts[1:3])}"  # meta-llama/Meta-Llama-3-8B-Instruct
+        else:
+            # Fallback: try to extract from the path
+            original_model_path = "meta-llama/Meta-Llama-3-8B-Instruct"  # Default assumption
+        
+        print(f"Using original model: {original_model_path}")
+        print(f"Instead of truncated model: {model_path}")
+        
+        # Load ORIGINAL model (32 layers) instead of truncated model
+        print("Loading original 32-layer model...")
+        model = AutoModelForCausalLM.from_pretrained(original_model_path, torch_dtype=torch.bfloat16)
+        
+        print(f"Original model loaded with {len(model.model.layers)} layers")
+        
+        # Reconstruct TwoStageMLP on the original model
         model = reconstruct_two_stage_model(model, model_path)
         
         # Save the reconstructed model temporarily for evaluation
@@ -218,10 +253,10 @@ def enhanced_evaluator(
         print(f"Saving reconstructed model to: {temp_model_path}")
         model.save_pretrained(temp_model_path)
         
-        # IMPORTANT: Also copy tokenizer files from original model
-        print(f"Copying tokenizer files from original model...")
+        # IMPORTANT: Copy tokenizer from ORIGINAL model (not truncated)
+        print(f"Copying tokenizer from original model...")
         try:
-            tokenizer = AutoTokenizer.from_pretrained(model_path)
+            tokenizer = AutoTokenizer.from_pretrained(original_model_path)  # Use original path!
             tokenizer.save_pretrained(temp_model_path)
             print(f"Successfully copied tokenizer to: {temp_model_path}")
         except Exception as e:
@@ -248,13 +283,13 @@ def enhanced_evaluator(
     else:
         # Regular evaluation for non-TwoStage models
         if tasks == "default":
-            print(f"{Fore.GREEN}Running default evaluation on {model_path}{Fore.RESET}")
+            logging.info(f"{Fore.GREEN}Running default evaluation on {model_path}{Fore.RESET}")
             results = eval_model(model_path, **kwargs)
         else:
-            print(f"{Fore.GREEN}Running task-specific evaluation on {model_path}{Fore.RESET}")
+            logging.info(f"{Fore.GREEN}Running task-specific evaluation on {model_path}{Fore.RESET}")
             results = eval_model_specific(model_path, tasks, **kwargs)
     
-    print(f"{Fore.GREEN}Evaluation completed{Fore.RESET}")
+    logging.info(f"{Fore.GREEN}Evaluation completed{Fore.RESET}")
     return results
 
 def read_config(config_path: str) -> dict:
