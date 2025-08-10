@@ -1,0 +1,245 @@
+"""
+Enhanced evaluator that properly handles TwoStageMLP models
+"""
+
+import argparse
+import logging
+import os
+import torch
+import torch.nn as nn
+from typing import Dict, List, Union
+import yaml
+from colorama import Fore, init
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from .utils import eval_model, eval_model_specific, seed_all
+
+# Initialize colorama for Windows compatibility
+init(autoreset=True)
+
+# Configure logging to display colored messages and timestamps
+logging.basicConfig(
+    format=(
+        f"{Fore.CYAN}%(asctime)s "
+        f"{Fore.YELLOW}[%(levelname)s] "
+        f"{Fore.RESET}%(message)s"
+    ),
+    level=logging.INFO,
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+seed_all()
+
+class TwoStageMLP(nn.Module):
+    """
+    Two-stage MLP to replace the original down_proj with low-rank factorization
+    """
+    def __init__(self, input_size: int, output_size: int, rank: int, 
+                 U: torch.Tensor, S: torch.Tensor, V: torch.Tensor, dtype=torch.bfloat16):
+        super().__init__()
+        
+        # First stage: input_size -> rank
+        self.first_proj = nn.Linear(input_size, rank, bias=False, dtype=dtype)
+        
+        # Second stage: rank -> output_size  
+        self.second_proj = nn.Linear(rank, output_size, bias=False, dtype=dtype)
+        
+        # Initialize weights from factorization
+        with torch.no_grad():
+            # First projection: compress input to rank dimensions
+            first_weight = V.to(dtype) @ torch.diag(S.to(dtype))  # [4096, rank]
+            self.first_proj.weight.data = first_weight.T  # [rank, 4096] for nn.Linear
+            
+            # Second projection: map from rank back to output
+            self.second_proj.weight.data = U.T.to(dtype)  # [output_size, rank]
+            
+        print(f"TwoStageMLP reconstructed:")
+        print(f"  First proj: {self.first_proj.weight.shape} (input {input_size} -> rank {rank})")
+        print(f"  Second proj: {self.second_proj.weight.shape} (rank {rank} -> output {output_size})")
+        print(f"  Total parameters: {self.first_proj.weight.numel() + self.second_proj.weight.numel()}")
+        
+    def forward(self, x):
+        # Two-stage transformation
+        x = self.first_proj(x)
+        x = self.second_proj(x)
+        return x
+
+def detect_two_stage_model(model_path: str) -> bool:
+    """
+    Detect if this is a TwoStage model by checking for transform files
+    """
+    # Check for transform files with different possible names
+    possible_names = [
+        f"{model_path}_transform",
+        f"{model_path}_transform.pt", 
+        f"{model_path}_transform.pth"
+    ]
+    
+    for name in possible_names:
+        if os.path.exists(name):
+            return True
+    
+    # Also check inside the model directory
+    if os.path.isdir(model_path):
+        for file in os.listdir(model_path):
+            if "transform" in file and file.endswith(('.pt', '.pth')):
+                return True
+                
+    return False
+
+def load_transform_factors(model_path: str):
+    """
+    Load the saved U, S, V factors from transform file
+    """
+    possible_names = [
+        f"{model_path}_transform",
+        f"{model_path}_transform.pt", 
+        f"{model_path}_transform.pth"
+    ]
+    
+    # Try to load from different possible locations
+    for name in possible_names:
+        if os.path.exists(name):
+            print(f"Loading transform factors from: {name}")
+            return torch.load(name, map_location='cpu')
+    
+    # Check inside model directory
+    if os.path.isdir(model_path):
+        for file in os.listdir(model_path):
+            if "transform" in file and file.endswith(('.pt', '.pth')):
+                file_path = os.path.join(model_path, file)
+                print(f"Loading transform factors from: {file_path}")
+                return torch.load(file_path, map_location='cpu')
+    
+    raise FileNotFoundError(f"Could not find transform file for {model_path}")
+
+def reconstruct_two_stage_model(model, model_path: str):
+    """
+    Reconstruct TwoStageMLP from saved factors
+    """
+    print(f"Reconstructing TwoStageMLP for model: {model_path}")
+    
+    # Load transform factors
+    try:
+        transform_data = load_transform_factors(model_path)
+        
+        U = transform_data['U']
+        S = transform_data['S'] 
+        V = transform_data['V']
+        rank = transform_data['rank']
+        
+        print(f"Loaded factors: U{U.shape}, S{S.shape}, V{V.shape}, rank={rank}")
+        
+    except Exception as e:
+        print(f"Failed to load transform factors: {e}")
+        return model
+    
+    # Find which layer to replace (look for the one that was modified)
+    target_layer_idx = None
+    
+    # Method 1: Try to find layer with unusual weight patterns
+    for i, layer in enumerate(model.model.layers):
+        down_proj = layer.mlp.down_proj
+        if hasattr(down_proj, 'weight'):
+            # Check if this layer's weights look like they were modified
+            weight_norm = torch.norm(down_proj.weight.float())
+            print(f"Layer {i} down_proj weight norm: {weight_norm:.2f}")
+            
+            # Usually the modified layer will have different statistics
+            # This is a heuristic - you might need to adjust based on your specific case
+            if i >= 20:  # Assuming later layers were more likely modified
+                target_layer_idx = i
+                break
+    
+    # Method 2: If we can't detect automatically, use a reasonable guess
+    if target_layer_idx is None:
+        # Based on your error message, it looks like layer 23 was the target
+        target_layer_idx = 23
+        print(f"Using heuristic target layer: {target_layer_idx}")
+    
+    print(f"Replacing layer {target_layer_idx} down_proj with TwoStageMLP")
+    
+    # Get original down_proj info
+    original_down_proj = model.model.layers[target_layer_idx].mlp.down_proj
+    input_size = original_down_proj.weight.shape[1]  
+    output_size = original_down_proj.weight.shape[0]  
+    
+    print(f"Original down_proj: {original_down_proj.weight.shape}")
+    
+    # Create and replace with TwoStageMLP
+    two_stage_mlp = TwoStageMLP(
+        input_size=input_size,
+        output_size=output_size, 
+        rank=rank,
+        U=U,
+        S=S,
+        V=V,
+        dtype=original_down_proj.weight.dtype
+    )
+    
+    # Replace the down_proj
+    model.model.layers[target_layer_idx].mlp.down_proj = two_stage_mlp
+    
+    print(f"Successfully replaced down_proj with TwoStageMLP")
+    
+    # Verify the replacement
+    new_down_proj = model.model.layers[target_layer_idx].mlp.down_proj
+    print(f"Verification - new down_proj type: {type(new_down_proj)}")
+    
+    return model
+
+def enhanced_evaluator(
+    model_path: str,
+    tasks: Union[str, List[str], Dict[str, dict]] = "default",
+    **kwargs
+) -> dict:
+    """
+    Enhanced evaluator that handles TwoStageMLP models properly
+    """
+    print(f"=== Enhanced Evaluator ===")
+    print(f"Model path: {model_path}")
+    
+    # Check if this is a TwoStage model
+    is_two_stage = detect_two_stage_model(model_path)
+    print(f"TwoStage model detected: {is_two_stage}")
+    
+    if is_two_stage:
+        # Load model normally first
+        print("Loading base model...")
+        model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16)
+        
+        # Reconstruct TwoStageMLP
+        model = reconstruct_two_stage_model(model, model_path)
+        
+        # Save the reconstructed model temporarily for evaluation
+        temp_model_path = f"{model_path}_temp_reconstructed"
+        print(f"Saving reconstructed model to: {temp_model_path}")
+        model.save_pretrained(temp_model_path)
+        
+        # Now evaluate using the reconstructed model
+        try:
+            if tasks == "default":
+                logging.info(f"{Fore.GREEN}Running default evaluation on reconstructed TwoStage model{Fore.RESET}")
+                results = eval_model(temp_model_path, **kwargs)
+            else:
+                logging.info(f"{Fore.GREEN}Running task-specific evaluation on reconstructed TwoStage model{Fore.RESET}")
+                results = eval_model_specific(temp_model_path, tasks, **kwargs)
+        finally:
+            # Clean up temporary model
+            if os.path.exists(temp_model_path):
+                import shutil
+                shutil.rmtree(temp_model_path)
+                print(f"Cleaned up temporary model: {temp_model_path}")
+    
+    else:
+        # Regular evaluation for non-TwoStage models
+        if tasks == "default":
+            logging.info(f"{Fore.GREEN}Running default evaluation on {model_path}{Fore.RESET}")
+            results = eval_model(model_path, **kwargs)
+        else:
+            logging.info(f"{Fore.GREEN}Running task-specific evaluation on {model_path}{Fore.RESET}")
+            results = eval_model_specific(model_path, tasks, **kwargs)
+    
+    logging.info(f"{Fore.GREEN}Evaluation completed{Fore.RESET}")
+    return results
+

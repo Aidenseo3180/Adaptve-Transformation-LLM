@@ -11,6 +11,7 @@ from .cosine_dist import cosine_dist
 from .two_stage_enhanced_cosine_dist import two_stage_enhanced_cosine_dist  # NEW: Two-stage method
 from .distance import profile_distances
 from .evaluator import evaluator
+from .enhanced_evaluator import enhanced_evaluator  # NEW: Enhanced evaluator for TwoStage models
 from .lstsq import lstsq
 from .utils import seed_all, select_non_overlapping_blocks
 
@@ -79,6 +80,14 @@ def ReplaceMe_pipeline(config):
                 num_layer=num_layers[i]
             )
             filtered_config["model_path"] = path
+
+        # Evaluate using enhanced evaluator that handles TwoStage models
+        signature = inspect.signature(enhanced_evaluator)
+        filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
+        filtered_config["model_path"] = path
+        
+        logging.info(f"{Fore.GREEN}Starting enhanced evaluation of compressed model...{Fore.RESET}")
+        enhanced_evaluator(**filtered_config)
             
     else:  # Original cosine/other methods
         signature = inspect.signature(cosine_dist)
