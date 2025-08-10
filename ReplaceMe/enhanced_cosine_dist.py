@@ -511,6 +511,13 @@ def enhanced_cosine_dist(
     current_weight = model.model.layers[target_layer_idx].mlp.down_proj.weight.to(torch.float64)
     new_weight = (transform.T @ current_weight).to(torch.bfloat16)
     
+    # For Debugging Purposes
+    print(f"Transform shape: {transform.shape}")
+    print(f"Current weight shape: {current_weight.shape}")
+    print(f"New weight shape: {new_weight.shape}")
+    weight_diff = torch.norm(new_weight - current_weight)
+    print(f"Weight change magnitude: {weight_diff}")
+
     model.model.layers[target_layer_idx].mlp.down_proj.load_state_dict({
         "weight": new_weight
     })
