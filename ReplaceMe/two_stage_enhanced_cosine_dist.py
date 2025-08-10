@@ -358,21 +358,30 @@ class TwoStageMLP(nn.Module):
         self.second_proj = nn.Linear(rank, output_size, bias=False, dtype=dtype)
         
         # Initialize weights from factorization
-        # For down_proj transformation: input @ (U @ diag(S) @ V.T)
+        # Goal: reconstruct input @ (U @ diag(S) @ V.T)
         # Split into: input @ first_proj @ second_proj
-        # where first_proj = V @ diag(S), second_proj = U.T
+        # Method: first_proj transforms to rank space, second_proj maps back
         
         with torch.no_grad():
-            # First projection: apply V and S
-            self.first_proj.weight.data = (torch.diag(S.to(dtype)) @ V.to(dtype)).T  # [rank, input_size]
+            # First projection: compress input to rank dimensions
+            # We want: input @ first_proj = input @ (V @ diag(S))
+            # So: first_proj.weight = (V @ diag(S)).T = (diag(S) @ V.T).T = V @ diag(S)
+            first_weight = V.to(dtype) @ torch.diag(S.to(dtype))  # [4096, 64]
+            self.first_proj.weight.data = first_weight.T  # [64, 4096] for nn.Linear
             
-            # Second projection: apply U
-            self.second_proj.weight.data = U.T.to(dtype)  # [output_size, rank]
+            # Second projection: map from rank back to output
+            # We want: intermediate @ second_proj = intermediate @ U.T  
+            # So: second_proj.weight = U.T
+            self.second_proj.weight.data = U.T.to(dtype)  # [4096, 64]
             
         print(f"TwoStageMLP initialized:")
-        print(f"  First proj: {self.first_proj.weight.shape}")
-        print(f"  Second proj: {self.second_proj.weight.shape}")
+        print(f"  First proj: {self.first_proj.weight.shape} (input {input_size} -> rank {rank})")
+        print(f"  Second proj: {self.second_proj.weight.shape} (rank {rank} -> output {output_size})")
         print(f"  Total parameters: {self.first_proj.weight.numel() + self.second_proj.weight.numel()}")
+        
+        # Verify mathematical equivalence
+        print(f"  V shape: {V.shape}, S shape: {S.shape}, U shape: {U.shape}")
+        print(f"  Expected reconstruction: input @ V @ diag(S) @ U.T")
         
     def forward(self, x):
         # Two-stage transformation
