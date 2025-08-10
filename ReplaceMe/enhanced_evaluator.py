@@ -230,11 +230,11 @@ def enhanced_evaluator(
         path_parts = model_path.split('/')[-1].split('_')  # Get filename and split
         
         # Reconstruct original model path
-        if path_parts[0] == 'meta-llama' and len(path_parts) >= 2:
-            original_model_path = f"{path_parts[0]}/{'-'.join(path_parts[1:3])}"  # meta-llama/Meta-Llama-3-8B-Instruct
-        else:
+        # if path_parts[0] == 'meta-llama' and len(path_parts) >= 2:
+        #     original_model_path = f"{path_parts[0]}/{'-'.join(path_parts[1:3])}"  # meta-llama/Meta-Llama-3-8B-Instruct
+        # else:
             # Fallback: try to extract from the path
-            original_model_path = "meta-llama/Meta-Llama-3-8B-Instruct"  # Default assumption
+        original_model_path = "meta-llama/Meta-Llama-3-8B-Instruct"  # Default assumption
         
         print(f"Using original model: {original_model_path}")
         print(f"Instead of truncated model: {model_path}")
@@ -265,14 +265,51 @@ def enhanced_evaluator(
         
         # Now evaluate using the reconstructed model
         try:
+            print(f"\n=== Starting Evaluation ===")
+            print(f"Temp model path: {temp_model_path}")
+            
+            # Final verification before evaluation
+            temp_model_check = AutoModelForCausalLM.from_pretrained(temp_model_path, torch_dtype=torch.bfloat16)
+            target_layer_for_eval = None
+            
+            # Find the layer that should have TwoStageMLP
+            path_parts = model_path.split('_')
+            for part in path_parts:
+                if re.match(r'\d+_\d+', part):
+                    start_removed, end_removed = map(int, part.split('_'))
+                    target_layer_for_eval = start_removed - 1
+                    break
+            
+            if target_layer_for_eval is None:
+                target_layer_for_eval = 23
+            
+            eval_down_proj = temp_model_check.model.layers[target_layer_for_eval].mlp.down_proj
+            print(f"Model being evaluated has layer {target_layer_for_eval} type: {type(eval_down_proj)}")
+            
+            if hasattr(eval_down_proj, 'first_proj') and hasattr(eval_down_proj, 'second_proj'):
+                print(f"✅ Evaluation model CONFIRMED to have TwoStageMLP!")
+                print(f"  First proj: {eval_down_proj.first_proj.weight.shape}")
+                print(f"  Second proj: {eval_down_proj.second_proj.weight.shape}")
+            else:
+                print(f"⚠️  WARNING: Evaluation model does NOT have TwoStageMLP!")
+                print(f"  Found: {type(eval_down_proj)}")
+                if hasattr(eval_down_proj, 'weight'):
+                    print(f"  Shape: {eval_down_proj.weight.shape}")
+            
+            del temp_model_check  # Clean up
+            
             if tasks == "default":
-                print(f"{Fore.GREEN}Running default evaluation on reconstructed TwoStage model{Fore.RESET}")
-                print(f"{Fore.YELLOW}Using temp model path: {temp_model_path}{Fore.RESET}")
+                logging.info(f"{Fore.GREEN}Running default evaluation on reconstructed TwoStage model{Fore.RESET}")
+                logging.info(f"{Fore.YELLOW}Using temp model path: {temp_model_path}{Fore.RESET}")
                 results = eval_model(temp_model_path, **kwargs)
             else:
-                print(f"{Fore.GREEN}Running task-specific evaluation on reconstructed TwoStage model{Fore.RESET}")
-                print(f"{Fore.YELLOW}Using temp model path: {temp_model_path}{Fore.RESET}")
+                logging.info(f"{Fore.GREEN}Running task-specific evaluation on reconstructed TwoStage model{Fore.RESET}")
+                logging.info(f"{Fore.YELLOW}Using temp model path: {temp_model_path}{Fore.RESET}")
                 results = eval_model_specific(temp_model_path, tasks, **kwargs)
+                
+            print(f"\n=== Evaluation Completed ===")
+            print(f"Results obtained: {len(results) if results else 0} benchmarks")
+            
         finally:
             # Clean up temporary model
             if os.path.exists(temp_model_path):
