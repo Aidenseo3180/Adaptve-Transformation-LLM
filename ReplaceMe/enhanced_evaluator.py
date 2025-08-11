@@ -13,6 +13,7 @@ from colorama import Fore, init
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .utils import eval_model, eval_model_specific, seed_all
+import re
 
 # Initialize colorama for Windows compatibility
 init(autoreset=True)
