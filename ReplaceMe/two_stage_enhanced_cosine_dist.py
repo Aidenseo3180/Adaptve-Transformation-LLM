@@ -167,9 +167,9 @@ def find_optimal_rank_with_performance(
     
     # Smart rank search: test only promising candidates
     rank_candidates = [
-        max(1, initial_rank // 4)
+        # max(1, initial_rank // 4)
         # max(1, initial_rank // 2), 
-        # initial_rank,
+        initial_rank
         # min(len(S), initial_rank * 2),
         # min(len(S), max_rank)
     ]
