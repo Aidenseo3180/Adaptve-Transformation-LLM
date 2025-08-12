@@ -252,6 +252,12 @@ def enhanced_evaluator(
         temp_model_path = f"{model_path}_temp_reconstructed"
         print(f"Saving reconstructed model to: {temp_model_path}")
         model.save_pretrained(temp_model_path)
+
+        print("#### Check if the model now has down_proj in two stage model ####")
+        print("Entire Model: ")
+        print(model)
+        print("Layer getting replaced: ")
+        print(model.model.layers[23].mlp.down_proj)
         
         # IMPORTANT: Copy tokenizer from ORIGINAL model (not truncated)
         print(f"Copying tokenizer from original model...")
@@ -266,12 +272,12 @@ def enhanced_evaluator(
         # Now evaluate using the reconstructed model
         try:
             if tasks == "default":
-                logging.info(f"{Fore.GREEN}Running default evaluation on reconstructed TwoStage model{Fore.RESET}")
-                logging.info(f"{Fore.YELLOW}Using temp model path: {temp_model_path}{Fore.RESET}")
+                print(f"{Fore.GREEN}Running default evaluation on reconstructed TwoStage model{Fore.RESET}")
+                print(f"{Fore.YELLOW}Using temp model path: {temp_model_path}{Fore.RESET}")
                 results = eval_model(temp_model_path, **kwargs)
             else:
-                logging.info(f"{Fore.GREEN}Running task-specific evaluation on reconstructed TwoStage model{Fore.RESET}")
-                logging.info(f"{Fore.YELLOW}Using temp model path: {temp_model_path}{Fore.RESET}")
+                print(f"{Fore.GREEN}Running task-specific evaluation on reconstructed TwoStage model{Fore.RESET}")
+                print(f"{Fore.YELLOW}Using temp model path: {temp_model_path}{Fore.RESET}")
                 results = eval_model_specific(temp_model_path, tasks, **kwargs)
         finally:
             # Clean up temporary model
@@ -283,13 +289,13 @@ def enhanced_evaluator(
     else:
         # Regular evaluation for non-TwoStage models
         if tasks == "default":
-            logging.info(f"{Fore.GREEN}Running default evaluation on {model_path}{Fore.RESET}")
+            print(f"{Fore.GREEN}Running default evaluation on {model_path}{Fore.RESET}")
             results = eval_model(model_path, **kwargs)
         else:
-            logging.info(f"{Fore.GREEN}Running task-specific evaluation on {model_path}{Fore.RESET}")
+            print(f"{Fore.GREEN}Running task-specific evaluation on {model_path}{Fore.RESET}")
             results = eval_model_specific(model_path, tasks, **kwargs)
     
-    logging.info(f"{Fore.GREEN}Evaluation completed{Fore.RESET}")
+    print(f"{Fore.GREEN}Evaluation completed{Fore.RESET}")
     return results
 
 def read_config(config_path: str) -> dict:
