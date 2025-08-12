@@ -136,9 +136,14 @@ def reconstruct_two_stage_model(model, model_path: str):
     
     # Find which layer to replace (adapted for truncated models)
     target_layer_idx = None
-    total_layers = len(model.model.layers)
+    start_removed = None
+    end_removed = None
+    num_layer = 0  # This should be extracted from the path as well
     
-    print(f"Model has {total_layers} layers total")
+    target_layer_idx = 23  # Default assumption
+    start_removed = 24
+    end_removed = 28
+    num_layer = 0
     
     # Find which layer to replace (now working with original 32-layer model)
     total_layers = len(model.model.layers)
@@ -198,8 +203,21 @@ def reconstruct_two_stage_model(model, model_path: str):
     
     # Replace the down_proj
     model.model.layers[target_layer_idx].mlp.down_proj = two_stage_mlp
-    
     print(f"Successfully replaced down_proj with TwoStageMLP")
+    
+    # ====== CRITICAL FIX: TRUNCATE THE MODEL ======
+    # This is the missing step! We need to remove layers 24-27 (start_removed to end_removed-1)
+    print(f"Before truncation: {len(model.model.layers)} layers")
+    
+    # Import the truncate_model function
+    from .utils import truncate_model
+    
+    # Truncate the model to remove the replaced layers
+    # Note: We use start_removed-num_layer and end_removed-num_layer just like in cosine_dist.py
+    model = truncate_model(model, start_removed - num_layer, end_removed - num_layer)
+    
+    print(f"After truncation: {len(model.model.layers)} layers")
+    print(f"Successfully truncated layers {start_removed} to {end_removed-1}")
     
     # Verify the replacement
     new_down_proj = model.model.layers[target_layer_idx].mlp.down_proj
