@@ -26,6 +26,7 @@ def compute_cosine_distance_loss(transformed, target):
     
     return cosine_dist
 
+
 def find_optimal_rank_with_performance(
     M_i: torch.Tensor, 
     Y_i: torch.Tensor, 
@@ -36,12 +37,13 @@ def find_optimal_rank_with_performance(
     sample_ratio: float = 0.05
 ) -> Tuple[int, torch.Tensor, torch.Tensor, torch.Tensor, float]:
     """
-    Efficient performance-based optimal rank selection with smart sampling and mixed precision
+    수정된 버전: M_i는 (N, 14336), L_i_n은 (N, 4096)
+    올바른 down_proj transformation 학습
     """
     device = M_i.device
     original_dtype = M_i.dtype
     
-    print(f"Input shapes: M_i={M_i.shape}, Y_i={Y_i.shape}, L_i_n={L_i_n.shape}, dtype={original_dtype}")
+    print(f"Input shapes: M_i={M_i.shape}, L_i_n={L_i_n.shape}, dtype={original_dtype}")
     
     # Step 1: Smart sampling for efficiency
     total_samples = M_i.shape[0]
@@ -52,19 +54,18 @@ def find_optimal_rank_with_performance(
     # Random sampling for representative data
     indices = torch.randperm(total_samples)[:sample_size]
     M_sample = M_i[indices]
-    Y_sample = Y_i[indices]
     L_sample = L_i_n[indices]
     
-    print(f"Sampled data shapes: M={M_sample.shape}, Y={Y_sample.shape}, L={L_sample.shape}")
+    print(f"Sampled data shapes: M={M_sample.shape}, L={L_sample.shape}")
     
     # Step 2: Mixed precision computation (Float32 for numerical stability)
     print("Converting to Float32 for numerical stability...")
     M_f32 = M_sample.float()
-    Y_f32 = Y_sample.float()
     L_f32 = L_sample.float()
     
-    # Step 3: Solve linear system M @ T ≈ (L - Y) with better conditioning
-    target = L_f32 - Y_f32
+    # Step 3: Solve linear system M @ T ≈ L with better conditioning
+    # 이제 T는 (14336, 4096) 형태가 되어야 함
+    target = L_f32  # 더 이상 Y를 빼지 않음 (down_proj 직접 변환)
     
     # Use batched least squares for better numerical stability
     batch_size = min(8192, M_f32.shape[0])
@@ -89,7 +90,7 @@ def find_optimal_rank_with_performance(
     else:
         # Use iterative method for large data
         print("Using iterative least squares for large data...")
-        T_init = torch.zeros(M_f32.shape[1], M_f32.shape[1], device=device)
+        T_init = torch.zeros(M_f32.shape[1], target.shape[1], device=device)  # (14336, 4096)
         weight_sum = 0
         
         for i in range(0, M_f32.shape[0], batch_size):
@@ -114,25 +115,28 @@ def find_optimal_rank_with_performance(
             T_init /= weight_sum
             print(f"Iterative solution successful, T_init shape: {T_init.shape}")
         else:
-            print("All batches failed, using identity fallback")
-            T_init = torch.eye(M_f32.shape[1], device=device)
+            print("All batches failed, using random initialization")
+            T_init = torch.randn(M_f32.shape[1], target.shape[1], device=device) * 0.01
     
     # Step 4: SVD decomposition
     try:
         U, S, Vt = torch.svd(T_init)
-        print(f"SVD successful, singular values range: [{S.min():.2e}, {S.max():.2e}]")
+        print(f"SVD successful, U: {U.shape}, S: {S.shape}, Vt: {Vt.shape}")
+        print(f"Singular values range: [{S.min():.2e}, {S.max():.2e}]")
         
         # Remove very small singular values for stability
         valid_mask = S > S.max() * 1e-6
         S = S[valid_mask]
         U = U[:, valid_mask]
         Vt = Vt[valid_mask, :]
+        print(f"After filtering small singular values: U: {U.shape}, S: {S.shape}, Vt: {Vt.shape}")
         
     except Exception as e:
-        print(f"SVD failed: {e}, using identity decomposition")
-        U = torch.eye(M_f32.shape[1], device=device)
-        S = torch.ones(M_f32.shape[1], device=device)
-        Vt = torch.eye(M_f32.shape[1], device=device)
+        print(f"SVD failed: {e}, using random initialization")
+        min_dim = min(M_f32.shape[1], target.shape[1])
+        U = torch.randn(M_f32.shape[1], min_dim, device=device)
+        S = torch.ones(min_dim, device=device)
+        Vt = torch.randn(min_dim, target.shape[1], device=device)
     
     # Step 5: Smart rank selection
     total_variance = torch.sum(S**2)
@@ -147,7 +151,7 @@ def find_optimal_rank_with_performance(
     
     print(f"Initial rank from variance threshold: {initial_rank}")
     
-    # Step 6: Binary search for optimal rank (much more efficient)
+    # Step 6: Performance-based rank optimization
     def evaluate_rank_performance(rank, alpha):
         """Evaluate performance for given rank and alpha"""
         if rank <= 0 or rank > len(S):
@@ -159,21 +163,14 @@ def find_optimal_rank_with_performance(
         Vt_r = Vt[:rank, :]
         T_r = U_r @ torch.diag(S_r) @ Vt_r
         
-        # Apply transformation with residual connection
-        transformed = M_f32 @ T_r + alpha * M_f32 + Y_f32
+        # Apply transformation
+        transformed = M_f32 @ T_r
         
         # Compute cosine distance loss
         return compute_cosine_distance_loss(transformed, L_f32).item()
     
     # Smart rank search: test only promising candidates
-    rank_candidates = [
-        # max(1, initial_rank // 4)
-        # max(1, initial_rank // 2), 
-        initial_rank
-        # min(len(S), initial_rank * 2),
-        # min(len(S), max_rank)
-    ]
-    # Remove duplicates and sort
+    rank_candidates = [initial_rank]
     rank_candidates = sorted(list(set(rank_candidates)))
     
     print(f"Testing rank candidates: {rank_candidates}")
@@ -195,15 +192,18 @@ def find_optimal_rank_with_performance(
     print(f"Optimal rank: {best_rank}, Optimal alpha: {best_alpha:.3f}, Best loss: {best_loss:.6f}")
     
     # Return optimal low-rank factors (convert back to original dtype)
-    U_optimal = U[:, :best_rank].to(original_dtype)
-    S_optimal = S[:best_rank].to(original_dtype)
-    Vt_optimal = Vt[:best_rank, :].to(original_dtype)
+    U_optimal = U[:, :best_rank].to(original_dtype)      # (14336, rank)
+    S_optimal = S[:best_rank].to(original_dtype)         # (rank,)
+    Vt_optimal = Vt[:best_rank, :].to(original_dtype)    # (rank, 4096)
+    
+    print(f"Final factor shapes: U: {U_optimal.shape}, S: {S_optimal.shape}, Vt: {Vt_optimal.shape}")
     
     # Clean up
-    del M_f32, Y_f32, L_f32, M_sample, Y_sample, L_sample
+    del M_f32, L_f32, M_sample, L_sample
     torch.cuda.empty_cache()
     
     return best_rank, U_optimal, S_optimal, Vt_optimal, best_alpha
+
 
 def enhanced_adam_method(
     a1: torch.Tensor,
@@ -227,7 +227,8 @@ def enhanced_adam_method(
     
     # Find optimal rank using sampled data for efficiency
     optimal_rank, U_opt, S_opt, Vt_opt, optimal_alpha = find_optimal_rank_with_performance(
-        a1, a1, a2, variance_threshold, max_rank, sample_ratio=sample_ratio
+        a1, None, a2,  # Y_i를 None으로 변경
+        variance_threshold, max_rank, sample_ratio=sample_ratio
     )
     
     print(f"Using rank {optimal_rank} out of {a1.shape[1]} (compression: {optimal_rank/a1.shape[1]*100:.1f}%)")
@@ -390,6 +391,8 @@ class TwoStageMLP(nn.Module):
         x = self.second_proj(x)
         return x
 
+
+
 def two_stage_enhanced_cosine_dist(
     model_path: str,
     dataset: str,
@@ -445,7 +448,8 @@ def two_stage_enhanced_cosine_dist(
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    hidden_size = model.config.hidden_size
+    hidden_size = model.config.hidden_size  # 4096
+    intermediate_size = model.config.intermediate_size  # 14336
     
     if not tokenizer.pad_token:
         tokenizer.pad_token = tokenizer.eos_token
@@ -460,28 +464,32 @@ def two_stage_enhanced_cosine_dist(
         tokenizer
     )
     
-    # Setup activation hooks
-    def save_mlp_activation(name):
+    # ========== 수정된 활성화 수집: down_proj 입력/출력 직접 캡처 ==========
+    target_layer_idx = start_id - num_layer - 1  # 23번째 layer
+    
+    # down_proj 입력을 수집하기 위한 hook
+    def save_down_proj_input(name):
         def hook(module, input, output):
-            mlp_activations[name] = output.detach()
+            mlp_activations[f'{name}_input'] = input[0].detach()  # down_proj 입력
+            mlp_activations[f'{name}_output'] = output.detach()   # down_proj 출력
         return hook
-
+    
     hooks = []
     if 'falcon' in model_path.lower():
-        for i, layer in enumerate(model.transformer.h):
-            hooks.append(layer.mlp.register_forward_hook(save_mlp_activation(f'layer_{i}_mlp')))
+        down_proj = model.transformer.h[target_layer_idx].mlp.dense_4h_to_h
     else:
-        for i, layer in enumerate(model.model.layers):
-            hooks.append(layer.mlp.register_forward_hook(save_mlp_activation(f'layer_{i}_mlp')))
+        down_proj = model.model.layers[target_layer_idx].mlp.down_proj
+    
+    hooks.append(down_proj.register_forward_hook(save_down_proj_input('target_down')))
 
     mlp_activations = {}
     
-    # Collect activations
-    a1 = torch.empty((dataset_size * max_length, hidden_size), dtype=torch.bfloat16, device='cpu')
-    a2 = torch.empty((dataset_size * max_length, hidden_size), dtype=torch.bfloat16, device='cpu')
+    # 올바른 차원으로 활성화 텐서 생성
+    a1 = torch.empty((dataset_size * max_length, intermediate_size), dtype=torch.bfloat16, device='cpu')  # down_proj 입력 (14336)
+    a2 = torch.empty((dataset_size * max_length, hidden_size), dtype=torch.bfloat16, device='cpu')        # 최종 목표 출력 (4096)
     
     cnt = 0
-    for batch in tqdm(dataloader, desc="Gathering Activations for Two-Stage Method"):
+    for batch in tqdm(dataloader, desc="Gathering down_proj I/O Activations"):
         inputs = tokenizer(
             batch,
             return_tensors="pt",
@@ -494,48 +502,50 @@ def two_stage_enhanced_cosine_dist(
         with torch.no_grad():
             outputs = model(**inputs)
         
+        # down_proj의 실제 입력 수집 (intermediate_size = 14336)
+        down_proj_input = mlp_activations['target_down_input'].view(-1, intermediate_size).to(torch.bfloat16)
+        
+        # 목표 출력: 원래 ReplaceMe와 동일한 방식으로 계산
         hidden_states = outputs.hidden_states[1:]
-        hidden_states_mlp_list = [
-            mlp_activations[f'layer_{i}_mlp'] for i in range(model.config.num_hidden_layers)
-        ]
-        hidden_states_mlp = hidden_states_mlp_list[start_id - num_layer - 1]
-
-        # Reshape activations
-        hidden_states_mlp = hidden_states_mlp.view(-1, hidden_size).to(torch.bfloat16)
         hidden_states_i = hidden_states[start_id - num_layer - 1].view(-1, hidden_size).to(torch.bfloat16)
         hidden_states_n = hidden_states[end_id - num_layer - 1].view(-1, hidden_size).to(torch.bfloat16)
         
-        a1_batch = hidden_states_mlp
-        a2_batch = hidden_states_n + hidden_states_mlp - hidden_states_i
+        # 현재 down_proj 출력
+        current_down_output = mlp_activations['target_down_output'].view(-1, hidden_size).to(torch.bfloat16)
+        
+        a1_batch = down_proj_input                                        # (N, 14336) - down_proj 입력
+        a2_batch = hidden_states_n + current_down_output - hidden_states_i  # (N, 4096) - 목표 출력
         
         a1[cnt:cnt+a1_batch.shape[0]] = a1_batch.cpu()
         a2[cnt:cnt+a2_batch.shape[0]] = a2_batch.cpu()
         
-        cnt += a2_batch.shape[0]
+        cnt += a1_batch.shape[0]
         
-        del hidden_states_mlp, hidden_states_i, hidden_states_n
+        del down_proj_input, hidden_states_i, hidden_states_n, current_down_output
     
     # Remove hooks
     for hook in hooks:
         hook.remove()
     
-    a1 = a1[:cnt]
-    a2 = a2[:cnt]
+    a1 = a1[:cnt]  # (N, 14336)
+    a2 = a2[:cnt]  # (N, 4096)
     
     print(f"Collected {cnt} activation samples")
+    print(f"down_proj input activations shape: {a1.shape} (should be N x {intermediate_size})")
+    print(f"Target output activations shape: {a2.shape} (should be N x {hidden_size})")
     
-    # Apply enhanced optimization to get U, S, V factors
-    U_factor, S_factor, V_factor = enhanced_adam_method(
-        a1, a2, 
+    # 올바른 차원으로 최적화 수행
+    U_factor, S_factor, Vt_factor = enhanced_adam_method(
+        a1, a2,  # a1: (N, 14336), a2: (N, 4096)
         loss=loss, 
         max_rank=max_rank,
         variance_threshold=variance_threshold
     )
     
     print(f"Low-rank factors obtained:")
-    print(f"  U: {U_factor.shape}")
-    print(f"  S: {S_factor.shape}") 
-    print(f"  V: {V_factor.shape}")
+    print(f"  U: {U_factor.shape} (should be 14336 x rank)")
+    print(f"  S: {S_factor.shape} (should be rank)")
+    print(f"  Vt: {Vt_factor.shape} (should be rank x 4096)")
     
     # Clean up activations
     del a1, a2
@@ -563,17 +573,20 @@ def two_stage_enhanced_cosine_dist(
     print(f"Original parameters: {original_down_proj.weight.numel()}")
     
     # Create two-stage MLP replacement
-    input_size = original_down_proj.weight.shape[1]  # Usually intermediate_size (e.g., 14336)
-    output_size = original_down_proj.weight.shape[0]  # Usually hidden_size (e.g., 4096)
+    input_size = original_down_proj.weight.shape[1]  # 14336
+    output_size = original_down_proj.weight.shape[0]  # 4096
     rank = S_factor.shape[0]
+    
+    # Vt_factor를 V_factor로 변환 (transpose)
+    V_factor = Vt_factor.T  # (4096, rank)
     
     two_stage_mlp = TwoStageMLP(
         input_size=input_size,
         output_size=output_size, 
         rank=rank,
-        U=U_factor,
-        S=S_factor,
-        V=V_factor,
+        U=U_factor,     # (14336, rank)
+        S=S_factor,     # (rank,)
+        V=V_factor,     # (4096, rank) - transposed Vt
         dtype=torch.bfloat16
     )
     
@@ -601,9 +614,9 @@ def two_stage_enhanced_cosine_dist(
     
     if save_transform_only:
         torch.save({
-            'U': U_factor,
-            'S': S_factor, 
-            'V': V_factor,
+            'U': U_factor,      # (14336, rank)
+            'S': S_factor,      # (rank,)
+            'V': V_factor,      # (4096, rank) - 이미 transposed
             'rank': rank
         }, f"{output_path}_transform")
     
