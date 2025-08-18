@@ -5,15 +5,15 @@
 method: "aslt"
 
 # Model and dataset configuration
-model_path: "meta-llama/Llama-3.2-3B-Instruct"
+model_path: "meta-llama/Meta-Llama-3-8B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
 dataset_subset: "train"
-dataset_size: 2000 # 4000
+dataset_size: 4000 # 4000
 
 # Processing parameters
 batch_size: 4
-max_length: 512
+max_length: 1024
 use_4bit: True
 token: null  # Add your HuggingFace token if needed
 
