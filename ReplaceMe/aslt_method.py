@@ -109,7 +109,7 @@ def sparse_adam_method(
     sparsity_ratio: float = 0.1,
     sparsity_pattern: str = "block_diagonal",
     loss: str = "cosine",
-    num_epochs: int = 10,
+    num_epochs: int = 1,
     lr: float = 1e-4,
     batch_size: int = 1024
 ) -> torch.Tensor:
