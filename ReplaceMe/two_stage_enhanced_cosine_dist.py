@@ -647,7 +647,8 @@ def two_stage_enhanced_cosine_dist(
     print(f"Two-stage enhanced model saved to: {output_path}")
     
     # Final cleanup
-    del model, U_factor, S_factor, V_factor
+    # Final cleanup - 변수명 수정
+    del model, U_factor, S_factor, Vt_factor  # V_factor -> Vt_factor로 변경
     gc.collect()
     torch.cuda.empty_cache()
     
