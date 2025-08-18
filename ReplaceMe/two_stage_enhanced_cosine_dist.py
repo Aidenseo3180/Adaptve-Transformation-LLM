@@ -148,6 +148,9 @@ def find_optimal_rank_with_performance(
         initial_rank = min(rank_candidates[0].item() + 1, max_rank, len(S))
     else:
         initial_rank = min(max_rank, len(S))
+
+    # TODO: hardcoded for now
+    initial_rank = 256
     
     print(f"Initial rank from variance threshold: {initial_rank}")
     
@@ -205,6 +208,8 @@ def find_optimal_rank_with_performance(
     return best_rank, U_optimal, S_optimal, Vt_optimal, best_alpha
 
 
+
+# enhanced_adam_method 함수 수정 부분만
 def enhanced_adam_method(
     a1: torch.Tensor,
     a2: torch.Tensor,
@@ -213,7 +218,7 @@ def enhanced_adam_method(
     max_rank: int = 256,
     variance_threshold: float = 0.95,
     lr: float = 1e-3,
-    max_epochs: int = 3,
+    max_epochs: int = 0,
     sample_ratio: float = 0.05
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
@@ -227,20 +232,26 @@ def enhanced_adam_method(
     
     # Find optimal rank using sampled data for efficiency
     optimal_rank, U_opt, S_opt, Vt_opt, optimal_alpha = find_optimal_rank_with_performance(
-        a1, None, a2,  # Y_i를 None으로 변경
-        variance_threshold, max_rank, sample_ratio=sample_ratio
+        a1, a1, a2, variance_threshold, max_rank, sample_ratio=sample_ratio
     )
     
     print(f"Using rank {optimal_rank} out of {a1.shape[1]} (compression: {optimal_rank/a1.shape[1]*100:.1f}%)")
     
-    # Initialize low-rank factors with proper dtype
-    U = nn.Parameter(U_opt.clone().detach().requires_grad_(True))
-    S = nn.Parameter(S_opt.clone().detach().requires_grad_(True)) 
-    V = nn.Parameter(Vt_opt.T.clone().detach().requires_grad_(True))  # Transpose Vt to get V
+    # ===== CRITICAL FIX: Correct factor interpretation =====
+    # SVD gives us: T (14336×4096) = U (14336×rank) @ diag(S) @ Vt (rank×4096)
+    # For TwoStageMLP: input @ W1 @ W2 where W1: (14336×rank), W2: (rank×4096)
+    # So: W1 = U, W2 = diag(S) @ Vt
+    
+    print(f"SVD factors - U: {U_opt.shape}, S: {S_opt.shape}, Vt: {Vt_opt.shape}")
+    
+    # Initialize low-rank factors with proper interpretation
+    U = nn.Parameter(U_opt.clone().detach().requires_grad_(True))  # (14336, rank)
+    S = nn.Parameter(S_opt.clone().detach().requires_grad_(True))  # (rank,)
+    Vt = nn.Parameter(Vt_opt.clone().detach().requires_grad_(True))  # (rank, 4096)
     alpha = nn.Parameter(torch.tensor(optimal_alpha, device=original_device, dtype=original_dtype).requires_grad_(True))
     
     # Optimizer with higher learning rate
-    optimizer = torch.optim.Adam([U, S, V, alpha], lr=lr, weight_decay=1e-5)
+    optimizer = torch.optim.Adam([U, S, Vt, alpha], lr=lr, weight_decay=1e-5)
     
     # Loss function
     def cosine_loss_batch(XA: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
@@ -275,7 +286,8 @@ def enhanced_adam_method(
                 optimizer.zero_grad()
                 
                 # Reconstruct transformation matrix from low-rank factors
-                T_reconstructed = U @ torch.diag(S) @ V.T
+                # T = U @ diag(S) @ Vt  (14336×4096)
+                T_reconstructed = U @ torch.diag(S) @ Vt
                 
                 # Apply transformation with residual connection
                 XA = batch_a1 @ T_reconstructed + alpha * batch_a1
@@ -293,7 +305,7 @@ def enhanced_adam_method(
                 loss_val.backward()
                 
                 # Gradient clipping for stability
-                torch.nn.utils.clip_grad_norm_([U, S, V, alpha], max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_([U, S, Vt, alpha], max_norm=1.0)
                 
                 optimizer.step()
                 
@@ -331,7 +343,7 @@ def enhanced_adam_method(
     with torch.no_grad():
         final_U = U.clone().detach()
         final_S = S.clone().detach()
-        final_V = V.clone().detach()
+        final_Vt = Vt.clone().detach()  # Keep as Vt, not V
         final_alpha = alpha.item()
         
         print(f"Final residual weight: {final_alpha:.4f}")
@@ -339,19 +351,33 @@ def enhanced_adam_method(
         print(f"Compression ratio: {optimal_rank}/{a1.shape[1]} = {optimal_rank/a1.shape[1]*100:.1f}%")
         
         # Verify reconstruction
-        reconstructed_T = final_U @ torch.diag(final_S) @ final_V.T
+        reconstructed_T = final_U @ torch.diag(final_S) @ final_Vt
         reconstruction_rank = torch.linalg.matrix_rank(reconstructed_T.float()).item()
         print(f"Reconstructed matrix rank: {reconstruction_rank}")
+        print(f"Final factor shapes: U: {final_U.shape}, S: {final_S.shape}, Vt: {final_Vt.shape}")
     
-    return final_U.cpu().to(torch.float64), final_S.cpu().to(torch.float64), final_V.cpu().to(torch.float64)
+    return final_U.cpu().to(torch.float64), final_S.cpu().to(torch.float64), final_Vt.cpu().to(torch.float64)
 
+
+# TwoStageMLP 클래스 완전 수정
 class TwoStageMLP(nn.Module):
     """
     Two-stage MLP to replace the original down_proj with low-rank factorization
+    Mathematically: input @ U @ diag(S) @ Vt = input @ first_proj @ second_proj
     """
     def __init__(self, input_size: int, output_size: int, rank: int, 
-                 U: torch.Tensor, S: torch.Tensor, V: torch.Tensor, dtype=torch.bfloat16):
+                 U: torch.Tensor, S: torch.Tensor, Vt: torch.Tensor, dtype=torch.bfloat16):
         super().__init__()
+        
+        print(f"TwoStageMLP initialization - Input factors:")
+        print(f"  U shape: {U.shape} (should be {input_size} x {rank})")
+        print(f"  S shape: {S.shape} (should be {rank})")
+        print(f"  Vt shape: {Vt.shape} (should be {rank} x {output_size})")
+        
+        # Verify shapes
+        assert U.shape == (input_size, rank), f"U shape mismatch: {U.shape} vs ({input_size}, {rank})"
+        assert S.shape == (rank,), f"S shape mismatch: {S.shape} vs ({rank},)"
+        assert Vt.shape == (rank, output_size), f"Vt shape mismatch: {Vt.shape} vs ({rank}, {output_size})"
         
         # First stage: input_size -> rank
         self.first_proj = nn.Linear(input_size, rank, bias=False, dtype=dtype)
@@ -360,37 +386,36 @@ class TwoStageMLP(nn.Module):
         self.second_proj = nn.Linear(rank, output_size, bias=False, dtype=dtype)
         
         # Initialize weights from factorization
-        # Goal: reconstruct input @ (U @ diag(S) @ V.T)
+        # Goal: input @ U @ diag(S) @ Vt
         # Split into: input @ first_proj @ second_proj
-        # Method: first_proj transforms to rank space, second_proj maps back
+        # Where: first_proj = U.T (for nn.Linear), second_proj = (diag(S) @ Vt).T (for nn.Linear)
         
         with torch.no_grad():
-            # First projection: compress input to rank dimensions
-            # We want: input @ first_proj = input @ (V @ diag(S))
-            # So: first_proj.weight = (V @ diag(S)).T = (diag(S) @ V.T).T = V @ diag(S)
-            first_weight = V.to(dtype) @ torch.diag(S.to(dtype))  # [4096, 64]
-            self.first_proj.weight.data = first_weight.T  # [64, 4096] for nn.Linear
+            # First projection: input @ U -> intermediate
+            # nn.Linear applies: input @ weight.T, so weight should be U.T
+            self.first_proj.weight.data = U.T.to(dtype)  # (rank, input_size)
             
-            # Second projection: map from rank back to output
-            # We want: intermediate @ second_proj = intermediate @ U.T  
-            # So: second_proj.weight = U.T
-            self.second_proj.weight.data = U.T.to(dtype)  # [4096, 64]
+            # Second projection: intermediate @ (diag(S) @ Vt) -> output  
+            # nn.Linear applies: intermediate @ weight.T, so weight should be (diag(S) @ Vt).T
+            second_weight = (torch.diag(S.to(dtype)) @ Vt.to(dtype)).T  # (output_size, rank)
+            self.second_proj.weight.data = second_weight
             
         print(f"TwoStageMLP initialized:")
-        print(f"  First proj: {self.first_proj.weight.shape} (input {input_size} -> rank {rank})")
-        print(f"  Second proj: {self.second_proj.weight.shape} (rank {rank} -> output {output_size})")
+        print(f"  First proj weight: {self.first_proj.weight.shape} (input {input_size} -> rank {rank})")
+        print(f"  Second proj weight: {self.second_proj.weight.shape} (rank {rank} -> output {output_size})")
         print(f"  Total parameters: {self.first_proj.weight.numel() + self.second_proj.weight.numel()}")
         
-        # Verify mathematical equivalence
-        print(f"  V shape: {V.shape}, S shape: {S.shape}, U shape: {U.shape}")
-        print(f"  Expected reconstruction: input @ V @ diag(S) @ U.T")
+        # Store for debugging
+        self.debug_rank = rank
+        self.debug_U_norm = U.norm().item()
+        self.debug_S_sum = S.sum().item() 
+        self.debug_Vt_norm = Vt.norm().item()
         
     def forward(self, x):
-        # Two-stage transformation
-        x = self.first_proj(x)
-        x = self.second_proj(x)
+        # Two-stage transformation: x @ U @ diag(S) @ Vt
+        x = self.first_proj(x)  # x @ U
+        x = self.second_proj(x)  # (x @ U) @ (diag(S) @ Vt)
         return x
-
 
 
 def two_stage_enhanced_cosine_dist(

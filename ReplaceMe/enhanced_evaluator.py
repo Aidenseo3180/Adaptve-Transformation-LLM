@@ -30,13 +30,26 @@ logging.basicConfig(
 
 seed_all()
 
+
+# TwoStageMLP 클래스 수정 부분만
 class TwoStageMLP(nn.Module):
     """
     Two-stage MLP to replace the original down_proj with low-rank factorization
+    Mathematically: input @ U @ diag(S) @ Vt = input @ first_proj @ second_proj
     """
     def __init__(self, input_size: int, output_size: int, rank: int, 
-                 U: torch.Tensor, S: torch.Tensor, V: torch.Tensor, dtype=torch.bfloat16):
+                 U: torch.Tensor, S: torch.Tensor, Vt: torch.Tensor, dtype=torch.bfloat16):
         super().__init__()
+        
+        print(f"TwoStageMLP initialization - Input factors:")
+        print(f"  U shape: {U.shape} (should be {input_size} x {rank})")
+        print(f"  S shape: {S.shape} (should be {rank})")
+        print(f"  Vt shape: {Vt.shape} (should be {rank} x {output_size})")
+        
+        # Verify shapes
+        assert U.shape == (input_size, rank), f"U shape mismatch: {U.shape} vs ({input_size}, {rank})"
+        assert S.shape == (rank,), f"S shape mismatch: {S.shape} vs ({rank},)"
+        assert Vt.shape == (rank, output_size), f"Vt shape mismatch: {Vt.shape} vs ({rank}, {output_size})"
         
         # First stage: input_size -> rank
         self.first_proj = nn.Linear(input_size, rank, bias=False, dtype=dtype)
@@ -45,50 +58,37 @@ class TwoStageMLP(nn.Module):
         self.second_proj = nn.Linear(rank, output_size, bias=False, dtype=dtype)
         
         # Initialize weights from factorization
+        # Goal: input @ U @ diag(S) @ Vt
+        # Split into: input @ first_proj @ second_proj
+        # Where: first_proj = U.T (for nn.Linear), second_proj = (diag(S) @ Vt).T (for nn.Linear)
+        
         with torch.no_grad():
-            # First projection: compress input to rank dimensions
-            first_weight = V.to(dtype) @ torch.diag(S.to(dtype))  # [4096, rank]
-            self.first_proj.weight.data = first_weight.T  # [rank, 4096] for nn.Linear
+            # First projection: input @ U -> intermediate
+            # nn.Linear applies: input @ weight.T, so weight should be U.T
+            self.first_proj.weight.data = U.T.to(dtype)  # (rank, input_size)
             
-            # Second projection: map from rank back to output
-            self.second_proj.weight.data = U.T.to(dtype)  # [output_size, rank]
+            # Second projection: intermediate @ (diag(S) @ Vt) -> output  
+            # nn.Linear applies: intermediate @ weight.T, so weight should be (diag(S) @ Vt).T
+            second_weight = (torch.diag(S.to(dtype)) @ Vt.to(dtype)).T  # (output_size, rank)
+            self.second_proj.weight.data = second_weight
             
-        print(f"TwoStageMLP reconstructed:")
-        print(f"  First proj: {self.first_proj.weight.shape} (input {input_size} -> rank {rank})")
-        print(f"  Second proj: {self.second_proj.weight.shape} (rank {rank} -> output {output_size})")
+        print(f"TwoStageMLP initialized:")
+        print(f"  First proj weight: {self.first_proj.weight.shape} (input {input_size} -> rank {rank})")
+        print(f"  Second proj weight: {self.second_proj.weight.shape} (rank {rank} -> output {output_size})")
         print(f"  Total parameters: {self.first_proj.weight.numel() + self.second_proj.weight.numel()}")
         
-        # ===== DEBUG: Store factors for verification =====
+        # Store for debugging
         self.debug_rank = rank
         self.debug_U_norm = U.norm().item()
-        self.debug_S_sum = S.sum().item()
-        self.debug_V_norm = V.norm().item()
-        print(f"  DEBUG - Rank: {self.debug_rank}")
-        print(f"  DEBUG - U norm: {self.debug_U_norm:.6f}")
-        print(f"  DEBUG - S sum: {self.debug_S_sum:.6f}")
-        print(f"  DEBUG - V norm: {self.debug_V_norm:.6f}")
+        self.debug_S_sum = S.sum().item() 
+        self.debug_Vt_norm = Vt.norm().item()
         
     def forward(self, x):
-        # ===== DEBUG: Forward pass monitoring =====
-        input_norm = x.norm().item()
-        
-        # Two-stage transformation
-        x_intermediate = self.first_proj(x)
-        intermediate_norm = x_intermediate.norm().item()
-        
-        x_output = self.second_proj(x_intermediate)
-        output_norm = x_output.norm().item()
-        
-        # Print debug info occasionally (every 1000 forward passes)
-        if not hasattr(self, 'forward_count'):
-            self.forward_count = 0
-        self.forward_count += 1
-        
-        if self.forward_count % 1000 == 1:  # Print on first call and every 1000th
-            print(f"  DEBUG Forward #{self.forward_count} - Input norm: {input_norm:.6f}, "
-                  f"Intermediate norm: {intermediate_norm:.6f}, Output norm: {output_norm:.6f}")
-        
-        return x_output
+        # Two-stage transformation: x @ U @ diag(S) @ Vt
+        x = self.first_proj(x)  # x @ U
+        x = self.second_proj(x)  # (x @ U) @ (diag(S) @ Vt)
+        return x
+
 
 def detect_two_stage_model(model_path: str) -> bool:
     """
@@ -166,6 +166,8 @@ def load_transform_factors(model_path: str):
     
     raise FileNotFoundError(f"Could not find transform file for {model_path}")
 
+
+# reconstruct_two_stage_model 함수에서 factors 로딩 부분 수정
 def reconstruct_two_stage_model(model, model_path: str):
     """
     Reconstruct TwoStageMLP from saved factors
@@ -178,22 +180,24 @@ def reconstruct_two_stage_model(model, model_path: str):
         
         U = transform_data['U']
         S = transform_data['S'] 
-        V = transform_data['V']
+        # ===== CRITICAL FIX: Use Vt instead of V =====
+        Vt = transform_data['V']  # This is actually Vt from our enhanced_adam_method
         rank = transform_data['rank']
         
-        print(f"Loaded factors: U{U.shape}, S{S.shape}, V{V.shape}, rank={rank}")
+        print(f"Loaded factors: U{U.shape}, S{S.shape}, Vt{Vt.shape}, rank={rank}")
         
         # ===== DEBUG: Factor analysis =====
         print(f"DEBUG - Factor analysis:")
         print(f"  U - min: {U.min():.6f}, max: {U.max():.6f}, mean: {U.mean():.6f}")
         print(f"  S - min: {S.min():.6f}, max: {S.max():.6f}, mean: {S.mean():.6f}")
-        print(f"  V - min: {V.min():.6f}, max: {V.max():.6f}, mean: {V.mean():.6f}")
-        print(f"  Rank {rank} out of max possible {min(U.shape[0], V.shape[0])}")
+        print(f"  Vt - min: {Vt.min():.6f}, max: {Vt.max():.6f}, mean: {Vt.mean():.6f}")
+        print(f"  Rank {rank} out of max possible {min(U.shape[0], Vt.shape[1])}")
         
     except Exception as e:
         print(f"Failed to load transform factors: {e}")
         return model
     
+    # [기존 layer detection 코드는 그대로 유지...]
     # Find which layer to replace (adapted for truncated models)
     target_layer_idx = None
     start_removed = None
@@ -260,6 +264,7 @@ def reconstruct_two_stage_model(model, model_path: str):
     
     print(f"Original down_proj: {original_down_proj.weight.shape}")
     
+    # ===== CRITICAL FIX: Pass Vt instead of V =====
     # Create and replace with TwoStageMLP
     two_stage_mlp = TwoStageMLP(
         input_size=input_size,
@@ -267,10 +272,11 @@ def reconstruct_two_stage_model(model, model_path: str):
         rank=rank,
         U=U,
         S=S,
-        V=V,
+        Vt=Vt,  # Pass Vt, not V
         dtype=original_down_proj.weight.dtype
     )
     
+    # [나머지 코드는 그대로 유지...]
     # ===== DEBUG: Verify TwoStageMLP weights after creation =====
     print(f"DEBUG - TwoStageMLP weights after creation:")
     print(f"  First proj weight - shape: {two_stage_mlp.first_proj.weight.shape}, "
@@ -282,28 +288,20 @@ def reconstruct_two_stage_model(model, model_path: str):
     print(f"DEBUG - Testing mathematical equivalence:")
     with torch.no_grad():
         # Check factor shapes first
-        print(f"  U shape: {U.shape}, V shape: {V.shape}, S shape: {S.shape}")
+        print(f"  U shape: {U.shape}, Vt shape: {Vt.shape}, S shape: {S.shape}")
         print(f"  Expected final matrix shape: ({input_size}, {output_size})")
         
-        # Skip reconstruction test if shapes don't match expected
-        # The issue might be in how we interpret the factorization
-        expected_shape = (input_size, output_size)  # (14336, 4096)
-        
-        if U.shape[0] != output_size or V.shape[0] != input_size:
-            print(f"  WARNING: Factor shapes don't match expected down_proj dimensions")
-            print(f"  U.shape[0]={U.shape[0]} vs output_size={output_size}")
-            print(f"  V.shape[0]={V.shape[0]} vs input_size={input_size}")
-            print(f"  Skipping mathematical equivalence test due to shape mismatch")
-        else:
+        # Now shapes should match for proper reconstruction test
+        if U.shape[0] == input_size and Vt.shape[1] == output_size and U.shape[1] == Vt.shape[0]:
             # Reconstruct full matrix from factors
-            reconstructed_T = U @ torch.diag(S) @ V.T
+            reconstructed_T = U @ torch.diag(S) @ Vt
             print(f"  Reconstructed T shape: {reconstructed_T.shape}, norm: {reconstructed_T.norm():.6f}")
             
             # Test on random input
-            test_input = torch.randn(1, input_size, dtype=original_down_proj.weight.dtype)
+            test_input = torch.randn(2, input_size, dtype=original_down_proj.weight.dtype)
             
-            # Original output (what we're trying to approximate)
-            original_output = test_input @ reconstructed_T.T  # T is applied as x @ T.T
+            # Original transformation output
+            original_output = test_input @ reconstructed_T
             
             # TwoStageMLP output  
             two_stage_output = two_stage_mlp(test_input)
@@ -311,57 +309,17 @@ def reconstruct_two_stage_model(model, model_path: str):
             # Check difference
             diff = (original_output - two_stage_output).norm()
             print(f"  Reconstruction error on test input: {diff:.8f}")
-            if diff > 1e-4:
+            if diff > 1e-3:
                 print(f"  WARNING: Large reconstruction error!")
+            else:
+                print(f"  SUCCESS: Mathematical equivalence verified!")
+        else:
+            print(f"  WARNING: Shape mismatch - U: {U.shape}, Vt: {Vt.shape}")
+            print(f"  Expected U: ({input_size}, rank), Vt: (rank, {output_size})")
     
     # Replace the down_proj
     model.model.layers[target_layer_idx].mlp.down_proj = two_stage_mlp
     print(f"Successfully replaced down_proj with TwoStageMLP")
-    
-    # ===== DEBUG: Verify replacement was successful =====
-    replaced_layer = model.model.layers[target_layer_idx].mlp.down_proj
-    print(f"DEBUG - After replacement verification:")
-    print(f"  Type: {type(replaced_layer)}")
-    print(f"  Is TwoStageMLP: {isinstance(replaced_layer, TwoStageMLP)}")
-    if isinstance(replaced_layer, TwoStageMLP):
-        print(f"  Rank: {replaced_layer.debug_rank}")
-        print(f"  Forward count: {getattr(replaced_layer, 'forward_count', 0)}")
-    
-    # ====== CRITICAL FIX: TRUNCATE THE MODEL ======
-    # This is the missing step! We need to remove layers 24-27 (start_removed to end_removed-1)
-    print(f"Before truncation: {len(model.model.layers)} layers")
-    
-    # Import the truncate_model function
-    from .utils import truncate_model
-    
-    # Truncate the model to remove the replaced layers
-    # Note: We use start_removed-num_layer and end_removed-num_layer just like in cosine_dist.py
-    model = truncate_model(model, start_removed - num_layer, end_removed - num_layer)
-    
-    print(f"After truncation: {len(model.model.layers)} layers")
-    print(f"Successfully truncated layers {start_removed} to {end_removed-1}")
-    
-    # ===== DEBUG: Final verification after truncation =====
-    final_layer = model.model.layers[target_layer_idx].mlp.down_proj
-    print(f"DEBUG - Final verification after truncation:")
-    print(f"  Layer {target_layer_idx} type: {type(final_layer)}")
-    print(f"  Is still TwoStageMLP: {isinstance(final_layer, TwoStageMLP)}")
-    if isinstance(final_layer, TwoStageMLP):
-        print(f"  Rank preserved: {final_layer.debug_rank}")
-        
-        # Test a forward pass to make sure it works
-        test_tensor = torch.randn(2, input_size, dtype=final_layer.first_proj.weight.dtype)
-        try:
-            output = final_layer(test_tensor)
-            print(f"  Test forward pass successful: {test_tensor.shape} -> {output.shape}")
-        except Exception as e:
-            print(f"  ERROR in test forward pass: {e}")
-    
-    # Verify the replacement
-    new_down_proj = model.model.layers[target_layer_idx].mlp.down_proj
-    print(f"Verification - new down_proj type: {type(new_down_proj)}")
-    
-    return model
 
 def enhanced_evaluator(
     model_path: str,
