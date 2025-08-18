@@ -332,6 +332,135 @@ def reconstruct_two_stage_model(model, model_path: str):
 
 # enhanced_evaluator.py 수정 - 저장/로딩 대신 메모리 내 평가 사용
 
+import tempfile
+import shutil
+from lm_eval import evaluator
+from lm_eval.models.huggingface import HFLM
+
+def eval_model_direct(model, tokenizer, **kwargs) -> Dict:
+    """
+    Evaluate model directly using lm_eval with in-memory model
+    """
+    print("Setting up direct model evaluation...")
+    
+    # Create temporary directory for tokenizer files (lm_eval needs tokenizer files)
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Save only tokenizer files to temp directory
+        tokenizer.save_pretrained(temp_dir)
+        print(f"Saved tokenizer to temporary directory: {temp_dir}")
+        
+        try:
+            # Create HFLM wrapper with our in-memory model
+            print("Creating HFLM wrapper for in-memory model...")
+            
+            # Use HFLM with our custom model
+            lm = HFLM(
+                pretrained=model,  # Pass the actual model object
+                tokenizer=temp_dir,  # Path to tokenizer files
+                dtype=model.dtype if hasattr(model, 'dtype') else "auto",
+                device_map="auto"
+            )
+            
+            print("Running benchmark evaluation...")
+            
+            # Run standard benchmarks
+            wino_res = evaluator.simple_evaluate(
+                model=lm,
+                tasks=['winogrande'],
+                num_fewshot=5
+            )['results']
+            
+            other_res = evaluator.simple_evaluate(
+                model=lm,
+                tasks=['boolq', 'race', 'openbookqa', 'piqa', 'sciq', 'lambada_openai'],
+                num_fewshot=0
+            )['results']
+            
+            results = {**other_res, **wino_res}
+            
+            print("Direct evaluation completed successfully!")
+            return results
+            
+        except Exception as e:
+            print(f"Direct evaluation failed with error: {e}")
+            print("Falling back to temporary file method...")
+            
+            # Fallback: save model temporarily
+            temp_model_path = os.path.join(temp_dir, "temp_model")
+            model.save_pretrained(temp_model_path)
+            
+            # Run evaluation on temp model
+            wino_res = evaluator.simple_evaluate(
+                model='hf',
+                tasks=['winogrande'],
+                model_args=f"pretrained={temp_model_path},dtype=bfloat16,device=auto",
+                num_fewshot=5
+            )['results']
+            
+            other_res = evaluator.simple_evaluate(
+                model='hf',
+                tasks=['boolq', 'race', 'openbookqa', 'piqa', 'sciq', 'lambada_openai'],
+                model_args=f"pretrained={temp_model_path},dtype=bfloat16,device=auto",
+                num_fewshot=0
+            )['results']
+            
+            results = {**other_res, **wino_res}
+            return results
+
+
+def eval_model_specific_direct(model, tokenizer, tasks: Dict, **kwargs) -> Dict:
+    """
+    Evaluate model on specified tasks directly using lm_eval
+    """
+    print("Setting up direct model evaluation for specific tasks...")
+    
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Save tokenizer files
+        tokenizer.save_pretrained(temp_dir)
+        
+        try:
+            # Create HFLM wrapper
+            lm = HFLM(
+                pretrained=model,
+                tokenizer=temp_dir,
+                dtype=model.dtype if hasattr(model, 'dtype') else "auto",
+                device_map="auto"
+            )
+            
+            results = {}
+            for task, config in tasks.items():
+                print(f"Evaluating task: {task}")
+                res = evaluator.simple_evaluate(
+                    model=lm,
+                    tasks=[task],
+                    num_fewshot=config.get("fewshots", 0)
+                )['results']
+                results.update(res)
+            
+            return results
+            
+        except Exception as e:
+            print(f"Direct evaluation failed: {e}")
+            print("Falling back to temporary file method...")
+            
+            # Fallback method
+            temp_model_path = os.path.join(temp_dir, "temp_model")
+            model.save_pretrained(temp_model_path)
+            
+            results = {}
+            for task, config in tasks.items():
+                res = evaluator.simple_evaluate(
+                    model='hf',
+                    tasks=[task],
+                    model_args=f"pretrained={temp_model_path},dtype=bfloat16,device=auto",
+                    num_fewshot=config.get("fewshots", 0)
+                )['results']
+                results.update(res)
+            
+            return results
+
+
+# enhanced_evaluator 함수도 약간 수정
 def enhanced_evaluator(
     model_path: str,
     tasks: Union[str, List[str], Dict[str, dict]] = "default",
@@ -348,13 +477,12 @@ def enhanced_evaluator(
     print(f"TwoStage model detected: {is_two_stage}")
     
     if is_two_stage:
-        # Extract original model path from the truncated model path
-        original_model_path = "meta-llama/Meta-Llama-3-8B-Instruct"  # Default assumption
+        original_model_path = "meta-llama/Meta-Llama-3-8B-Instruct"
         
         print(f"Using original model: {original_model_path}")
         print(f"Instead of truncated model: {model_path}")
         
-        # Load ORIGINAL model (32 layers) instead of truncated model
+        # Load ORIGINAL model (32 layers)
         print("Loading original 32-layer model...")
         model = AutoModelForCausalLM.from_pretrained(original_model_path, torch_dtype=torch.bfloat16)
         
@@ -363,65 +491,55 @@ def enhanced_evaluator(
         # Reconstruct TwoStageMLP on the original model
         model = reconstruct_two_stage_model(model, model_path)
         
-        # ===== DEBUG: Final model inspection before evaluation =====
+        # Verify TwoStageMLP is in place
         print(f"DEBUG - Final model inspection before evaluation:")
         layer_23 = model.model.layers[23].mlp.down_proj
         print(f"  Layer 23 type: {type(layer_23)}")
         if isinstance(layer_23, TwoStageMLP):
             print(f"  SUCCESS: TwoStageMLP is in place!")
             print(f"  Rank: {layer_23.debug_rank}")
+            print(f"  Total params: {layer_23.first_proj.weight.numel() + layer_23.second_proj.weight.numel()}")
         else:
             print(f"  ERROR: Layer 23 is not TwoStageMLP!")
+            return {}
         
-        print("#### Check if the model now has down_proj in two stage model ####")
         print("Layer getting replaced: ")
         print(model.model.layers[23].mlp.down_proj)
         
-        # ===== CRITICAL FIX: Use in-memory evaluation instead of save/load =====
-        print(f"{Fore.YELLOW}Using in-memory evaluation to preserve TwoStageMLP{Fore.RESET}")
-        
-        # IMPORTANT: Copy tokenizer from ORIGINAL model
+        # Load tokenizer
         print(f"Loading tokenizer from original model...")
         try:
             tokenizer = AutoTokenizer.from_pretrained(original_model_path)
             print(f"Successfully loaded tokenizer")
         except Exception as e:
-            print(f"Warning: Could not load tokenizer: {e}")
+            print(f"Error: Could not load tokenizer: {e}")
             return {}
         
-        # ===== NEW APPROACH: Direct evaluation without saving =====
+        # Direct evaluation
+        print(f"{Fore.GREEN}Running evaluation on TwoStage model (in-memory){Fore.RESET}")
         try:
             if tasks == "default":
-                print(f"{Fore.GREEN}Running default evaluation on TwoStage model (in-memory){Fore.RESET}")
-                # Use direct model evaluation instead of path-based evaluation
+                print(f"Running default benchmarks...")
                 results = eval_model_direct(model, tokenizer, **kwargs)
             else:
-                print(f"{Fore.GREEN}Running task-specific evaluation on TwoStage model (in-memory){Fore.RESET}")
+                print(f"Running task-specific evaluation...")
                 results = eval_model_specific_direct(model, tokenizer, tasks, **kwargs)
                 
+            # Print results summary
+            print(f"\n{Fore.GREEN}=== Evaluation Results ==={Fore.RESET}")
+            for task, metrics in results.items():
+                if isinstance(metrics, dict) and 'acc' in metrics:
+                    acc = metrics['acc']
+                    print(f"  {task}: {acc:.4f}")
+                elif isinstance(metrics, dict) and 'perplexity' in metrics:
+                    ppl = metrics['perplexity']
+                    print(f"  {task}: {ppl:.4f} (perplexity)")
+                    
         except Exception as e:
-            print(f"{Fore.RED}In-memory evaluation failed: {e}{Fore.RESET}")
-            print(f"{Fore.YELLOW}Falling back to temp file approach{Fore.RESET}")
-            
-            # Fallback: save to temp and evaluate quickly
-            temp_model_path = f"{model_path}_temp_reconstructed"
-            print(f"Saving reconstructed model to: {temp_model_path}")
-            
-            # Save model and tokenizer
-            model.save_pretrained(temp_model_path)
-            tokenizer.save_pretrained(temp_model_path)
-            
-            try:
-                if tasks == "default":
-                    results = eval_model(temp_model_path, **kwargs)
-                else:
-                    results = eval_model_specific(temp_model_path, tasks, **kwargs)
-            finally:
-                # Clean up temporary model
-                if os.path.exists(temp_model_path):
-                    import shutil
-                    shutil.rmtree(temp_model_path)
-                    print(f"Cleaned up temporary model: {temp_model_path}")
+            print(f"{Fore.RED}Evaluation failed: {e}{Fore.RESET}")
+            import traceback
+            traceback.print_exc()
+            return {}
     
     else:
         # Regular evaluation for non-TwoStage models
@@ -434,41 +552,6 @@ def enhanced_evaluator(
     
     print(f"{Fore.GREEN}Evaluation completed{Fore.RESET}")
     return results
-
-
-# 새로운 direct evaluation 함수들 추가
-def eval_model_direct(model, tokenizer, **kwargs) -> Dict:
-    """
-    Evaluate model directly without saving to disk
-    """
-    print("WARNING: Direct model evaluation not implemented yet.")
-    print("This would require integrating lm_eval with in-memory models.")
-    
-    # For now, return a placeholder
-    return {
-        "placeholder": {
-            "acc": 0.5,
-            "acc_stderr": 0.01
-        },
-        "note": "Direct evaluation not implemented - used fallback method"
-    }
-
-
-def eval_model_specific_direct(model, tokenizer, tasks: Dict, **kwargs) -> Dict:
-    """
-    Evaluate model on specified tasks directly without saving to disk
-    """
-    print("WARNING: Direct model evaluation not implemented yet.")
-    print("This would require integrating lm_eval with in-memory models.")
-    
-    # For now, return a placeholder
-    return {
-        "placeholder": {
-            "acc": 0.5,
-            "acc_stderr": 0.01
-        },
-        "note": "Direct evaluation not implemented - used fallback method"
-    }
 
 
 def read_config(config_path: str) -> dict:
