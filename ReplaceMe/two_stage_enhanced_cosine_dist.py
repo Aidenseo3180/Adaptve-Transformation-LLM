@@ -559,18 +559,18 @@ def two_stage_enhanced_cosine_dist(
     print(f"down_proj input activations shape: {a1.shape} (should be N x {intermediate_size})")
     print(f"Target output activations shape: {a2.shape} (should be N x {hidden_size})")
     
-    # 올바른 차원으로 최적화 수행
-    U_factor, S_factor, Vt_factor = enhanced_adam_method(
-        a1, a2,  # a1: (N, 14336), a2: (N, 4096)
+    # Apply enhanced optimization to get U, S, V factors
+    U_factor, S_factor, Vt_factor = enhanced_adam_method(  # V_factor -> Vt_factor로 변경
+        a1, a2, 
         loss=loss, 
         max_rank=max_rank,
         variance_threshold=variance_threshold
     )
     
     print(f"Low-rank factors obtained:")
-    print(f"  U: {U_factor.shape} (should be 14336 x rank)")
-    print(f"  S: {S_factor.shape} (should be rank)")
-    print(f"  Vt: {Vt_factor.shape} (should be rank x 4096)")
+    print(f"  U: {U_factor.shape}")
+    print(f"  S: {S_factor.shape}") 
+    print(f"  Vt: {Vt_factor.shape}")  # V -> Vt로 변경
     
     # Clean up activations
     del a1, a2
@@ -598,20 +598,18 @@ def two_stage_enhanced_cosine_dist(
     print(f"Original parameters: {original_down_proj.weight.numel()}")
     
     # Create two-stage MLP replacement
-    input_size = original_down_proj.weight.shape[1]  # 14336
-    output_size = original_down_proj.weight.shape[0]  # 4096
+    input_size = original_down_proj.weight.shape[1]  # Usually intermediate_size (e.g., 14336)
+    output_size = original_down_proj.weight.shape[0]  # Usually hidden_size (e.g., 4096)
     rank = S_factor.shape[0]
     
-    # Vt_factor를 V_factor로 변환 (transpose)
-    V_factor = Vt_factor.T  # (4096, rank)
-    
+    # ===== CRITICAL FIX: Pass Vt instead of V =====
     two_stage_mlp = TwoStageMLP(
         input_size=input_size,
         output_size=output_size, 
         rank=rank,
-        U=U_factor,     # (14336, rank)
-        S=S_factor,     # (rank,)
-        V=V_factor,     # (4096, rank) - transposed Vt
+        U=U_factor,
+        S=S_factor,
+        Vt=Vt_factor,  # V=V_factor -> Vt=Vt_factor로 변경
         dtype=torch.bfloat16
     )
     
@@ -638,10 +636,11 @@ def two_stage_enhanced_cosine_dist(
     tokenizer.save_pretrained(output_path)
     
     if save_transform_only:
+        # ===== CRITICAL FIX: Save Vt instead of V =====
         torch.save({
-            'U': U_factor,      # (14336, rank)
-            'S': S_factor,      # (rank,)
-            'V': V_factor,      # (4096, rank) - 이미 transposed
+            'U': U_factor,
+            'S': S_factor, 
+            'V': Vt_factor,  # 주의: 저장할 때는 'V' 키로 저장하지만 실제로는 Vt 값
             'rank': rank
         }, f"{output_path}_transform")
     
