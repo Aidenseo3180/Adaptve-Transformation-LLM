@@ -8,11 +8,9 @@ from colorama import Fore, Style, init
 
 # Import local modules
 from .cosine_dist import cosine_dist
-from .two_stage_enhanced_cosine_dist import two_stage_enhanced_cosine_dist  # NEW: Two-stage method
 from .distance import profile_distances
 from .evaluator import evaluator
-from .enhanced_evaluator import enhanced_evaluator  # NEW: Enhanced evaluator for TwoStage models
-from .lstsq import lstsq
+from .aslt_method import aslt_method  # Import our new ASLT method
 from .utils import seed_all, select_non_overlapping_blocks
 
 # Initialize colorama for Windows compatibility
@@ -34,22 +32,15 @@ def ReplaceMe_pipeline(config):
     filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
     if config['distances_path'] is None:
         # Profile distances using filtered configuration
+        logging.info(f"{Fore.GREEN}Profiling layer distances...{Fore.RESET}")
         profile_distances(**filtered_config)
         config['distances_path'] = "./distances.pth"
-        
-    # Determine method and apply configurations accordingly
-    if config["method"] == "lstsq":
-        signature = inspect.signature(lstsq)
+    
+    
+    if config["method"] == "aslt":
+        logging.info(f"{Fore.GREEN}Using ASLT (Adaptive Sparse Linear Transform) method...{Fore.RESET}")
+        signature = inspect.signature(aslt_method)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-        path = lstsq(**filtered_config)
-        
-    elif config["method"] == "two_stage_enhanced":  # NEW: Two-stage method
-        signature = inspect.signature(two_stage_enhanced_cosine_dist)
-        filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-        
-        logging.info(f"{Fore.GREEN}=== Using Two-Stage Enhanced Method ==={Fore.RESET}")
-        logging.info(f"{Fore.YELLOW}Max Rank: {filtered_config.get('max_rank', 256)}{Fore.RESET}")
-        logging.info(f"{Fore.YELLOW}Expected Memory Reduction: ~90%{Fore.RESET}")
         
         # Load average distances and select non-overlapping blocks
         average_distances = torch.load(filtered_config['distances_path'], weights_only=False)  
@@ -60,38 +51,26 @@ def ReplaceMe_pipeline(config):
             merge_consecutive=filtered_config['merge_consecutive']
         )
         
+        print(f"DEBUG: Selected {len(selected_blocks)} blocks for ASLT compression: {selected_blocks}")
+        
         # Calculate start and end IDs, and number of layers
         start_ids = sorted([x[0] for x in selected_blocks])
         end_ids = sorted([x[1] for x in selected_blocks])
         num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
         num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
         
-        logging.info(f"{Fore.CYAN}Selected blocks: {selected_blocks}{Fore.RESET}")
+        print(f"DEBUG: Processing blocks - start_ids: {start_ids}, end_ids: {end_ids}")
+        print(f"DEBUG: Cumulative layer counts: {num_layers}")
         
         # Iterate over each selected block
         for i in range(len(selected_blocks)):
-            logging.info(f"{Fore.MAGENTA}Processing block {i+1}/{len(selected_blocks)}: "
-                        f"layers {start_ids[i]} to {end_ids[i]} with Two-Stage MLP{Fore.RESET}")
-            
-            path = two_stage_enhanced_cosine_dist(
-                **filtered_config, 
-                start_id=start_ids[i], 
-                end_id=end_ids[i], 
-                num_layer=num_layers[i]
-            )
+            logging.info(f"{Fore.CYAN}Processing block {i+1}/{len(selected_blocks)}: layers {start_ids[i]} to {end_ids[i]}{Fore.RESET}")
+            path = aslt_method(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
-
-        # Evaluate using enhanced evaluator that handles TwoStage models
-        signature = inspect.signature(enhanced_evaluator)
-        filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-        filtered_config["model_path"] = path
-        
-        logging.info(f"{Fore.GREEN}Starting enhanced evaluation of compressed model...{Fore.RESET}")
-        enhanced_evaluator(**filtered_config)
-
-        return
-            
+            print(f"DEBUG: Block {i+1} processed, model saved to: {path}")
+    
     else:  # Original cosine/other methods
+        logging.info(f"{Fore.GREEN}Using original cosine distance method...{Fore.RESET}")
         signature = inspect.signature(cosine_dist)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
@@ -131,11 +110,16 @@ def read_config(config_path: str):
 def run_from_config():
     # Parse command-line arguments for configuration file path
     parser = argparse.ArgumentParser(
-        description="Run enhanced ReplaceMe pipeline based on a configuration file."
+        description="Run ReplaceMe pipeline with ASLT support for linear transform estimation based on a configuration file."
     )
     parser.add_argument("--config", type=str, required=True, help="Path to the configuration file.")
     
     # Execute pipeline based on parsed configuration
     args = parser.parse_args()
     config = read_config(args.config)
+    
+    print(f"DEBUG: Loaded configuration with method: {config.get('method', 'cosine')}")
+    if config.get('method') == 'aslt':
+        print(f"DEBUG: ASLT settings - sparsity_ratio: {config.get('sparsity_ratio', 0.1)}, sparsity_pattern: {config.get('sparsity_pattern', 'block_diagonal')}")
+    
     ReplaceMe_pipeline(config)

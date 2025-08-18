@@ -1,0 +1,63 @@
+# ASLT Configuration Example
+# This configuration file demonstrates how to use the new ASLT method
+
+# Method selection - use "aslt" for Adaptive Sparse Linear Transform
+method: "aslt"
+
+# Model and dataset configuration
+model_path: "meta-llama/Meta-Llama-3-8B-Instruct"
+dataset: "Open-Orca/SlimOrca"
+dataset_column: "text"
+dataset_subset: "train"
+dataset_size: 2000 # 4000
+
+# Processing parameters
+batch_size: 4
+max_length: 1024
+use_4bit: false
+token: null  # Add your HuggingFace token if needed
+
+# Layer selection parameters
+layers_to_skip: 4  # Number of layers in each block to compress
+num_A: 1  # Number of compression blocks
+merge_consecutive: true
+distances_path: null  # Will be auto-generated if null
+
+# ASLT-specific parameters
+sparsity_ratio: 0.1  # 10% non-zero elements (90% sparse)
+sparsity_pattern: "block_diagonal"  # Options: "block_diagonal", "band_matrix", "strided"
+loss: "cosine"  # Loss function for optimization
+accurate: false  # Set to true for more accurate but memory-intensive computation
+
+# Optimization parameters (inherited from original method)
+solver: "adam"
+diag: false
+two_vectors: false
+thri: false
+
+# Output parameters
+save_path: null  # Will be auto-generated if null
+save_transform_only: false
+
+# Evaluation parameters
+tasks: "default"
+
+# Advanced ASLT parameters (optional)
+# These will use defaults if not specified:
+# - num_epochs: 10 (for sparse optimization)
+# - lr: 1e-4 (learning rate for Adam optimizer)
+# - batch_size_optim: 1024 (batch size for optimization)
+
+# Example configurations for different sparsity patterns:
+
+# For maximum FLOP reduction (90% sparse):
+# sparsity_ratio: 0.1
+# sparsity_pattern: "block_diagonal"
+
+# For balanced performance and efficiency (80% sparse):
+# sparsity_ratio: 0.2
+# sparsity_pattern: "band_matrix"
+
+# For memory-efficient computation (70% sparse):
+# sparsity_ratio: 0.3
+# sparsity_pattern: "strided"
