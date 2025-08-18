@@ -293,12 +293,21 @@ def reconstruct_two_stage_model(model, model_path: str):
         
         # Now shapes should match for proper reconstruction test
         if U.shape[0] == input_size and Vt.shape[1] == output_size and U.shape[1] == Vt.shape[0]:
-            # Reconstruct full matrix from factors
-            reconstructed_T = U @ torch.diag(S) @ Vt
-            print(f"  Reconstructed T shape: {reconstructed_T.shape}, norm: {reconstructed_T.norm():.6f}")
+            # ===== CRITICAL FIX: Ensure consistent dtype =====
+            # Convert all factors to the same dtype as the original model
+            target_dtype = original_down_proj.weight.dtype
+            U_test = U.to(target_dtype)
+            S_test = S.to(target_dtype) 
+            Vt_test = Vt.to(target_dtype)
             
-            # Test on random input
-            test_input = torch.randn(2, input_size, dtype=original_down_proj.weight.dtype)
+            # Reconstruct full matrix from factors
+            reconstructed_T = U_test @ torch.diag(S_test) @ Vt_test
+            print(f"  Reconstructed T shape: {reconstructed_T.shape}, norm: {reconstructed_T.norm():.6f}")
+            print(f"  Reconstructed T dtype: {reconstructed_T.dtype}")
+            
+            # Test on random input with matching dtype
+            test_input = torch.randn(2, input_size, dtype=target_dtype)
+            print(f"  Test input dtype: {test_input.dtype}")
             
             # Original transformation output
             original_output = test_input @ reconstructed_T
