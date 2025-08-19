@@ -46,7 +46,11 @@ class StructuredSparseTransform(nn.Module):
         
         # Initialize with identity-like structure
         with torch.no_grad():
-            self.dense_weights.data = torch.eye(hidden_size) + 0.01 * torch.randn(hidden_size, hidden_size)
+            # self.dense_weights.data = torch.eye(hidden_size) + 0.01 * torch.randn(hidden_size, hidden_size)
+            self.dense_weights.data = torch.eye(hidden_size) + 0.1 * torch.randn(hidden_size, hidden_size)
+            # sparse mask 영역만 더 강하게 초기화
+            self.dense_weights.data = self.dense_weights.data * self.sparse_mask.float() + \
+                                    torch.eye(hidden_size) * (~self.sparse_mask).float()
         
         print(f"DEBUG: Sparse mask created with {self.sparse_mask.sum().item()} non-zero elements out of {hidden_size * hidden_size} total")
         print(f"DEBUG: Actual sparsity ratio: {1.0 - self.sparse_mask.float().mean().item():.4f}")
@@ -188,6 +192,20 @@ def sparse_adam_method(
             
             if epoch % 2 == 0:
                 print(f"DEBUG: Epoch {epoch}, Average Loss: {avg_loss:.6f}")
+
+            # Training loop 내부에 추가
+            if epoch % 5 == 0:
+                with torch.no_grad():
+                    # Transformation quality 체크
+                    test_output = sparse_model(a1[:1000].float().to("cuda"))
+                    target_output = a2[:1000].float().to("cuda")
+                    
+                    cosine_sim = torch.cosine_similarity(test_output, target_output, dim=1).mean()
+                    print(f"DEBUG: Epoch {epoch}, Cosine similarity: {cosine_sim:.4f}")
+                    
+                    # Weight magnitude 체크
+                    weight_norm = sparse_model.dense_weights.norm().item()
+                    print(f"DEBUG: Weight norm: {weight_norm:.4f}")
     
     # Get the sparse transformation matrix
     with torch.no_grad():

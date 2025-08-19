@@ -24,8 +24,8 @@ merge_consecutive: False
 distances_path: null  # Will be auto-generated if null
 
 # ASLT-specific parameters
-sparsity_ratio: 0.1  # 10% non-zero elements (90% sparse)
-sparsity_pattern: "block_diagonal"  # Options: "block_diagonal", "band_matrix", "strided"
+sparsity_ratio: 0.5  # 10% non-zero elements (90% sparse)
+sparsity_pattern: "band_matrix"  # Options: "block_diagonal", "band_matrix", "strided"
 loss: "cosine"  # Loss function for optimization
 accurate: False  # Set to true for more accurate but memory-intensive computation
 
