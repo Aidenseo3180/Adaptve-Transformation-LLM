@@ -27,99 +27,70 @@ logging.basicConfig(
 seed_all()
 
 
-class StructuredSparseTransform(nn.Module):
-    """Structured sparse linear transformation for efficient computation."""
+class ResidualLowRankTransform(nn.Module):
+    """Residual-Informed Low-Rank Decomposition Transform.
     
-    def __init__(self, hidden_size: int, sparsity_ratio: float = 0.1, pattern: str = "block_diagonal"):
+    T = I + U @ V^T where U, V are low-rank matrices.
+    This preserves identity mapping while learning a low-rank perturbation.
+    """
+    
+    def __init__(self, hidden_size: int, rank: int = 32):
         super().__init__()
         self.hidden_size = hidden_size
-        self.sparsity_ratio = sparsity_ratio
-        self.pattern = pattern
+        self.rank = rank
         
-        print(f"DEBUG: Initializing StructuredSparseTransform with hidden_size={hidden_size}, sparsity_ratio={sparsity_ratio}, pattern={pattern}")
+        print(f"DEBUG: Initializing ResidualLowRankTransform with hidden_size={hidden_size}, rank={rank}")
         
-        # Initialize dense weights
-        self.dense_weights = nn.Parameter(torch.randn(hidden_size, hidden_size))
+        # Low-rank factors: U @ V^T represents the perturbation from identity
+        self.U = nn.Parameter(torch.randn(hidden_size, rank) * 0.01)  # Small initialization
+        self.V = nn.Parameter(torch.randn(hidden_size, rank) * 0.01)  # Small initialization
         
-        # Create structured sparse mask
-        self.register_buffer('sparse_mask', self._create_structured_mask())
+        # Calculate FLOP reduction
+        original_flops = hidden_size * hidden_size
+        new_flops = 2 * hidden_size * rank  # U @ V^T computation
+        flop_reduction = 1.0 - (new_flops / original_flops)
         
-        # Initialize with identity-like structure
-        with torch.no_grad():
-            # self.dense_weights.data = torch.eye(hidden_size) + 0.01 * torch.randn(hidden_size, hidden_size)
-            self.dense_weights.data = torch.eye(hidden_size) + 0.1 * torch.randn(hidden_size, hidden_size)
-            # sparse mask 영역만 더 강하게 초기화
-            self.dense_weights.data = self.dense_weights.data * self.sparse_mask.float() + \
-                                    torch.eye(hidden_size) * (~self.sparse_mask).float()
-        
-        print(f"DEBUG: Sparse mask created with {self.sparse_mask.sum().item()} non-zero elements out of {hidden_size * hidden_size} total")
-        print(f"DEBUG: Actual sparsity ratio: {1.0 - self.sparse_mask.float().mean().item():.4f}")
-    
-    def _create_structured_mask(self) -> torch.Tensor:
-        """Create structured sparse mask for hardware-friendly computation."""
-        mask = torch.zeros(self.hidden_size, self.hidden_size, dtype=torch.bool)
-        
-        if self.pattern == "block_diagonal":
-            # Block diagonal pattern for parallel computation
-            block_size = max(1, int(self.hidden_size * self.sparsity_ratio * 2))  # Adjust block size based on sparsity
-            print(f"DEBUG: Using block_diagonal pattern with block_size={block_size}")
-            
-            for i in range(0, self.hidden_size, block_size):
-                end_i = min(i + block_size, self.hidden_size)
-                mask[i:end_i, i:end_i] = True
-                
-        elif self.pattern == "band_matrix":
-            # Band matrix pattern
-            bandwidth = max(1, int(self.hidden_size * self.sparsity_ratio))
-            print(f"DEBUG: Using band_matrix pattern with bandwidth={bandwidth}")
-            
-            for i in range(self.hidden_size):
-                start_j = max(0, i - bandwidth // 2)
-                end_j = min(self.hidden_size, i + bandwidth // 2 + 1)
-                mask[i, start_j:end_j] = True
-                
-        elif self.pattern == "strided":
-            # Strided pattern for memory efficiency
-            stride = max(1, int(1.0 / self.sparsity_ratio))
-            print(f"DEBUG: Using strided pattern with stride={stride}")
-            
-            for i in range(0, self.hidden_size, stride):
-                for j in range(0, self.hidden_size, stride):
-                    if i < self.hidden_size and j < self.hidden_size:
-                        mask[i, j] = True
-        else:
-            raise ValueError(f"Unknown sparsity pattern: {self.pattern}")
-        
-        return mask
+        print(f"DEBUG: Low-rank factors initialized - U: {self.U.shape}, V: {self.V.shape}")
+        print(f"DEBUG: FLOP reduction: {flop_reduction:.2%} (from {original_flops} to {new_flops})")
+        print(f"DEBUG: Rank compression ratio: {rank}/{hidden_size} = {rank/hidden_size:.3f}")
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass with structured sparse transformation."""
-        # Apply sparse mask to create structured sparse matrix
-        sparse_weights = self.dense_weights * self.sparse_mask.float()
-        return x @ sparse_weights.t()
+        """Forward pass: x @ (I + U @ V^T)^T = x + x @ (V @ U^T)"""
+        # Identity component
+        identity_output = x
+        
+        # Low-rank perturbation component: x @ (U @ V^T)^T = x @ (V @ U^T)
+        perturbation = x @ (self.V @ self.U.T)
+        
+        return identity_output + perturbation
+    
+    def get_full_matrix(self) -> torch.Tensor:
+        """Get the full transformation matrix I + U @ V^T"""
+        identity = torch.eye(self.hidden_size, device=self.U.device, dtype=self.U.dtype)
+        perturbation = self.U @ self.V.T
+        return identity + perturbation
     
     def get_flop_reduction(self) -> float:
         """Calculate FLOP reduction compared to dense matrix."""
-        total_elements = self.hidden_size * self.hidden_size
-        active_elements = self.sparse_mask.sum().item()
-        reduction_ratio = 1.0 - (active_elements / total_elements)
-        return reduction_ratio
+        original_flops = self.hidden_size * self.hidden_size
+        new_flops = 2 * self.hidden_size * self.rank
+        return 1.0 - (new_flops / original_flops)
 
 
-def sparse_adam_method(
+def rild_optimization(
     a1: torch.Tensor,
     a2: torch.Tensor,
     a3: torch.Tensor = None,
-    sparsity_ratio: float = 0.1,
-    sparsity_pattern: str = "block_diagonal",
+    rank: int = 32,
     loss: str = "cosine",
     num_epochs: int = 15,
     lr: float = 1e-4,
-    batch_size: int = 1024
+    batch_size: int = 1024,
+    weight_decay: float = 1e-5
 ) -> torch.Tensor:
-    """Optimize sparse transformation using Adam optimizer with structured sparsity."""
+    """Optimize residual low-rank transformation using Adam optimizer."""
     
-    print(f"DEBUG: Starting sparse_adam_method with sparsity_ratio={sparsity_ratio}, pattern={sparsity_pattern}")
+    print(f"DEBUG: Starting RILD optimization with rank={rank}")
     print(f"DEBUG: Input shapes - a1: {a1.shape}, a2: {a2.shape}")
     if a3 is not None:
         print(f"DEBUG: a3 shape: {a3.shape}")
@@ -135,14 +106,11 @@ def sparse_adam_method(
             attn = torch.tensor([-1]) if self.a3 is None else self.a3[idx]
             return self.a1[idx], self.a2[idx], attn
 
-    # Initialize sparse transform model
-    sparse_model = StructuredSparseTransform(
-        a1.shape[1], 
-        sparsity_ratio=sparsity_ratio, 
-        pattern=sparsity_pattern
-    ).to("cuda")
+    # Initialize RILD model
+    rild_model = ResidualLowRankTransform(a1.shape[1], rank=rank).to("cuda")
     
-    optimizer = torch.optim.Adam(sparse_model.parameters(), lr=lr)
+    # Use weight decay for regularization
+    optimizer = torch.optim.Adam(rild_model.parameters(), lr=lr, weight_decay=weight_decay)
     
     # Define loss functions
     def cosine_loss(XA: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
@@ -160,9 +128,10 @@ def sparse_adam_method(
     from torch.utils.data import DataLoader
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     
-    print(f"DEBUG: Starting training with {num_epochs} epochs, batch_size={batch_size}")
+    print(f"DEBUG: Starting RILD training with {num_epochs} epochs, batch_size={batch_size}")
+    print(f"DEBUG: Learning rate: {lr}, Weight decay: {weight_decay}")
     
-    with tqdm(range(num_epochs), desc="Optimizing Sparse Transformation") as pbar:
+    with tqdm(range(num_epochs), desc="Optimizing RILD Transformation") as pbar:
         for epoch in pbar:
             epoch_loss = 0.0
             num_batches = 0
@@ -170,10 +139,10 @@ def sparse_adam_method(
             for X, Y, Z in loader:
                 optimizer.zero_grad()
                 
-                # Forward pass through sparse transformation
-                XA = sparse_model(X.float().to("cuda"))
+                # Forward pass through RILD transformation
+                XA = rild_model(X.float().to("cuda"))
                 
-                # Add residual if available
+                # Add residual if available  
                 if len(Z) > 1 and not torch.equal(Z, torch.tensor([-1])):
                     XA += Z.float().to("cuda")
                 
@@ -182,6 +151,10 @@ def sparse_adam_method(
                 
                 # Backward pass
                 loss_val.backward()
+                
+                # Gradient clipping for stability
+                torch.nn.utils.clip_grad_norm_(rild_model.parameters(), max_norm=1.0)
+                
                 optimizer.step()
                 
                 epoch_loss += loss_val.item()
@@ -190,35 +163,37 @@ def sparse_adam_method(
             avg_loss = epoch_loss / num_batches if num_batches > 0 else 0.0
             pbar.set_postfix({f'{loss} Loss': f'{avg_loss:.4f}'})
             
-            if epoch % 2 == 0:
-                print(f"DEBUG: Epoch {epoch}, Average Loss: {avg_loss:.6f}")
-
-            # Training loop 내부에 추가
-            if epoch % 5 == 0:
+            # Detailed debugging every few epochs
+            if epoch % 3 == 0:
                 with torch.no_grad():
-                    # Transformation quality 체크
-                    test_output = sparse_model(a1[:1000].float().to("cuda"))
+                    # Check transformation quality
+                    test_output = rild_model(a1[:1000].float().to("cuda"))
                     target_output = a2[:1000].float().to("cuda")
                     
                     cosine_sim = torch.cosine_similarity(test_output, target_output, dim=1).mean()
-                    print(f"DEBUG: Epoch {epoch}, Cosine similarity: {cosine_sim:.4f}")
                     
-                    # Weight magnitude 체크
-                    weight_norm = sparse_model.dense_weights.norm().item()
-                    print(f"DEBUG: Weight norm: {weight_norm:.4f}")
+                    # Check perturbation magnitude
+                    perturbation_norm = (rild_model.U @ rild_model.V.T).norm().item()
+                    u_norm = rild_model.U.norm().item()
+                    v_norm = rild_model.V.norm().item()
+                    
+                    print(f"DEBUG: Epoch {epoch}, Average Loss: {avg_loss:.6f}")
+                    print(f"DEBUG: Cosine similarity: {cosine_sim:.4f}")
+                    print(f"DEBUG: Perturbation norm: {perturbation_norm:.4f}")
+                    print(f"DEBUG: U norm: {u_norm:.4f}, V norm: {v_norm:.4f}")
     
-    # Get the sparse transformation matrix
+    # Get the final transformation matrix
     with torch.no_grad():
-        sparse_weights = sparse_model.dense_weights * sparse_model.sparse_mask.float()
+        final_transform = rild_model.get_full_matrix()
     
-    flop_reduction = sparse_model.get_flop_reduction()
-    print(f"DEBUG: FLOP reduction achieved: {flop_reduction:.2%}")
-    print(f"DEBUG: Sparse matrix has {sparse_model.sparse_mask.sum().item()} non-zero elements")
+    flop_reduction = rild_model.get_flop_reduction()
+    print(f"DEBUG: Final FLOP reduction achieved: {flop_reduction:.2%}")
+    print(f"DEBUG: Final perturbation magnitude: {(rild_model.U @ rild_model.V.T).norm().item():.4f}")
     
-    return sparse_weights.T.to(torch.float64)
+    return final_transform.to(torch.float64)
 
 
-def aslt_method(
+def rild_method(
     model_path: str,
     dataset: str,
     dataset_column: str,
@@ -233,8 +208,7 @@ def aslt_method(
     min_distance_layer: Optional[int] = None,
     token: Optional[str] = None,
     save_transform_only: bool = False,
-    sparsity_ratio: float = 0.1,
-    sparsity_pattern: str = "block_diagonal",
+    rank: int = 32,
     loss: str = "cosine",
     start_id: int = 0,
     end_id: int = 0,
@@ -244,7 +218,7 @@ def aslt_method(
     merge_consecutive: bool = True,
     accurate: bool = False
 ) -> str:
-    """ASLT method: Adaptive Sparse Linear Transform for efficient LLM compression.
+    """RILD method: Residual-Informed Low-Rank Decomposition for efficient LLM compression.
     
     Args:
         model_path: Path to pretrained model
@@ -261,8 +235,7 @@ def aslt_method(
         min_distance_layer: index of start layer for cut
         token: Authentication token
         save_transform_only: Whether to only save the transform
-        sparsity_ratio: Ratio of non-zero elements in sparse matrix
-        sparsity_pattern: Pattern for sparse matrix ('block_diagonal', 'band_matrix', 'strided')
+        rank: Rank for low-rank decomposition
         loss: Loss function type
         start_id: Starting layer ID
         end_id: Ending layer ID
@@ -276,9 +249,9 @@ def aslt_method(
         Path where transformed model is saved
     """
     
-    print(f"DEBUG: Starting ASLT method")
+    print(f"DEBUG: Starting RILD method")
     print(f"DEBUG: Processing layers {start_id} to {end_id} (total: {end_id - start_id} layers)")
-    print(f"DEBUG: Sparsity settings - ratio: {sparsity_ratio}, pattern: {sparsity_pattern}")
+    print(f"DEBUG: Low-rank settings - rank: {rank}, loss: {loss}")
     
     device_map = "auto" if torch.cuda.is_available() else "cpu"
     quantization_config = None
@@ -317,6 +290,7 @@ def aslt_method(
     )
     
     print(f"DEBUG: Model hidden size: {hidden_size}")
+    print(f"DEBUG: Rank compression ratio: {rank}/{hidden_size} = {rank/hidden_size:.3f}")
     print(f"DEBUG: Calibration dataset loaded with batch_size: {batch_size}")
     
     def save_mlp_activation(name):
@@ -349,7 +323,7 @@ def aslt_method(
     
     for batch in tqdm(
         dataloader,
-        desc=Fore.RED + "Gathering Activations for ASLT" + Fore.RESET,
+        desc=Fore.RED + "Gathering Activations for RILD" + Fore.RESET,
         dynamic_ncols=True,
         colour="red"
     ):
@@ -401,18 +375,17 @@ def aslt_method(
         a3 = a3[:cnt]
     
     print(f"DEBUG: Collected {cnt} activation samples")
-    print(f"DEBUG: Starting sparse transform estimation...")
+    print(f"DEBUG: Starting RILD optimization...")
     
-    # Estimate sparse transformation
-    transform = sparse_adam_method(
+    # Estimate RILD transformation
+    transform = rild_optimization(
         a1, a2, 
         a3=a3 if accurate else None, 
-        sparsity_ratio=sparsity_ratio,
-        sparsity_pattern=sparsity_pattern,
+        rank=rank,
         loss=loss
     )
     
-    print(f"DEBUG: Sparse transform estimated with shape: {transform.shape}")
+    print(f"DEBUG: RILD transform estimated with shape: {transform.shape}")
     
     # Clean up
     del model
@@ -437,9 +410,9 @@ def aslt_method(
             f"{end_id}_{dataset}_{dataset_size}"
         ).replace("/", "_")
     
-    print(f"DEBUG: Applying sparse transformation to model...")
+    print(f"DEBUG: Applying RILD transformation to model...")
     
-    # Apply sparse transformation
+    # Apply RILD transformation
     original_weight = model.model.layers[start_id - num_layer - 1].mlp.down_proj.weight
     new_weight = (transform.T.cpu() @ original_weight.to(torch.float64)).to(torch.bfloat16)
     
@@ -447,7 +420,7 @@ def aslt_method(
         "weight": new_weight
     })
     
-    output_path = f"{save_path}_ASLT_{sparsity_pattern}_{loss}"
+    output_path = f"{save_path}_RILD_rank{rank}_{loss}"
     
     print(f"DEBUG: Saving model to: {output_path}")
     model.save_pretrained(output_path)
@@ -455,7 +428,7 @@ def aslt_method(
     
     if save_transform_only:
         torch.save(transform, f"{output_path}_transform")
-        print(f"DEBUG: Sparse transform saved separately")
+        print(f"DEBUG: RILD transform saved separately")
     
     # Final cleanup
     del model, a1, a2
@@ -464,7 +437,7 @@ def aslt_method(
     gc.collect()
     torch.cuda.empty_cache()
     
-    print(f"DEBUG: ASLT method completed successfully")
+    print(f"DEBUG: RILD method completed successfully")
     
     return output_path
 
@@ -476,9 +449,9 @@ def read_config(config_path: str) -> dict:
 
 
 def run_from_config():
-    """Run the ASLT method from a configuration file."""
+    """Run the RILD method from a configuration file."""
     parser = argparse.ArgumentParser(
-        description="Run ASLT for adaptive sparse linear transform estimation based on a configuration file."
+        description="Run RILD for residual-informed low-rank decomposition based on a configuration file."
     )
     parser.add_argument(
         "--config",
@@ -504,5 +477,5 @@ def run_from_config():
     num_layers = [sum(num_layers[:i]) for i in range(len(start_ids)+1)]
     
     for i in range(len(selected_blocks)):
-        path = aslt_method(**config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
+        path = rild_method(**config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
         config["model_path"] = path

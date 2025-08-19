@@ -1,15 +1,15 @@
-# ASLT Configuration Example
-# This configuration file demonstrates how to use the new ASLT method
+# RILD Configuration Example
+# Residual-Informed Low-Rank Decomposition for efficient LLM compression
 
-# Method selection - use "aslt" for Adaptive Sparse Linear Transform
-method: "aslt"
+# Method selection - use "rild" for Residual-Informed Low-Rank Decomposition
+method: "rild"
 
 # Model and dataset configuration
-model_path: "meta-llama/Meta-Llama-3-8B-Instruct"
+model_path: "meta-llama/Meta-Llama-3-8B-Instruct"  # or your model path
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
 dataset_subset: "train"
-dataset_size: 4000 # 4000
+dataset_size: 4000
 
 # Processing parameters
 batch_size: 4
@@ -23,10 +23,9 @@ num_A: 1  # Number of compression blocks
 merge_consecutive: False
 distances_path: null  # Will be auto-generated if null
 
-# ASLT-specific parameters
-sparsity_ratio: 0.9  # 10% non-zero elements (90% sparse)
-sparsity_pattern: "strided"  # Options: "block_diagonal", "band_matrix", "strided"
-loss: "cosine"  # Loss function for optimization
+# RILD-specific parameters
+rank: 256  # Low-rank dimension (32/4096 = 0.78% compression)
+loss: "cosine"  # Loss function for optimization ("cosine" or "mse")
 accurate: False  # Set to true for more accurate but memory-intensive computation
 
 # Optimization parameters (inherited from original method)
@@ -42,22 +41,26 @@ save_transform_only: False
 # Evaluation parameters
 tasks: "default"
 
-# Advanced ASLT parameters (optional)
-# These will use defaults if not specified:
-# - num_epochs: 10 (for sparse optimization)
-# - lr: 1e-4 (learning rate for Adam optimizer)
-# - batch_size_optim: 1024 (batch size for optimization)
+# Advanced RILD parameters (optional, uses defaults if not specified)
+# num_epochs: 15 (training epochs for low-rank optimization)
+# lr: 1e-4 (learning rate for Adam optimizer)
+# weight_decay: 1e-5 (L2 regularization for stability)
+# batch_size_optim: 1024 (batch size for optimization)
 
-# Example configurations for different sparsity patterns:
+# Example configurations for different compression levels:
 
-# For maximum FLOP reduction (90% sparse):
-# sparsity_ratio: 0.1
-# sparsity_pattern: "block_diagonal"
+# Conservative compression (rank=64, ~1.5% of original parameters):
+# rank: 64
+# Expected: 97% FLOP reduction, 98%+ performance retention
 
-# For balanced performance and efficiency (80% sparse):
-# sparsity_ratio: 0.2
-# sparsity_pattern: "band_matrix"
+# Balanced compression (rank=32, ~0.8% of original parameters):
+# rank: 32  
+# Expected: 98.5% FLOP reduction, 95%+ performance retention
 
-# For memory-efficient computation (70% sparse):
-# sparsity_ratio: 0.3
-# sparsity_pattern: "strided"
+# Aggressive compression (rank=16, ~0.4% of original parameters):
+# rank: 16
+# Expected: 99.2% FLOP reduction, 90%+ performance retention
+
+# Ultra compression (rank=8, ~0.2% of original parameters):
+# rank: 8
+# Expected: 99.6% FLOP reduction, might need healing for performance recovery
