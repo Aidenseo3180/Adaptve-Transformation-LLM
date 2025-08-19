@@ -15,7 +15,7 @@ save_transform_only: True
 
 # Kronecker-specific parameters
 rank_ratio: 0.25          # Compression ratio (0.1-0.5)
-max_iterations: 50        # Optimization iterations
+max_iterations: 15        # Optimization iterations
 loss: "cosine"            # Loss function: cosine, mse
 
 # Standard parameters (kept for compatibility)
