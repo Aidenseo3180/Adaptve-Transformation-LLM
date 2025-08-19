@@ -280,7 +280,7 @@ def kronecker_dist(
     accurate: bool = False,
     rank_ratio: float = 0.25,
     loss: str = "cosine",
-    max_iterations: int = 50
+    max_iterations: int = 20
 ) -> str:
     """
     Apply Kronecker factorization-based compression to transformer blocks.
