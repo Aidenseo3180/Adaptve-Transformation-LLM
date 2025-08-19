@@ -10,7 +10,7 @@ from colorama import Fore, Style, init
 from .cosine_dist import cosine_dist
 from .distance import profile_distances
 from .evaluator import evaluator
-from .rild_method import rild_method  # New RILD method
+from .hierarchical_transform import hierarchical_transform  # NEW: Import our hierarchical method
 from .utils import seed_all, select_non_overlapping_blocks
 
 # Initialize colorama for Windows compatibility
@@ -37,13 +37,26 @@ def ReplaceMe_pipeline(config):
         config['distances_path'] = "./distances.pth"
 
 
-    if config["method"] == "rild":
-        logging.info(f"{Fore.GREEN}Using RILD (Residual-Informed Low-Rank Decomposition) method...{Fore.RESET}")
-        signature = inspect.signature(rild_method)
+    if config["method"] == "hierarchical":
+        print(f"{Fore.MAGENTA}[PIPELINE] Using Hierarchical Multi-Scale Linear Transformation{Fore.RESET}")
+        print(f"{Fore.CYAN}[PIPELINE] This method provides significant FLOPs reduction while maintaining performance{Fore.RESET}")
+        
+        signature = inspect.signature(hierarchical_transform)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
+        # Set default hierarchical parameters if not specified
+        if 'rank' not in filtered_config:
+            filtered_config['rank'] = 1024
+            print(f"{Fore.YELLOW}[PIPELINE] Using default rank: 1024{Fore.RESET}")
+        
+        if 'sparsity_ratio' not in filtered_config:
+            filtered_config['sparsity_ratio'] = 0.05  # 5% non-zero elements
+            print(f"{Fore.YELLOW}[PIPELINE] Using default sparsity ratio: 0.05{Fore.RESET}")
+        
+        print(f"{Fore.CYAN}[PIPELINE] Hierarchical parameters: rank={filtered_config['rank']}, sparsity_ratio={filtered_config['sparsity_ratio']}{Fore.RESET}")
+        
         # Load average distances and select non-overlapping blocks
-        average_distances = torch.load(filtered_config['distances_path'], weights_only=False)  
+        average_distances = torch.load(filtered_config['distances_path'])  
         selected_blocks = select_non_overlapping_blocks(
             average_distances, 
             filtered_config['layers_to_skip'], 
@@ -51,7 +64,7 @@ def ReplaceMe_pipeline(config):
             merge_consecutive=filtered_config['merge_consecutive']
         )
         
-        print(f"DEBUG: Selected {len(selected_blocks)} blocks for RILD compression: {selected_blocks}")
+        print(f"{Fore.GREEN}[PIPELINE] Selected {len(selected_blocks)} blocks for hierarchical transformation{Fore.RESET}")
         
         # Calculate start and end IDs, and number of layers
         start_ids = sorted([x[0] for x in selected_blocks])
@@ -59,16 +72,22 @@ def ReplaceMe_pipeline(config):
         num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
         num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
         
-        print(f"DEBUG: Processing blocks - start_ids: {start_ids}, end_ids: {end_ids}")
-        print(f"DEBUG: Cumulative layer counts: {num_layers}")
-        print(f"DEBUG: RILD rank setting: {filtered_config.get('rank', 32)}")
+        print(f"{Fore.CYAN}[PIPELINE] Processing blocks: {list(zip(start_ids, end_ids))}{Fore.RESET}")
         
         # Iterate over each selected block
         for i in range(len(selected_blocks)):
-            logging.info(f"{Fore.CYAN}Processing RILD block {i+1}/{len(selected_blocks)}: layers {start_ids[i]} to {end_ids[i]} with rank {filtered_config.get('rank', 32)}{Fore.RESET}")
-            path = rild_method(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
+            print(f"{Fore.YELLOW}[PIPELINE] Processing block {i+1}/{len(selected_blocks)}: layers {start_ids[i]} to {end_ids[i]}{Fore.RESET}")
+            
+            path = hierarchical_transform(
+                **filtered_config, 
+                start_id=start_ids[i], 
+                end_id=end_ids[i], 
+                num_layer=num_layers[i]
+            )
             filtered_config["model_path"] = path
-            print(f"DEBUG: RILD block {i+1} processed, model saved to: {path}")
+            
+            print(f"{Fore.GREEN}[PIPELINE] Block {i+1} processed successfully. New model path: {path}{Fore.RESET}")
+        
     
     else:  # Original cosine/other methods
         logging.info(f"{Fore.GREEN}Using original cosine distance method...{Fore.RESET}")

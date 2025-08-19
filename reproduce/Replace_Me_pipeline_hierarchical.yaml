@@ -1,0 +1,46 @@
+# Configuration for Hierarchical Multi-Scale Linear Transformation
+# This method provides significant FLOPs reduction while maintaining performance
+
+# === Method Selection ===
+method: "hierarchical"  # Options: "lstsq", "hierarchical", "cosine" (default)
+
+# === Model Configuration ===
+model_path: "meta-llama/Meta-Llama-3-8B-Instruct"
+token: null  # HuggingFace token if needed (for private models)
+use_4bit: True  # Use 4-bit quantization to save memory
+
+# === Dataset Configuration ===
+dataset: "Open-Orca/SlimOrca"  # Dataset for calibration
+dataset_subset: "train"  # Subset to use
+dataset_column: "text"  # Column containing text data
+dataset_size: 2000  # Number of samples for calibration
+batch_size: 4  # Batch size for processing
+max_length: 512  # Maximum sequence length
+
+# === Layer Selection Configuration ===
+layers_to_skip: 4  # Number of consecutive layers to replace
+distances_path: "./distances.pth"  # Path to precomputed distances (null to compute)
+num_A: 1  # Number of transformation blocks
+merge_consecutive: False  # Whether to merge consecutive blocks
+
+# === Hierarchical Transform Parameters ===
+rank: 1024  # Rank for low-rank decomposition (T_coarse = U @ V)
+sparsity_ratio: 0.05  # Sparsity ratio for T_fine (0.05 = 5% non-zero elements)
+
+# === Output Configuration ===
+save_path: null  # Output path (auto-generated if null)
+save_transform_only: False  # Whether to save only transformation matrices
+activations_save_path: null  # Path to save activations (optional)
+
+# === Evaluation Configuration ===
+tasks: "default"  # Evaluation tasks
+
+# === Advanced Parameters ===
+min_distance_layer: null  # Minimum distance layer (auto-computed)
+
+# === Expected Performance ===
+# This configuration should provide:
+# - FLOPs reduction: ~60-75%
+# - Performance retention: ~95-98% of original accuracy
+# - No healing/fine-tuning required
+# - Memory efficient during calibration
