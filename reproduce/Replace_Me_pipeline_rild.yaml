@@ -9,11 +9,11 @@ model_path: "meta-llama/Meta-Llama-3-8B-Instruct"  # or your model path
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
 dataset_subset: "train"
-dataset_size: 4000
+dataset_size: 2000
 
 # Processing parameters
 batch_size: 4
-max_length: 1024
+max_length: 512
 use_4bit: True
 token: null  # Add your HuggingFace token if needed
 

@@ -83,7 +83,7 @@ def rild_optimization(
     a3: torch.Tensor = None,
     rank: int = 32,
     loss: str = "cosine",
-    num_epochs: int = 15,
+    num_epochs: int = 5,
     lr: float = 1e-4,
     batch_size: int = 1024,
     weight_decay: float = 1e-5
