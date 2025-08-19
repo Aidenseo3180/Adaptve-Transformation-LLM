@@ -27,48 +27,42 @@ logging.basicConfig(
 seed_all()
 
 
-def kronecker_factorization(
-    a1: torch.Tensor, 
-    a2: torch.Tensor, 
-    a3: torch.Tensor = None,
+def kronecker_factorization_streaming(
+    dataloader,
+    tokenizer,
+    model_hooks,
+    start_id: int,
+    end_id: int,
+    num_layer: int,
+    max_length: int,
+    hidden_size: int,
+    accurate: bool = False,
     rank_ratio: float = 0.25,
-    max_iterations: int = 50,
+    max_iterations: int = 10,
     lr: float = 1e-3,
-    loss_type: str = "cosine"
+    loss_type: str = "cosine",
+    mini_batch_size: int = 512
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Decompose transformation matrix T into Kronecker product T1 ⊗ T2
-    
-    Args:
-        a1: Input activations (MLP output)
-        a2: Target activations 
-        a3: Optional residual activations
-        rank_ratio: Ratio to determine Kronecker factors size
-        max_iterations: Maximum optimization iterations
-        lr: Learning rate
-        loss_type: Loss function type
-    
-    Returns:
-        T1, T2: Kronecker factors
+    Memory-efficient Kronecker factorization using streaming mini-batches
     """
-    d = a1.shape[1]
-    print(f"{Fore.GREEN}[Kronecker] Input dimension: {d}{Fore.RESET}")
+    print(f"{Fore.GREEN}[Kronecker] Input dimension: {hidden_size}{Fore.RESET}")
     
     # Determine Kronecker factors dimensions
-    # For d x d matrix, we want T1: k1 x k1, T2: k2 x k2 where k1 * k2 = d
-    target_params = int(d * rank_ratio)
+    target_params = int(hidden_size * rank_ratio)
     k1 = int(np.sqrt(target_params))
-    k2 = d // k1
+    k2 = hidden_size // k1
     
-    # Adjust k1, k2 to ensure k1 * k2 <= d
-    while k1 * k2 > d:
+    # Adjust k1, k2 to ensure k1 * k2 <= hidden_size
+    while k1 * k2 > hidden_size:
         k1 -= 1
-        k2 = d // k1
+        k2 = hidden_size // k1
     
-    print(f"{Fore.GREEN}[Kronecker] Factorization: {d}x{d} -> {k1}x{k1} ⊗ {k2}x{k2}{Fore.RESET}")
-    print(f"{Fore.GREEN}[Kronecker] Parameter reduction: {d*d} -> {k1*k1 + k2*k2} ({(k1*k1 + k2*k2)/(d*d)*100:.1f}%){Fore.RESET}")
+    print(f"{Fore.GREEN}[Kronecker] Factorization: {hidden_size}x{hidden_size} -> {k1}x{k1} ⊗ {k2}x{k2}{Fore.RESET}")
+    print(f"{Fore.GREEN}[Kronecker] Parameter reduction: {hidden_size*hidden_size} -> {k1*k1 + k2*k2} ({(k1*k1 + k2*k2)/(hidden_size*hidden_size)*100:.1f}%){Fore.RESET}")
+    print(f"{Fore.YELLOW}[Kronecker] Using mini-batch size: {mini_batch_size}{Fore.RESET}")
     
-    # Initialize factors
+    # Initialize factors on GPU
     device = "cuda" if torch.cuda.is_available() else "cpu"
     T1 = torch.randn(k1, k1, device=device, dtype=torch.float32, requires_grad=True)
     T2 = torch.randn(k2, k2, device=device, dtype=torch.float32, requires_grad=True)
@@ -77,14 +71,8 @@ def kronecker_factorization(
     with torch.no_grad():
         T1.fill_(0.0)
         T1.fill_diagonal_(1.0)
-        T2.fill_(0.0) 
+        T2.fill_(0.0)
         T2.fill_diagonal_(1.0)
-    
-    # Move data to device
-    a1 = a1.float().to(device)
-    a2 = a2.float().to(device)
-    if a3 is not None:
-        a3 = a3.float().to(device)
     
     # Optimizer
     optimizer = torch.optim.Adam([T1, T2], lr=lr)
@@ -92,81 +80,160 @@ def kronecker_factorization(
     # Loss function
     def compute_loss(pred, target):
         if loss_type == "cosine":
-            pred_norm = pred / pred.norm(dim=1, keepdim=True)
-            target_norm = target / target.norm(dim=1, keepdim=True)
+            # Add small epsilon for numerical stability
+            pred_norm = pred / (pred.norm(dim=1, keepdim=True) + 1e-8)
+            target_norm = target / (target.norm(dim=1, keepdim=True) + 1e-8)
             return 1 - (pred_norm * target_norm).sum(dim=1).mean()
         elif loss_type == "mse":
             return torch.nn.MSELoss()(pred, target)
         else:
             raise ValueError(f"Unsupported loss type: {loss_type}")
     
-    print(f"{Fore.YELLOW}[Kronecker] Starting optimization with {loss_type} loss...{Fore.RESET}")
+    print(f"{Fore.YELLOW}[Kronecker] Starting streaming optimization with {loss_type} loss...{Fore.RESET}")
     
     best_loss = float('inf')
-    patience = 10
+    patience = 15
     patience_counter = 0
+    total_batches_processed = 0
     
-    for iteration in tqdm(range(max_iterations), desc="Kronecker Optimization"):
-        optimizer.zero_grad()
+    # Multiple epochs over the data
+    for epoch in range(max_iterations):
+        epoch_loss = 0.0
+        num_mini_batches = 0
         
-        # Construct full transformation via Kronecker product
-        # Reshape input for Kronecker product application
-        batch_size = a1.shape[0]
+        print(f"{Fore.CYAN}[Kronecker] Epoch {epoch+1}/{max_iterations}{Fore.RESET}")
         
-        # Reshape a1 to (batch_size, k2, k1) for Kronecker product
-        try:
-            a1_reshaped = a1.view(batch_size, k2, k1)
-            # Apply T1 ⊗ T2: (a1_reshaped @ T1.T).transpose(-2, -1) @ T2.T
-            temp = torch.matmul(a1_reshaped, T1.T)  # (batch, k2, k1)
-            pred = torch.matmul(temp.transpose(-2, -1), T2.T)  # (batch, k1, k2)
-            pred = pred.transpose(-2, -1).contiguous().view(batch_size, -1)  # (batch, k2*k1)
-            
-            # Pad or truncate to match target dimension
-            if pred.shape[1] < d:
-                padding = torch.zeros(batch_size, d - pred.shape[1], device=device)
-                pred = torch.cat([pred, padding], dim=1)
-            elif pred.shape[1] > d:
-                pred = pred[:, :d]
+        for batch in tqdm(dataloader, desc=f"Epoch {epoch+1} Processing", leave=False):
+            # Process this batch
+            try:
+                inputs = tokenizer(
+                    batch,
+                    return_tensors="pt",
+                    padding="longest",
+                    max_length=max_length,
+                    truncation=True
+                )
+                inputs = {k: v.to(device) for k, v in inputs.items()}
                 
-        except RuntimeError as e:
-            print(f"{Fore.RED}[Kronecker] Reshape error: {e}{Fore.RESET}")
-            # Fallback: direct matrix multiplication with reshaped factors
-            T_full = torch.kron(T1, T2)
-            if T_full.shape[0] != d or T_full.shape[1] != d:
-                # Pad or truncate T_full to d x d
-                T_padded = torch.zeros(d, d, device=device)
-                min_dim = min(T_full.shape[0], d)
-                T_padded[:min_dim, :min_dim] = T_full[:min_dim, :min_dim]
-                T_full = T_padded
-            pred = torch.matmul(a1, T_full.T)
+                with torch.no_grad():
+                    outputs = model_hooks['model'](**inputs)
+                
+                # Extract activations
+                hidden_states = outputs.hidden_states[1:]
+                hidden_states_mlp_list = [
+                    model_hooks['mlp_activations'][f'layer_{i}_mlp'] 
+                    for i in range(model_hooks['num_layers'])
+                ]
+                
+                hidden_states_mlp = hidden_states_mlp_list[start_id - num_layer - 1]
+                hidden_states_i = hidden_states[start_id - num_layer - 1]
+                hidden_states_n = hidden_states[end_id - num_layer - 1]
+                
+                # Reshape and prepare data
+                batch_tokens = hidden_states_mlp.shape[0] * hidden_states_mlp.shape[1]
+                a1_batch = hidden_states_mlp.view(-1, hidden_size).float()
+                hidden_states_i_flat = hidden_states_i.view(-1, hidden_size).float()
+                hidden_states_n_flat = hidden_states_n.view(-1, hidden_size).float()
+                
+                if accurate:
+                    a2_batch = hidden_states_n_flat
+                    a3_batch = hidden_states_i_flat - a1_batch
+                else:
+                    a2_batch = hidden_states_n_flat + a1_batch - hidden_states_i_flat
+                    a3_batch = None
+                
+                # Process in mini-batches to save memory
+                for start_idx in range(0, batch_tokens, mini_batch_size):
+                    end_idx = min(start_idx + mini_batch_size, batch_tokens)
+                    
+                    mini_a1 = a1_batch[start_idx:end_idx].to(device)
+                    mini_a2 = a2_batch[start_idx:end_idx].to(device)
+                    mini_a3 = a3_batch[start_idx:end_idx].to(device) if a3_batch is not None else None
+                    
+                    optimizer.zero_grad()
+                    
+                    # Apply Kronecker transformation efficiently
+                    mini_batch_size_actual = mini_a1.shape[0]
+                    
+                    # Simple approach: use small subsets for Kronecker application
+                    if k1 * k2 == hidden_size:
+                        # Perfect factorization
+                        try:
+                            mini_a1_reshaped = mini_a1.view(mini_batch_size_actual, k2, k1)
+                            temp = torch.matmul(mini_a1_reshaped, T1.T)
+                            pred = torch.matmul(temp.transpose(-2, -1), T2.T)
+                            pred = pred.transpose(-2, -1).contiguous().view(mini_batch_size_actual, -1)
+                        except:
+                            # Fallback to approximation
+                            T_approx = torch.kron(T1[:k1//2, :k1//2], T2[:k2//2, :k2//2])
+                            if T_approx.shape[0] > hidden_size:
+                                T_approx = T_approx[:hidden_size, :hidden_size]
+                            elif T_approx.shape[0] < hidden_size:
+                                T_padded = torch.zeros(hidden_size, hidden_size, device=device)
+                                T_padded[:T_approx.shape[0], :T_approx.shape[1]] = T_approx
+                                T_approx = T_padded
+                            pred = torch.matmul(mini_a1, T_approx.T)
+                    else:
+                        # Approximation approach
+                        effective_k1 = min(k1, int(np.sqrt(hidden_size)))
+                        effective_k2 = min(k2, hidden_size // effective_k1)
+                        
+                        T_approx = torch.kron(T1[:effective_k1, :effective_k1], T2[:effective_k2, :effective_k2])
+                        if T_approx.shape[0] < hidden_size:
+                            T_padded = torch.zeros(hidden_size, hidden_size, device=device)
+                            T_padded[:T_approx.shape[0], :T_approx.shape[1]] = T_approx
+                            T_approx = T_padded
+                        pred = torch.matmul(mini_a1, T_approx[:hidden_size, :hidden_size].T)
+                    
+                    # Add residual if provided
+                    if mini_a3 is not None:
+                        pred = pred + mini_a3
+                    
+                    # Compute loss
+                    loss = compute_loss(pred, mini_a2)
+                    
+                    # Backward pass
+                    loss.backward()
+                    optimizer.step()
+                    
+                    epoch_loss += loss.item()
+                    num_mini_batches += 1
+                    total_batches_processed += 1
+                    
+                    # Clear mini-batch memory immediately
+                    del mini_a1, mini_a2, mini_a3, pred
+                    torch.cuda.empty_cache()
+                
+                # Clear batch memory
+                del a1_batch, a2_batch, a3_batch, hidden_states_mlp, hidden_states_i, hidden_states_n
+                del hidden_states, outputs
+                torch.cuda.empty_cache()
+                
+            except Exception as e:
+                print(f"{Fore.RED}[Kronecker] Error processing batch: {e}{Fore.RESET}")
+                torch.cuda.empty_cache()
+                continue
         
-        # Add residual if provided
-        if a3 is not None:
-            pred = pred + a3
+        # Calculate average loss for this epoch
+        if num_mini_batches > 0:
+            avg_loss = epoch_loss / num_mini_batches
+            print(f"{Fore.CYAN}[Kronecker] Epoch {epoch+1}: Avg Loss = {avg_loss:.6f}, Mini-batches: {num_mini_batches}{Fore.RESET}")
             
-        # Compute loss
-        loss = compute_loss(pred, a2)
-        
-        # Backward pass
-        loss.backward()
-        optimizer.step()
-        
-        # Early stopping
-        if loss.item() < best_loss:
-            best_loss = loss.item()
-            patience_counter = 0
+            # Early stopping check
+            if avg_loss < best_loss:
+                best_loss = avg_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+            
+            if patience_counter >= patience:
+                print(f"{Fore.GREEN}[Kronecker] Early stopping at epoch {epoch+1}{Fore.RESET}")
+                break
         else:
-            patience_counter += 1
-            
-        if patience_counter >= patience:
-            print(f"{Fore.GREEN}[Kronecker] Early stopping at iteration {iteration}{Fore.RESET}")
-            break
-            
-        # Log progress
-        if iteration % 10 == 0:
-            print(f"{Fore.CYAN}[Kronecker] Iter {iteration}: Loss = {loss.item():.6f}{Fore.RESET}")
+            print(f"{Fore.YELLOW}[Kronecker] No mini-batches processed in epoch {epoch+1}{Fore.RESET}")
     
-    print(f"{Fore.GREEN}[Kronecker] Optimization completed. Final loss: {best_loss:.6f}{Fore.RESET}")
+    print(f"{Fore.GREEN}[Kronecker] Streaming optimization completed. Best loss: {best_loss:.6f}{Fore.RESET}")
+    print(f"{Fore.GREEN}[Kronecker] Total mini-batches processed: {total_batches_processed}{Fore.RESET}")
     
     return T1.detach(), T2.detach()
 
@@ -282,91 +349,45 @@ def kronecker_dist(
 
     mlp_activations = {}
     
-    # Allocate memory for activations
-    print(f"{Fore.YELLOW}[Kronecker] Allocating memory for activations...{Fore.RESET}")
-    total_tokens = dataset_size * max_length
-    a1 = torch.empty((total_tokens, hidden_size), dtype=torch.bfloat16, device='cpu')
-    a2 = torch.empty((total_tokens, hidden_size), dtype=torch.bfloat16, device='cpu')
-    if accurate:
-        print(f"{Fore.YELLOW}[Kronecker] ACCURATE MODE: Allocating additional memory{Fore.RESET}")
-        a3 = torch.empty((total_tokens, hidden_size), dtype=torch.bfloat16, device='cpu')
+    # Prepare model hooks for streaming
+    model_hooks = {
+        'model': model,
+        'mlp_activations': mlp_activations,
+        'num_layers': model.config.num_hidden_layers
+    }
     
-    cnt = 0
-    print(f"{Fore.RED}[Kronecker] Gathering activations from layers {start_id-num_layer-1} to {end_id-num_layer-1}...{Fore.RESET}")
+    print(f"{Fore.YELLOW}[Kronecker] Using streaming approach - no large memory allocation{Fore.RESET}")
+    print(f"{Fore.RED}[Kronecker] Processing layers {start_id-num_layer} to {end_id-num_layer}...{Fore.RESET}")
     
-    for batch in tqdm(dataloader, desc=Fore.RED + "Gathering Activations" + Fore.RESET, dynamic_ncols=True, colour="red"):
-        inputs = tokenizer(
-            batch,
-            return_tensors="pt",
-            padding="longest",
-            max_length=max_length,
-            truncation=True
-        )
-        inputs = {k: v.to(model.device) for k, v in inputs.items()}
-        
-        with torch.no_grad():
-            outputs = model(**inputs)
-        
-        hidden_states = outputs.hidden_states[1:]
-        hidden_states_mlp_list = [
-            mlp_activations[f'layer_{i}_mlp'] for i in range(model.config.num_hidden_layers)
-        ]
-        hidden_states_mlp = hidden_states_mlp_list[start_id - num_layer - 1]
-
-        # Reshape activations
-        hidden_states_mlp = hidden_states_mlp.view(-1, hidden_size).to(torch.float64)
-        hidden_states_i = hidden_states[start_id - num_layer - 1].view(-1, hidden_size).to(torch.float64)
-        hidden_states_n = hidden_states[end_id - num_layer - 1].view(-1, hidden_size).to(torch.float64)
-        
-        a1_batch = hidden_states_mlp
-        a2_batch = hidden_states_n + hidden_states_mlp - hidden_states_i
-        if accurate:
-            a2_batch = hidden_states_n 
-            a3_batch = hidden_states_i - hidden_states_mlp 
-            a3[cnt:cnt+a3_batch.shape[0]] = a3_batch
-        
-        a1[cnt:cnt+a1_batch.shape[0]] = a1_batch
-        a2[cnt:cnt+a2_batch.shape[0]] = a2_batch
-        
-        cnt += a2_batch.shape[0]
-        
-        del hidden_states_mlp, hidden_states_i, hidden_states_n
-        
-        # Memory management
-        if cnt % (batch_size * max_length * 5) == 0:  # Every 5 batches
-            torch.cuda.empty_cache()
+    # Apply streaming Kronecker factorization
+    print(f"{Fore.MAGENTA}[Kronecker] Starting streaming factorization...{Fore.RESET}")
+    T1, T2 = kronecker_factorization_streaming(
+        dataloader=dataloader,
+        tokenizer=tokenizer,
+        model_hooks=model_hooks,
+        start_id=start_id,
+        end_id=end_id,
+        num_layer=num_layer,
+        max_length=max_length,
+        hidden_size=hidden_size,
+        accurate=accurate,
+        rank_ratio=rank_ratio,
+        max_iterations=max_iterations,
+        loss_type=loss,
+        mini_batch_size=256  # Reduced mini-batch size for memory safety
+    )
     
     # Remove hooks
     for hook in hooks:
         hook.remove()
-    
-    a1 = a1[:cnt]
-    a2 = a2[:cnt]
-    if accurate:
-        a3 = a3[:cnt]
-        print(f"{Fore.GREEN}[Kronecker] Gathered {cnt} tokens with residual connections{Fore.RESET}")
-    else:
-        a3 = None
-        print(f"{Fore.GREEN}[Kronecker] Gathered {cnt} tokens{Fore.RESET}")
-    
-    # Apply Kronecker factorization
-    print(f"{Fore.MAGENTA}[Kronecker] Starting factorization...{Fore.RESET}")
-    T1, T2 = kronecker_factorization(
-        a1, a2, a3, 
-        rank_ratio=rank_ratio, 
-        max_iterations=max_iterations,
-        loss_type=loss
-    )
     
     # Reconstruct full transformation matrix
     transform = reconstruct_full_matrix(T1, T2, hidden_size)
     
     print(f"{Fore.GREEN}[Kronecker] Transformation matrix reconstructed: {transform.shape}{Fore.RESET}")
     
-    # Clean up
-    del model, a1, a2
-    if accurate:
-        del a3
+    # Clean up model memory
+    del model
     gc.collect()
     torch.cuda.empty_cache()
     
@@ -420,41 +441,3 @@ def kronecker_dist(
     
     return final_save_path
 
-
-def read_config(config_path: str) -> dict:
-    """Read and parse YAML configuration file."""
-    with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
-
-
-def run_from_config():
-    """Run the Kronecker factorization from a configuration file."""
-    parser = argparse.ArgumentParser(
-        description="Run Kronecker factorization for linear transform estimation based on a configuration file."
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        required=True,
-        help="Path to the configuration file."
-    )
-    
-    args = parser.parse_args()
-    config = read_config(args.config)
-    
-    average_distances = torch.load(config['distances_path'])
-    selected_blocks = select_non_overlapping_blocks(
-        average_distances,
-        config['layers_to_skip'],
-        num_blocks=config['num_A'],
-        merge_consecutive=config['merge_consecutive']
-    )
-    
-    start_ids = sorted([x[0] for x in selected_blocks])
-    end_ids = sorted([x[1] for x in selected_blocks])
-    num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
-    num_layers = [sum(num_layers[:i]) for i in range(len(start_ids)+1)]
-    
-    for i in range(len(selected_blocks)):
-        path = kronecker_dist(**config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
-        config["model_path"] = path
