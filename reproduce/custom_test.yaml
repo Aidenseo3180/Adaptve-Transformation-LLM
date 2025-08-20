@@ -33,14 +33,14 @@ accurate: False
 tasks:
   boolq:
     fewshots: 5
-  # lambada_openai:
-  #   fewshots: 0
-  # openbookqa:
-  #   fewshots: 0
-  # piqa:
-  #   fewshots: 0
-  # race:
-  #   fewshots: 0
+  lambada_openai:
+    fewshots: 0
+  openbookqa:
+    fewshots: 0
+  piqa:
+    fewshots: 0
+  race:
+    fewshots: 0
   # sciq:
   #   fewshots: 0
   # winogrande:

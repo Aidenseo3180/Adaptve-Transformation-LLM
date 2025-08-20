@@ -38,31 +38,53 @@ def low_rank_factorization(T: torch.Tensor, rank: int = 1024) -> tuple:
         U: Left factor matrix (d x rank)
         V: Right factor matrix (d x rank)
     """
+    print(f"[DEBUG] Starting low-rank factorization")
+    print(f"[DEBUG] Original T shape: {T.shape}")
+    print(f"[DEBUG] Original T device: {T.device}")
+    print(f"[DEBUG] Target rank: {rank}")
+    print(f"[DEBUG] Parameter reduction: {T.numel()} -> {2 * T.shape[0] * rank} ({(1 - 2*rank/T.shape[0])*100:.1f}% reduction)")
+    
     logging.info(f"{Fore.GREEN}Performing SVD decomposition with rank {rank}{Fore.RESET}")
     
     # Move to CPU for SVD computation to avoid memory issues
     T_cpu = T.cpu().float()
+    print(f"[DEBUG] Moved T to CPU for SVD computation")
     
     # Perform SVD decomposition
     U, S, Vt = torch.svd(T_cpu)
+    print(f"[DEBUG] SVD completed - U: {U.shape}, S: {S.shape}, Vt: {Vt.shape}")
+    print(f"[DEBUG] Top 10 singular values: {S[:10].tolist()}")
     
     # Take top-k singular values and vectors
     U_lr = U[:, :rank].contiguous()
     S_lr = S[:rank]
     V_lr = Vt[:rank, :].T.contiguous()
+    print(f"[DEBUG] After rank reduction - U_lr: {U_lr.shape}, V_lr: {V_lr.shape}")
     
     # Scale by singular values
     U_lr = U_lr @ torch.diag(torch.sqrt(S_lr))
     V_lr = V_lr @ torch.diag(torch.sqrt(S_lr))
+    print(f"[DEBUG] Applied singular value scaling")
     
     # Verify reconstruction
     T_reconstructed = U_lr @ V_lr.T
     reconstruction_error = torch.norm(T_cpu - T_reconstructed) / torch.norm(T_cpu)
     
+    print(f"[DEBUG] Reconstruction verification:")
+    print(f"[DEBUG] - Reconstructed T shape: {T_reconstructed.shape}")
+    print(f"[DEBUG] - Reconstruction error: {reconstruction_error:.6f}")
+    print(f"[DEBUG] - Original T norm: {torch.norm(T_cpu):.6f}")
+    print(f"[DEBUG] - Reconstructed T norm: {torch.norm(T_reconstructed):.6f}")
+    
     logging.info(f"{Fore.GREEN}Reconstruction error: {reconstruction_error:.6f}{Fore.RESET}")
     
     # Keep on CPU initially - will be moved to correct device in apply_low_rank_transform
-    return U_lr.to(T.dtype), V_lr.to(T.dtype)
+    result_U = U_lr.to(T.dtype)
+    result_V = V_lr.to(T.dtype)
+    print(f"[DEBUG] Final U shape: {result_U.shape}, V shape: {result_V.shape}")
+    print(f"[DEBUG] Low-rank factorization completed successfully")
+    
+    return result_U, result_V
 
 
 def apply_low_rank_transform(model, layer_idx: int, U: torch.Tensor, V: torch.Tensor):
@@ -75,9 +97,21 @@ def apply_low_rank_transform(model, layer_idx: int, U: torch.Tensor, V: torch.Te
         U: Left factor matrix
         V: Right factor matrix
     """
+    print(f"[DEBUG] Applying low-rank transform to layer {layer_idx}")
+    
     # Get the down_proj layer
     down_proj = model.model.layers[layer_idx].mlp.down_proj
     original_weight = down_proj.weight.data
+    
+    print(f"[DEBUG] Original down_proj weight shape: {original_weight.shape}")
+    print(f"[DEBUG] Original down_proj weight device: {original_weight.device}")
+    print(f"[DEBUG] Original down_proj weight dtype: {original_weight.dtype}")
+    print(f"[DEBUG] Input U shape: {U.shape}, V shape: {V.shape}")
+    print(f"[DEBUG] Input U device: {U.device}, V device: {V.device}")
+    
+    # Store original weight norm for comparison
+    original_norm = torch.norm(original_weight).item()
+    print(f"[DEBUG] Original weight norm: {original_norm:.6f}")
     
     # Ensure all tensors are on the same device as the original weight
     device = original_weight.device
@@ -87,13 +121,32 @@ def apply_low_rank_transform(model, layer_idx: int, U: torch.Tensor, V: torch.Te
     V = V.to(device=device, dtype=torch.float64)
     original_weight_fp64 = original_weight.to(torch.float64)
     
+    print(f"[DEBUG] After device transfer - U device: {U.device}, V device: {V.device}")
+    print(f"[DEBUG] Computing transformation: V @ U.T @ original_weight")
+    
     # Apply low-rank transformation: W_new = V^T @ U^T @ W_original
     # Since T = U @ V^T, the transformation becomes (U @ V^T)^T @ W = V @ U^T @ W
-    transformed_weight = V @ U.T @ original_weight_fp64
+    intermediate = U.T @ original_weight_fp64
+    print(f"[DEBUG] Intermediate result shape (U.T @ W): {intermediate.shape}")
+    
+    transformed_weight = V @ intermediate
+    print(f"[DEBUG] Final transformed weight shape: {transformed_weight.shape}")
+    
+    # Verify transformation
+    transformed_norm = torch.norm(transformed_weight).item()
+    print(f"[DEBUG] Transformed weight norm: {transformed_norm:.6f}")
+    print(f"[DEBUG] Weight norm ratio (new/old): {transformed_norm/original_norm:.6f}")
     
     # Update the weight
     down_proj.weight.data = transformed_weight.to(dtype)
     
+    # Verify the update was applied
+    new_weight = down_proj.weight.data
+    new_norm = torch.norm(new_weight).item()
+    print(f"[DEBUG] After assignment - new weight norm: {new_norm:.6f}")
+    print(f"[DEBUG] Assignment verification: {torch.allclose(new_weight.float(), transformed_weight.float(), atol=1e-5)}")
+    
+    print(f"[DEBUG] Successfully applied low-rank transform to layer {layer_idx}")
     logging.info(f"{Fore.GREEN}Applied low-rank transform to layer {layer_idx}{Fore.RESET}")
 
 
@@ -278,27 +331,48 @@ def low_rank_replace(
         a3 = a3[:cnt]    
     
     # Compute full-rank transformation first
+    print(f"[DEBUG] Computing full-rank transformation matrix T")
+    print(f"[DEBUG] Calibration data processed: {cnt} tokens")
+    print(f"[DEBUG] Input activation shapes - a1: {a1.shape}, a2: {a2.shape}")
+    if accurate:
+        print(f"[DEBUG] a3 shape (accurate mode): {a3.shape}")
+    
     if solver == "adam":
+        print(f"[DEBUG] Using Adam solver with loss: {loss}")
         transform = adam_method(a1, a2, a3=a3 if accurate else None, loss=loss, diag=diag, two_vectors=two_vectors, thri=thri)
     else:
+        print(f"[DEBUG] Using optimization method with solver: {solver}")
         transform = optimizing_method(a1, a2, a3=a3 if accurate else None, solver=solver)
+    
+    print(f"[DEBUG] Full-rank transformation T computed")
+    print(f"[DEBUG] T shape: {transform.shape}")
+    print(f"[DEBUG] T device: {transform.device}")
+    print(f"[DEBUG] T dtype: {transform.dtype}")
+    print(f"[DEBUG] T norm: {torch.norm(transform):.6f}")
     
     # Apply low-rank factorization
     logging.info(f"{Fore.GREEN}Applying low-rank factorization with rank {low_rank}{Fore.RESET}")
+    print(f"[DEBUG] Starting low-rank factorization process")
     U, V = low_rank_factorization(transform, rank=low_rank)
     
     # Clean up
+    print(f"[DEBUG] Cleaning up GPU memory and reloading model")
     del model
     gc.collect()
     torch.cuda.empty_cache()
     
     # Reload model for transformation
+    print(f"[DEBUG] Reloading model from: {model_path}")
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         device_map='cpu',
         torch_dtype=torch.bfloat16
     )
+    print(f"[DEBUG] Model reloaded successfully")
+    
+    print(f"[DEBUG] Truncating model - removing layers {start_id - num_layer} to {end_id - num_layer}")
     model = truncate_model(model, start_id - num_layer, end_id - num_layer)
+    print(f"[DEBUG] Model truncated - new layer count: {len(model.model.layers)}")
     
     if save_path is None:
         if not os.path.exists('output_models'):
@@ -308,25 +382,38 @@ def low_rank_replace(
             f"{end_id}_{dataset}_{dataset_size}_lowrank_{low_rank}"
         ).replace("/", "_")
     
+    print(f"[DEBUG] Save path: {save_path}_LowRank_{loss}_{solver}_r{low_rank}")
+    
     # Apply low-rank transformation
-    apply_low_rank_transform(model, start_id - num_layer - 1, U, V)
+    target_layer = start_id - num_layer - 1
+    print(f"[DEBUG] Applying low-rank transformation to layer index: {target_layer}")
+    apply_low_rank_transform(model, target_layer, U, V)
     
     model.save_pretrained(f"{save_path}_LowRank_{loss}_{solver}_r{low_rank}")
     tokenizer.save_pretrained(f"{save_path}_LowRank_{loss}_{solver}_r{low_rank}")
+    print(f"[DEBUG] Model saved to: {save_path}_LowRank_{loss}_{solver}_r{low_rank}")
     
     if save_transform_only:
+        transform_save_path = f"{save_path}_LowRank_{loss}_{solver}_r{low_rank}_factors"
         torch.save({
             'U': U,
             'V': V,
             'rank': low_rank,
             'original_transform': transform
-        }, f"{save_path}_LowRank_{loss}_{solver}_r{low_rank}_factors")
+        }, transform_save_path)
+        print(f"[DEBUG] Transform factors saved to: {transform_save_path}")
     
     # Final cleanup
+    print(f"[DEBUG] Final cleanup")
     del model, a1, a2
     if accurate:
         del a3
     gc.collect()
     torch.cuda.empty_cache()
     
-    return f"{save_path}_LowRank_{loss}_{solver}_r{low_rank}"
+    final_path = f"{save_path}_LowRank_{loss}_{solver}_r{low_rank}"
+    print(f"[DEBUG] Low-rank replacement completed successfully")
+    print(f"[DEBUG] Final model path: {final_path}")
+    
+    return final_path
+
