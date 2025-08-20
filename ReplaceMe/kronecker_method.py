@@ -38,7 +38,7 @@ def kronecker_factorization_streaming(
     hidden_size: int,
     accurate: bool = False,
     rank_ratio: float = 0.25,
-    max_iterations: int = 10,
+    max_iterations: int = 50,
     lr: float = 1e-3,
     loss_type: str = "cosine",
     mini_batch_size: int = 512
@@ -280,7 +280,7 @@ def kronecker_dist(
     accurate: bool = False,
     rank_ratio: float = 0.25,
     loss: str = "cosine",
-    max_iterations: int = 20
+    max_iterations: int = 50
 ) -> str:
     """
     Apply Kronecker factorization-based compression to transformer blocks.
@@ -357,7 +357,7 @@ def kronecker_dist(
     }
     
     print(f"{Fore.YELLOW}[Kronecker] Using streaming approach - no large memory allocation{Fore.RESET}")
-    print(f"{Fore.RED}[Kronecker] Processing layers {start_id-num_layer} to {end_id-num_layer}...{Fore.RESET}")
+    print(f"{Fore.RED}[Kronecker] Processing layers {start_id-num_layer-1} to {end_id-num_layer-1}...{Fore.RESET}")
     
     # Apply streaming Kronecker factorization
     print(f"{Fore.MAGENTA}[Kronecker] Starting streaming factorization...{Fore.RESET}")
@@ -411,7 +411,12 @@ def kronecker_dist(
     # Apply transformation
     print(f"{Fore.YELLOW}[Kronecker] Applying transformation to down_proj layer...{Fore.RESET}")
     original_weight = model.model.layers[start_id - num_layer - 1].mlp.down_proj.weight.to(torch.float64)
-    transformed_weight = (transform.T.cpu() @ original_weight).to(torch.bfloat16)
+    
+    # Ensure transform and original_weight have the same dtype
+    transform_cpu = transform.T.cpu().to(torch.float64)
+    transformed_weight = (transform_cpu @ original_weight).to(torch.bfloat16)
+    
+    print(f"{Fore.GREEN}[Kronecker] Transform dtype: {transform_cpu.dtype}, Weight dtype: {original_weight.dtype}{Fore.RESET}")
     
     model.model.layers[start_id - num_layer - 1].mlp.down_proj.load_state_dict({
         "weight": transformed_weight
@@ -441,3 +446,41 @@ def kronecker_dist(
     
     return final_save_path
 
+
+def read_config(config_path: str) -> dict:
+    """Read and parse YAML configuration file."""
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
+
+
+def run_from_config():
+    """Run the Kronecker factorization from a configuration file."""
+    parser = argparse.ArgumentParser(
+        description="Run Kronecker factorization for linear transform estimation based on a configuration file."
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help="Path to the configuration file."
+    )
+    
+    args = parser.parse_args()
+    config = read_config(args.config)
+    
+    average_distances = torch.load(config['distances_path'])
+    selected_blocks = select_non_overlapping_blocks(
+        average_distances,
+        config['layers_to_skip'],
+        num_blocks=config['num_A'],
+        merge_consecutive=config['merge_consecutive']
+    )
+    
+    start_ids = sorted([x[0] for x in selected_blocks])
+    end_ids = sorted([x[1] for x in selected_blocks])
+    num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
+    num_layers = [sum(num_layers[:i]) for i in range(len(start_ids)+1)]
+    
+    for i in range(len(selected_blocks)):
+        path = kronecker_dist(**config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
+        config["model_path"] = path
