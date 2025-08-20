@@ -17,7 +17,7 @@ merge_consecutive: False
 distances_path: null
 
 # Low-rank specific parameters
-low_rank: 1024  # Rank for factorization
+low_rank: 512  # Rank for factorization
 loss: "cosine"
 solver: "adam"
 
@@ -34,14 +34,14 @@ tasks:
   boolq:
     fewshots: 5
   lambada_openai:
-    fewshots: 0
+    fewshots: 5
   openbookqa:
-    fewshots: 0
+    fewshots: 5
   piqa:
-    fewshots: 0
+    fewshots: 5
   race:
-    fewshots: 0
-  # sciq:
-  #   fewshots: 0
-  # winogrande:
-  #   fewshots: 5
+    fewshots: 5
+  sciq:
+    fewshots: 5
+  winogrande:
+    fewshots: 5

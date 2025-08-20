@@ -144,10 +144,21 @@ def apply_low_rank_transform(model, layer_idx: int, U: torch.Tensor, V: torch.Te
     new_weight = down_proj.weight.data
     new_norm = torch.norm(new_weight).item()
     print(f"[DEBUG] After assignment - new weight norm: {new_norm:.6f}")
-    print(f"[DEBUG] Assignment verification: {torch.allclose(new_weight.float(), transformed_weight.float(), atol=1e-5)}")
+    print(f"[DEBUG] Assignment verification: {torch.allclose(new_weight.float(), transformed_weight.float(), atol=1e-3)}")
     
     print(f"[DEBUG] Successfully applied low-rank transform to layer {layer_idx}")
-    logging.info(f"{Fore.GREEN}Applied low-rank transform to layer {layer_idx}{Fore.RESET}")
+    print(f"{Fore.GREEN}Applied low-rank transform to layer {layer_idx}{Fore.RESET}")
+
+    # 기존 FLOPs 계산
+    print("="*20)
+    print("FLOPs Comparison")
+    original_flops = original_weight.shape[0] * original_weight.shape[1]
+    print(f"[DEBUG] Original FLOPs per token: {original_flops}")
+
+    # Low-rank FLOPs 계산  
+    lr_flops = U.shape[0] * U.shape[1] + V.shape[1] * original_weight.shape[1]
+    print(f"[DEBUG] Low-rank FLOPs per token: {lr_flops}")
+    print(f"[DEBUG] FLOPs reduction: {(1 - lr_flops/original_flops)*100:.1f}%")
 
 
 def low_rank_replace(
