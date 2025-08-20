@@ -40,8 +40,11 @@ def low_rank_factorization(T: torch.Tensor, rank: int = 1024) -> tuple:
     """
     logging.info(f"{Fore.GREEN}Performing SVD decomposition with rank {rank}{Fore.RESET}")
     
+    # Move to CPU for SVD computation to avoid memory issues
+    T_cpu = T.cpu().float()
+    
     # Perform SVD decomposition
-    U, S, Vt = torch.svd(T.float())
+    U, S, Vt = torch.svd(T_cpu)
     
     # Take top-k singular values and vectors
     U_lr = U[:, :rank].contiguous()
@@ -54,10 +57,11 @@ def low_rank_factorization(T: torch.Tensor, rank: int = 1024) -> tuple:
     
     # Verify reconstruction
     T_reconstructed = U_lr @ V_lr.T
-    reconstruction_error = torch.norm(T - T_reconstructed.to(T.dtype)) / torch.norm(T)
+    reconstruction_error = torch.norm(T_cpu - T_reconstructed) / torch.norm(T_cpu)
     
     logging.info(f"{Fore.GREEN}Reconstruction error: {reconstruction_error:.6f}{Fore.RESET}")
     
+    # Keep on CPU initially - will be moved to correct device in apply_low_rank_transform
     return U_lr.to(T.dtype), V_lr.to(T.dtype)
 
 
@@ -75,12 +79,20 @@ def apply_low_rank_transform(model, layer_idx: int, U: torch.Tensor, V: torch.Te
     down_proj = model.model.layers[layer_idx].mlp.down_proj
     original_weight = down_proj.weight.data
     
+    # Ensure all tensors are on the same device as the original weight
+    device = original_weight.device
+    dtype = original_weight.dtype
+    
+    U = U.to(device=device, dtype=torch.float64)
+    V = V.to(device=device, dtype=torch.float64)
+    original_weight_fp64 = original_weight.to(torch.float64)
+    
     # Apply low-rank transformation: W_new = V^T @ U^T @ W_original
     # Since T = U @ V^T, the transformation becomes (U @ V^T)^T @ W = V @ U^T @ W
-    transformed_weight = V @ U.T @ original_weight.to(torch.float64)
+    transformed_weight = V @ U.T @ original_weight_fp64
     
     # Update the weight
-    down_proj.weight.data = transformed_weight.to(original_weight.dtype)
+    down_proj.weight.data = transformed_weight.to(dtype)
     
     logging.info(f"{Fore.GREEN}Applied low-rank transform to layer {layer_idx}{Fore.RESET}")
 
@@ -318,4 +330,3 @@ def low_rank_replace(
     torch.cuda.empty_cache()
     
     return f"{save_path}_LowRank_{loss}_{solver}_r{low_rank}"
-
