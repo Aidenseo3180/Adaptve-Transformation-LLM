@@ -10,7 +10,7 @@ from colorama import Fore, Style, init
 from .cosine_dist import cosine_dist
 from .distance import profile_distances
 from .evaluator import evaluator
-from .kronecker_method import kronecker_dist  # New import
+from .low_rank_replace import low_rank_replace  # New import
 from .utils import seed_all, select_non_overlapping_blocks
 
 # Initialize colorama for Windows compatibility
@@ -35,9 +35,8 @@ def ReplaceMe_pipeline(config):
         profile_distances(**filtered_config)
         config['distances_path'] = "./distances.pth"
     
-    if config["method"] == "kronecker":  # New method
-        logging.info(f"{Fore.MAGENTA}Using Kronecker Factorization method{Fore.RESET}")
-        signature = inspect.signature(kronecker_dist)
+    if config["method"] == "low_rank":  # New method
+        signature = inspect.signature(low_rank_replace)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
         # Load average distances and select non-overlapping blocks
@@ -57,8 +56,7 @@ def ReplaceMe_pipeline(config):
         
         # Iterate over each selected block
         for i in range(len(selected_blocks)):
-            logging.info(f"{Fore.MAGENTA}Processing block {i+1}/{len(selected_blocks)}: layers {start_ids[i]} to {end_ids[i]}{Fore.RESET}")
-            path = kronecker_dist(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
+            path = low_rank_replace(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
     else:  # Original cosine/adam methods
         signature = inspect.signature(cosine_dist)
