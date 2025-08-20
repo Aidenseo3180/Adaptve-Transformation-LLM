@@ -14,7 +14,7 @@ method: "low_rank"  # New method for low-rank factorization
 layers_to_skip: 4  # For 4-block replacement
 num_A: 1
 merge_consecutive: False
-distances_path: "./distances.pth"
+distances_path: null
 
 # Low-rank specific parameters
 low_rank: 1024  # Rank for factorization
