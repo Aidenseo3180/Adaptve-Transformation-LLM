@@ -309,13 +309,13 @@ def cosine_dist(
         torch.save(transform, f"{save_path}_ReplaceMe_{loss}_{solver}_transform")
 
 
-    # Always save a1 and a2 to hardcoded paths for ICLT use
+    # Always save a1 and a2 to hardcoded paths
     a1_save_path = "./activations/a1.pt"
     a2_save_path = "./activations/a2.pt"
     os.makedirs("./activations", exist_ok=True)
     torch.save(a1, a1_save_path)
     torch.save(a2, a2_save_path)
-    print(f"[ICLT] Saved a1 to {a1_save_path}, a2 to {a2_save_path}")
+    print(f"Saved a1 to {a1_save_path}, a2 to {a2_save_path}")
 
     # Final cleanup to free memory
     del model, a1, a2
