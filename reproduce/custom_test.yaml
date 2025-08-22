@@ -11,13 +11,13 @@ max_length: 512
 method: "low_rank"  # New method for low-rank factorization
 
 # Block selection parameters
-layers_to_skip: 4  # For 4-block replacement
+layers_to_skip: 2  # For 4-block replacement
 num_A: 1
 merge_consecutive: False
 distances_path: null
 
 # Low-rank specific parameters
-low_rank: 512  # Rank for factorization
+low_rank: 2048  # Rank for factorization
 loss: "cosine"
 solver: "adam"
 
@@ -30,18 +30,18 @@ two_vectors: False
 accurate: False
 
 # Evaluation tasks
-tasks:
-  boolq:
-    fewshots: 5
-  lambada_openai:
-    fewshots: 5
-  openbookqa:
-    fewshots: 5
-  piqa:
-    fewshots: 5
-  race:
-    fewshots: 5
-  sciq:
-    fewshots: 5
-  winogrande:
-    fewshots: 5
+# tasks:
+#   boolq:
+#     fewshots: 5
+#   lambada_openai:
+#     fewshots: 5
+#   openbookqa:
+#     fewshots: 5
+#   piqa:
+#     fewshots: 5
+#   race:
+#     fewshots: 5
+#   sciq:
+#     fewshots: 5
+#   winogrande:
+#     fewshots: 5
