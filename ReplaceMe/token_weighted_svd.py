@@ -135,6 +135,11 @@ def token_weighted_svd_factorization(T: torch.Tensor, importance_weights: torch.
     T_cpu = T.cpu().float()
     weights_cpu = importance_weights.cpu().float()
     
+    # TEMPORARY: Use uniform weights for testing
+    print(f"[DEBUG] TESTING MODE: Using uniform weights instead of computed importance")
+    weights_cpu = torch.ones_like(weights_cpu)
+    print(f"[DEBUG] Uniform weights applied - all dimensions weighted equally")
+    
     # Create weighting matrix - we weight both rows and columns
     # Higher importance = higher weight in reconstruction
     W = torch.sqrt(weights_cpu).unsqueeze(0)  # Shape: (1, d)
@@ -142,11 +147,14 @@ def token_weighted_svd_factorization(T: torch.Tensor, importance_weights: torch.
     W_col = W    # Shape: (1, d)
     
     print(f"[DEBUG] Weight matrix stats - min: {weights_cpu.min():.6f}, max: {weights_cpu.max():.6f}")
+    print(f"[DEBUG] Since uniform weights, W_row and W_col are all 1.0")
     
     # Apply weighting: T_weighted = W_row * T * W_col
+    # With uniform weights, this should be identical to T
     T_weighted = (W_row * T_cpu) * W_col
     
     print(f"[DEBUG] Weighted T norm: {torch.norm(T_weighted):.6f} vs Original T norm: {torch.norm(T_cpu):.6f}")
+    print(f"[DEBUG] Should be identical with uniform weights: {torch.allclose(T_weighted, T_cpu)}")
     
     # Perform SVD on weighted matrix
     U_w, S, Vt_w = torch.svd(T_weighted)
@@ -162,11 +170,12 @@ def token_weighted_svd_factorization(T: torch.Tensor, importance_weights: torch.
     U_lr = U_lr @ torch.diag(torch.sqrt(S_lr))
     V_lr = V_lr @ torch.diag(torch.sqrt(S_lr))
     
-    # Adjust back for weighting - remove the weighting effect
+    # Adjust back for weighting - with uniform weights, this should be no-op
     U_lr = U_lr / W_row  # Remove row weighting
     V_lr = V_lr / W_col.T  # Remove column weighting
     
     print(f"[DEBUG] After rank reduction and weight adjustment - U_lr: {U_lr.shape}, V_lr: {V_lr.shape}")
+    print(f"[DEBUG] With uniform weights, division should not change values significantly")
     
     # Verify reconstruction
     T_reconstructed = U_lr @ V_lr.T
@@ -178,14 +187,17 @@ def token_weighted_svd_factorization(T: torch.Tensor, importance_weights: torch.
     print(f"[DEBUG] Reconstruction verification:")
     print(f"[DEBUG] - Weighted reconstruction error: {weighted_error:.6f}")
     print(f"[DEBUG] - Unweighted reconstruction error: {unweighted_error:.6f}")
+    print(f"[DEBUG] - With uniform weights, both errors should be similar: {abs(weighted_error - unweighted_error) < 1e-5}")
     print(f"[DEBUG] - Original T norm: {torch.norm(T_cpu):.6f}")
     print(f"[DEBUG] - Reconstructed T norm: {torch.norm(T_reconstructed):.6f}")
+    print(f"[DEBUG] - Norm ratio (should be close to 1.0): {torch.norm(T_reconstructed) / torch.norm(T_cpu):.6f}")
     
     # Return to original dtype
     result_U = U_lr.to(T.dtype)
     result_V = V_lr.to(T.dtype)
     
     print(f"[DEBUG] Token-weighted SVD factorization completed successfully")
+    print(f"[DEBUG] This should behave like regular SVD with uniform weights")
     
     return result_U, result_V
 
@@ -477,4 +489,3 @@ def token_weighted_replace(
     print(f"[DEBUG] Final model path: {final_path}")
     
     return final_path
-
