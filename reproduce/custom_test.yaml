@@ -30,18 +30,18 @@ two_vectors: False
 accurate: False
 
 # Evaluation tasks
-tasks:
-  boolq:
-    fewshots: 5
-  lambada_openai:
-    fewshots: 5
-  openbookqa:
-    fewshots: 5
-  piqa:
-    fewshots: 5
-  race:
-    fewshots: 5
-  sciq:
-    fewshots: 5
-  winogrande:
-    fewshots: 5
+# tasks:
+#   boolq:
+#     fewshots: 5
+#   lambada_openai:
+#     fewshots: 5
+#   openbookqa:
+#     fewshots: 5
+#   piqa:
+#     fewshots: 5
+#   race:
+#     fewshots: 5
+#   sciq:
+#     fewshots: 5
+#   winogrande:
+#     fewshots: 5
