@@ -123,18 +123,38 @@ def find_optimal_alpha(model_path: str, tokenizer, U: torch.Tensor, V: torch.Ten
     device = original_weight.device
     dtype = original_weight.dtype
     
+    print(f"[DEBUG] Original weight shape: {original_weight.shape}")
+    print(f"[DEBUG] U shape: {U.shape}, V shape: {V.shape}")
+    
     # Move U, V to correct device
     U = U.to(device=device, dtype=torch.float64)
     V = V.to(device=device, dtype=torch.float64)
     original_weight_fp64 = original_weight.to(torch.float64)
     
+    # The correct dimension for identity should match the transformation dimensions
+    # down_proj weight is (hidden_dim, intermediate_dim)
+    # So transformation should be (intermediate_dim, intermediate_dim)
+    transform_dim = original_weight.shape[1]  # intermediate_dim
+    print(f"[DEBUG] Transform dimension should be: {transform_dim}")
+    print(f"[DEBUG] U @ V.T will have shape: ({U.shape[0]}, {V.shape[0]})")
+    
     for alpha in alpha_candidates:
         print(f"[DEBUG] Testing alpha = {alpha}")
         
         # Create residual transformation: I + α(UV^T)
-        identity_transform = torch.eye(original_weight.shape[1], device=device, dtype=torch.float64)
-        residual_transform = identity_transform + alpha * (U @ V.T)
+        # The identity should match the dimension of U @ V.T
+        identity_transform = torch.eye(U.shape[0], device=device, dtype=torch.float64)
+        residual_component = alpha * (U @ V.T)
+        residual_transform = identity_transform + residual_component
+        
+        print(f"[DEBUG] Identity transform shape: {identity_transform.shape}")
+        print(f"[DEBUG] Residual component shape: {residual_component.shape}")
+        print(f"[DEBUG] Final residual transform shape: {residual_transform.shape}")
+        
+        # Apply transformation: W_new = T^T @ W_original
         transformed_weight = residual_transform.T @ original_weight_fp64
+        
+        print(f"[DEBUG] Transformed weight shape: {transformed_weight.shape}")
         
         # Load a fresh model for testing
         test_model = AutoModelForCausalLM.from_pretrained(
@@ -218,7 +238,8 @@ def apply_residual_low_rank_transform(model, layer_idx: int, U: torch.Tensor, V:
     print(f"[DEBUG] After device transfer - U device: {U.device}, V device: {V.device}")
     
     # Create residual transformation: I + α(UV^T)
-    identity_transform = torch.eye(original_weight.shape[1], device=device, dtype=torch.float64)
+    # The identity should match the dimension of the transformation matrix
+    identity_transform = torch.eye(U.shape[0], device=device, dtype=torch.float64)
     residual_component = alpha * (U @ V.T)
     residual_transform = identity_transform + residual_component
     
@@ -549,41 +570,3 @@ def residual_low_rank_replace(
     
     return final_path
 
-
-def read_config(config_path: str) -> dict:
-    """Read and parse YAML configuration file."""
-    with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
-
-
-def run_from_config():
-    """Run the residual low-rank replacement from a configuration file."""
-    parser = argparse.ArgumentParser(
-        description="Run residual low-rank factorization for linear transform estimation based on a configuration file."
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        required=True,
-        help="Path to the configuration file."
-    )
-    
-    args = parser.parse_args()
-    config = read_config(args.config)
-    
-    average_distances = torch.load(config['distances_path'])
-    selected_blocks = select_non_overlapping_blocks(
-        average_distances,
-        config['layers_to_skip'],
-        num_blocks=config['num_A'],
-        merge_consecutive=config['merge_consecutive']
-    )
-    
-    start_ids = sorted([x[0] for x in selected_blocks])
-    end_ids = sorted([x[1] for x in selected_blocks])
-    num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
-    num_layers = [sum(num_layers[:i]) for i in range(len(start_ids)+1)]
-    
-    for i in range(len(selected_blocks)):
-        path = residual_low_rank_replace(**config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
-        config["model_path"] = path
