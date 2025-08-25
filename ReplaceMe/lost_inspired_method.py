@@ -175,32 +175,42 @@ def apply_lost_inspired_transform(model, layer_idx: int, U: torch.Tensor, V: tor
     print(f"[DEBUG] Low-rank transform shape: {low_rank_transform.shape}")
     print(f"[DEBUG] Low-rank transformed weight shape: {low_rank_transformed_weight.shape}")
     
-    # Create sparse transformation
-    sparse_transform = torch.eye(original_weight.shape[1], device=device, dtype=torch.float64)
-    
+    # Create sparse contribution - Fix dimension issue
     if sparse_component.shape[1] > 1:  # If we have meaningful sparse component
-        # Create channel-wise sparse transformation matrix
-        # This applies the sparse component to selected channels
-        selected_channels = torch.zeros(original_weight.shape[1], sparse_component.shape[1], 
-                                       device=device, dtype=torch.float64)
+        # Create sparse transformation matrix with correct dimensions
+        # sparse_component is (d, k) where d=4096, k=num_selected_channels
+        # We need to apply it to the weight properly
         
-        # Create mapping for sparse channels
-        for i, idx in enumerate(sparse_indices):
-            if idx < selected_channels.shape[0]:
-                selected_channels[idx, i] = 1.0
+        # Method: Apply sparse component as a channel-wise scaling
+        sparse_weight_contribution = original_weight_fp64.clone()
         
-        # Apply sparse component transformation
-        sparse_weight_contribution = selected_channels @ sparse_component.T @ original_weight_fp64
+        # Apply sparse component to selected input channels of the weight
+        # original_weight is (output_dim, input_dim) = (4096, 14336)
+        # We select channels from input dimension based on sparse_indices
+        
+        for i, channel_idx in enumerate(sparse_indices):
+            if channel_idx < original_weight_fp64.shape[1] and i < sparse_component.shape[1]:
+                # Apply sparse component to this channel
+                # sparse_component[:, i] is the sparse values for this channel
+                sparse_weight_contribution[:, channel_idx] = sparse_component[:, i]
         
         print(f"[DEBUG] Sparse contribution shape: {sparse_weight_contribution.shape}")
         print(f"[DEBUG] Sparse contribution norm: {torch.norm(sparse_weight_contribution):.6f}")
+        
+        # Calculate the actual sparse contribution as difference
+        sparse_contribution_diff = sparse_weight_contribution - original_weight_fp64
+        print(f"[DEBUG] Sparse diff norm: {torch.norm(sparse_contribution_diff):.6f}")
+        
+        # Final combination: base weight + gamma*low_rank_change + (1-gamma)*sparse_change
+        low_rank_change = low_rank_transformed_weight - original_weight_fp64
+        final_transformed_weight = (original_weight_fp64 + 
+                                  gamma * low_rank_change + 
+                                  (1 - gamma) * sparse_contribution_diff)
+        
     else:
-        sparse_weight_contribution = torch.zeros_like(original_weight_fp64)
-        print(f"[DEBUG] Using zero sparse contribution")
-    
-    # Combine low-rank and sparse components (LOST approach)
-    final_transformed_weight = (gamma * low_rank_transformed_weight + 
-                               (1 - gamma) * sparse_weight_contribution)
+        # No meaningful sparse component, use only low-rank
+        print(f"[DEBUG] Using only low-rank transformation (no sparse component)")
+        final_transformed_weight = gamma * low_rank_transformed_weight + (1 - gamma) * original_weight_fp64
     
     print(f"[DEBUG] Final transformed weight shape: {final_transformed_weight.shape}")
     
@@ -210,11 +220,12 @@ def apply_lost_inspired_transform(model, layer_idx: int, U: torch.Tensor, V: tor
     print(f"[DEBUG] Weight norm ratio (new/old): {transformed_norm/original_norm:.6f}")
     
     # Check components contribution
-    lr_norm = torch.norm(low_rank_transformed_weight).item()
-    sparse_norm = torch.norm(sparse_weight_contribution).item()
-    print(f"[DEBUG] Low-rank component norm: {lr_norm:.6f}")
-    print(f"[DEBUG] Sparse component norm: {sparse_norm:.6f}")
-    print(f"[DEBUG] Component ratio (lr/sparse): {lr_norm/(sparse_norm + 1e-8):.6f}")
+    if sparse_component.shape[1] > 1:
+        lr_change_norm = torch.norm(low_rank_change).item()
+        sparse_change_norm = torch.norm(sparse_contribution_diff).item()
+        print(f"[DEBUG] Low-rank change norm: {lr_change_norm:.6f}")
+        print(f"[DEBUG] Sparse change norm: {sparse_change_norm:.6f}")
+        print(f"[DEBUG] Change ratio (lr/sparse): {lr_change_norm/(sparse_change_norm + 1e-8):.6f}")
     
     # Update the weight
     down_proj.weight.data = final_transformed_weight.to(dtype)
@@ -504,4 +515,5 @@ def lost_inspired_replace(
     print(f"[DEBUG] Used parameters - rank: {low_rank}, sparsity: {sparsity_ratio}, gamma: {gamma}")
     
     return final_save_path
+
 
