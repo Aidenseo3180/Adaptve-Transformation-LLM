@@ -11,7 +11,7 @@ from .cosine_dist import cosine_dist
 from .distance import profile_distances
 from .evaluator import evaluator
 from .low_rank_replace import low_rank_replace  # New import
-from .token_weighted_svd import token_weighted_replace  # New import
+from .residual_low_rank import residual_low_rank_replace  # New import
 from .utils import seed_all, select_non_overlapping_blocks
 
 # Initialize colorama for Windows compatibility
@@ -60,8 +60,8 @@ def ReplaceMe_pipeline(config):
             path = low_rank_replace(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
 
-    elif config["method"] == "token_weighted":  # New method
-        signature = inspect.signature(token_weighted_replace)
+    elif config["method"] == "residual_low_rank":  # New method
+        signature = inspect.signature(residual_low_rank_replace)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
         # Load average distances and select non-overlapping blocks
@@ -81,7 +81,7 @@ def ReplaceMe_pipeline(config):
         
         # Iterate over each selected block
         for i in range(len(selected_blocks)):
-            path = token_weighted_replace(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
+            path = residual_low_rank_replace(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
 
     else:  # Original cosine/adam methods
