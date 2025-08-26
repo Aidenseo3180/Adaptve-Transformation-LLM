@@ -35,8 +35,8 @@ class SharedAtomDictionary(nn.Module):
         self.hidden_size = hidden_size
         self.num_atoms = num_atoms
         
-        # Initialize shared atoms with Xavier initialization
-        self.atoms = nn.Parameter(torch.randn(num_atoms, hidden_size, hidden_size))
+        # Initialize shared atoms with Xavier initialization in float32
+        self.atoms = nn.Parameter(torch.randn(num_atoms, hidden_size, hidden_size, dtype=torch.float32))
         nn.init.xavier_uniform_(self.atoms)
         
     def forward(self, coefficients: torch.Tensor) -> torch.Tensor:
@@ -46,7 +46,7 @@ class SharedAtomDictionary(nn.Module):
         Returns:
             Linear transformation matrix of shape (hidden_size, hidden_size)
         """
-        return torch.einsum('a,ahd->hd', coefficients, self.atoms)
+        return torch.einsum('a,ahd->hd', coefficients.to(self.atoms.dtype), self.atoms)
 
 
 def learn_shared_atoms(activations_list: List[Tuple[torch.Tensor, torch.Tensor]], 
@@ -74,12 +74,12 @@ def learn_shared_atoms(activations_list: List[Tuple[torch.Tensor, torch.Tensor]]
     all_inputs = torch.cat([pair[0].to(torch.float32) for pair in activations_list], dim=0).to(device)
     all_targets = torch.cat([pair[1].to(torch.float32) for pair in activations_list], dim=0).to(device)
     
-    # Training loop for atom dictionary
+    # Training loop for atom dictionary with memory-efficient batching
     for epoch in tqdm(range(50), desc="Learning Shared Atoms"):
         optimizer.zero_grad()
         
-        # Sample random coefficients for this epoch
-        batch_size = min(1024, all_inputs.shape[0])
+        # Use much smaller batch size to fit in 40GB GPU memory
+        batch_size = min(64, all_inputs.shape[0])
         indices = torch.randperm(all_inputs.shape[0])[:batch_size]
         
         batch_inputs = all_inputs[indices]
@@ -89,33 +89,43 @@ def learn_shared_atoms(activations_list: List[Tuple[torch.Tensor, torch.Tensor]]
         coefficients = torch.randn(num_atoms, requires_grad=True, device=device)
         coeff_optimizer = torch.optim.Adam([coefficients], lr=1e-2)
         
-        # Inner loop to optimize coefficients
-        for _ in range(10):
+        # Reduced inner loop to save memory and computation
+        for inner_step in range(3):
             coeff_optimizer.zero_grad()
             transform_matrix = dictionary(torch.softmax(coefficients, dim=0))
             transformed = batch_inputs @ transform_matrix.T
             
             # Cosine distance loss
-            transformed_norm = transformed / transformed.norm(dim=1, keepdim=True)
-            target_norm = batch_targets / batch_targets.norm(dim=1, keepdim=True)
+            transformed_norm = transformed / (transformed.norm(dim=1, keepdim=True) + 1e-8)
+            target_norm = batch_targets / (batch_targets.norm(dim=1, keepdim=True) + 1e-8)
             cosine_loss = 1 - (transformed_norm * target_norm).sum(dim=1).mean()
             
-            cosine_loss.backward(retain_graph=True)
+            cosine_loss.backward()  # Remove retain_graph to save memory
             coeff_optimizer.step()
+            
+            # Clear gradients to free memory
+            if inner_step % 2 == 0:
+                torch.cuda.empty_cache()
         
         # Update atoms based on optimal coefficients
         transform_matrix = dictionary(torch.softmax(coefficients.detach(), dim=0))
         transformed = batch_inputs @ transform_matrix.T
         
-        transformed_norm = transformed / transformed.norm(dim=1, keepdim=True)
-        target_norm = batch_targets / batch_targets.norm(dim=1, keepdim=True)
+        transformed_norm = transformed / (transformed.norm(dim=1, keepdim=True) + 1e-8)
+        target_norm = batch_targets / (batch_targets.norm(dim=1, keepdim=True) + 1e-8)
         atom_loss = 1 - (transformed_norm * target_norm).sum(dim=1).mean()
         
         atom_loss.backward()
         optimizer.step()
         
-        if epoch % 10 == 0:
+        # Clear memory every few epochs
+        if epoch % 5 == 0:
+            torch.cuda.empty_cache()
             logging.info(f"Epoch {epoch}, Atom Loss: {atom_loss.item():.4f}")
+        
+        # Cleanup intermediate variables
+        del coefficients, coeff_optimizer, transform_matrix, transformed
+        del transformed_norm, target_norm, cosine_loss, atom_loss
     
     return dictionary
 
@@ -144,8 +154,8 @@ def sequential_optimization(activations_list: List[Tuple[torch.Tensor, torch.Ten
     for i, (input_activations, target_activations) in enumerate(activations_list):
         logging.info(f"Optimizing transformation {i+1}/{len(activations_list)}")
         
-        input_activations = input_activations.to(device)
-        target_activations = target_activations.to(device)
+        input_activations = input_activations.to(device).to(torch.float32)
+        target_activations = target_activations.to(device).to(torch.float32)
         
         # Initialize coefficients
         coefficients = torch.randn(shared_atoms.num_atoms, requires_grad=True, device=device)
@@ -154,11 +164,11 @@ def sequential_optimization(activations_list: List[Tuple[torch.Tensor, torch.Ten
         # If this is not the first transformation, consider previous output
         if previous_output is not None and sequential_alpha > 0:
             # Adjust input based on previous transformation output
-            adjusted_input = sequential_alpha * input_activations + (1 - sequential_alpha) * previous_output
+            adjusted_input = sequential_alpha * input_activations + (1 - sequential_alpha) * previous_output.to(torch.float32)
         else:
             adjusted_input = input_activations
         
-        # Optimize coefficients for this transformation
+        # Optimize coefficients for this transformation with reduced memory usage
         for epoch in tqdm(range(100), desc=f"Transform {i+1} Optimization"):
             optimizer.zero_grad()
             
@@ -166,34 +176,83 @@ def sequential_optimization(activations_list: List[Tuple[torch.Tensor, torch.Ten
             coeff_softmax = torch.softmax(coefficients, dim=0)
             transform_matrix = shared_atoms(coeff_softmax)
             
-            # Apply transformation
-            transformed = adjusted_input @ transform_matrix.T
+            # Process in smaller chunks if input is too large
+            if adjusted_input.shape[0] > 1024:
+                # Split into chunks to avoid memory issues
+                chunk_size = 512
+                total_loss = 0
+                num_chunks = 0
+                
+                for chunk_start in range(0, adjusted_input.shape[0], chunk_size):
+                    chunk_end = min(chunk_start + chunk_size, adjusted_input.shape[0])
+                    input_chunk = adjusted_input[chunk_start:chunk_end]
+                    target_chunk = target_activations[chunk_start:chunk_end]
+                    
+                    # Apply transformation
+                    transformed = input_chunk @ transform_matrix.T
+                    
+                    # Cosine distance loss
+                    transformed_norm = transformed / (transformed.norm(dim=1, keepdim=True) + 1e-8)
+                    target_norm = target_chunk / (target_chunk.norm(dim=1, keepdim=True) + 1e-8)
+                    cosine_loss = 1 - (transformed_norm * target_norm).sum(dim=1).mean()
+                    
+                    total_loss += cosine_loss
+                    num_chunks += 1
+                
+                # Average loss across chunks
+                avg_loss = total_loss / num_chunks
+            else:
+                # Apply transformation to full input
+                transformed = adjusted_input @ transform_matrix.T
+                
+                # Cosine distance loss
+                transformed_norm = transformed / (transformed.norm(dim=1, keepdim=True) + 1e-8)
+                target_norm = target_activations / (target_activations.norm(dim=1, keepdim=True) + 1e-8)
+                cosine_loss = 1 - (transformed_norm * target_norm).sum(dim=1).mean()
+                avg_loss = cosine_loss
             
-            # Cosine distance loss
-            transformed_norm = transformed / (transformed.norm(dim=1, keepdim=True) + 1e-8)
-            target_norm = target_activations / (target_activations.norm(dim=1, keepdim=True) + 1e-8)
-            cosine_loss = 1 - (transformed_norm * target_norm).sum(dim=1).mean()
+            # L2 regularization on coefficients (reduced weight)
+            l2_reg = 0.005 * (coefficients ** 2).sum()  # Reduced from 0.01
             
-            # L2 regularization on coefficients
-            l2_reg = 0.01 * (coefficients ** 2).sum()
-            
-            total_loss = cosine_loss + l2_reg
+            total_loss = avg_loss + l2_reg
             total_loss.backward()
             optimizer.step()
             
-            if epoch % 20 == 0:
+            # Clear memory periodically
+            if epoch % 10 == 0:
+                torch.cuda.empty_cache()
                 logging.info(f"Transform {i+1}, Epoch {epoch}, Loss: {total_loss.item():.4f}")
+            
+            # Clean up intermediate variables
+            del transform_matrix, coeff_softmax
+            if 'transformed' in locals():
+                del transformed
+            if 'transformed_norm' in locals():
+                del transformed_norm, target_norm
         
         # Store optimized coefficients
         final_coefficients = torch.softmax(coefficients.detach(), dim=0)
         coefficients_list.append(final_coefficients)
         
-        # Compute output for next iteration
+        # Compute output for next iteration (with memory management)
         final_transform = shared_atoms(final_coefficients)
-        previous_output = adjusted_input @ final_transform.T
+        
+        # Process output in chunks if too large
+        if adjusted_input.shape[0] > 1024:
+            chunk_outputs = []
+            chunk_size = 512
+            for chunk_start in range(0, adjusted_input.shape[0], chunk_size):
+                chunk_end = min(chunk_start + chunk_size, adjusted_input.shape[0])
+                input_chunk = adjusted_input[chunk_start:chunk_end]
+                output_chunk = input_chunk @ final_transform.T
+                chunk_outputs.append(output_chunk.detach())
+            previous_output = torch.cat(chunk_outputs, dim=0)
+            del chunk_outputs
+        else:
+            previous_output = adjusted_input @ final_transform.T
         
         # Clean up
-        del coefficients, optimizer
+        del coefficients, optimizer, final_transform
         torch.cuda.empty_cache()
     
     return coefficients_list
@@ -306,9 +365,9 @@ def masa_sequential(
     
     # Preallocate tensors for different transformation blocks
     block_activations = {
-        'input': torch.empty((total_samples, hidden_size), dtype=torch.bfloat16, device='cpu'),
-        'target': torch.empty((total_samples, hidden_size), dtype=torch.bfloat16, device='cpu'),
-        'mlp': torch.empty((total_samples, hidden_size), dtype=torch.bfloat16, device='cpu')
+        'input': torch.empty((total_samples, hidden_size), dtype=torch.float32, device='cpu'),
+        'target': torch.empty((total_samples, hidden_size), dtype=torch.float32, device='cpu'),
+        'mlp': torch.empty((total_samples, hidden_size), dtype=torch.float32, device='cpu')
     }
     
     cnt = 0
@@ -329,9 +388,9 @@ def masa_sequential(
         mlp_states = [mlp_activations[f'layer_{i}_mlp'] for i in range(model.config.num_hidden_layers)]
         
         # Get activations for the specific blocks
-        input_activations = hidden_states[start_id - num_layer - 1].view(-1, hidden_size).to(torch.bfloat16)
-        target_activations = hidden_states[end_id - num_layer - 1].view(-1, hidden_size).to(torch.bfloat16)
-        mlp_activations_tensor = mlp_states[start_id - num_layer - 1].view(-1, hidden_size).to(torch.bfloat16)
+        input_activations = hidden_states[start_id - num_layer - 1].view(-1, hidden_size).to(torch.float32)
+        target_activations = hidden_states[end_id - num_layer - 1].view(-1, hidden_size).to(torch.float32)
+        mlp_activations_tensor = mlp_states[start_id - num_layer - 1].view(-1, hidden_size).to(torch.float32)
         
         batch_size_actual = input_activations.shape[0]
         
@@ -348,21 +407,34 @@ def masa_sequential(
     for key in block_activations:
         block_activations[key] = block_activations[key][:cnt]
     
+    logging.info(f"{Fore.GREEN}Collected {cnt} activation samples{Fore.RESET}")
+
     # Prepare activation pairs for MASA
     # For sequential optimization, we need multiple transformation pairs
     activation_pairs = [
         (block_activations['mlp'], block_activations['target'] - block_activations['input'])
     ]
     
+    # Clean up activation hooks
+    for hook in hooks:
+        hook.remove()
+    
+    # Clear intermediate activations from memory
+    del mlp_activations
+    torch.cuda.empty_cache()
+    
     logging.info(f"{Fore.GREEN}Learning shared atoms dictionary{Fore.RESET}")
     
-    # Learn shared atoms dictionary
+    # Learn shared atoms dictionary with memory management
     shared_atoms = learn_shared_atoms(
         activation_pairs, 
         hidden_size, 
         num_shared_atoms,
         device='cuda' if torch.cuda.is_available() else 'cpu'
     )
+    
+    # Clear activations from GPU after atoms learning
+    torch.cuda.empty_cache()
     
     logging.info(f"{Fore.GREEN}Performing sequential optimization{Fore.RESET}")
     
@@ -429,4 +501,3 @@ def masa_sequential(
     torch.cuda.empty_cache()
     
     return final_save_path
-
