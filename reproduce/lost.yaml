@@ -16,10 +16,10 @@ num_A: 1
 merge_consecutive: False
 distances_path: null
 
-# LOST-inspired specific parameters
+# OPTIMIZED LOST-inspired parameters
 low_rank: 1024  # Rank for low-rank component
-sparsity_ratio: 0.01  # Ratio of channels for sparse component (1% as in LOST paper)
-gamma: 0.7  # Trade-off coefficient (0.7 as suggested in LOST paper)
+sparsity_ratio: 0.05  # INCREASED from 0.01 to 0.05 (5% channels)
+gamma: 0.3  # DECREASED from 0.7 to 0.3 (better balance, less aggressive)
 loss: "cosine"
 solver: "adam"
 

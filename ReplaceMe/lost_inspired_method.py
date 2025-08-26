@@ -26,7 +26,7 @@ logging.basicConfig(
 seed_all()
 
 
-def lost_inspired_factorization(T: torch.Tensor, rank: int = 1024, sparsity_ratio: float = 0.01) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def lost_inspired_factorization(T: torch.Tensor, rank: int = 1024, sparsity_ratio: float = 0.05) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     LOST-inspired decomposition: T = low_rank + sparse_component
     Based on SVD of original T (not T-I) with channel-wise sparse component.
@@ -77,9 +77,9 @@ def lost_inspired_factorization(T: torch.Tensor, rank: int = 1024, sparsity_rati
         print(f"[DEBUG] Complementary matrix shape: {W_comp.shape}")
         print(f"[DEBUG] Complementary matrix norm: {torch.norm(W_comp):.6f}")
         
-        # Channel-wise importance scoring (LOST method)
+        # Channel-wise importance scoring (LOST method) - IMPROVED VERSION
         n_channels = W_comp.shape[1]
-        k = max(1, int(sparsity_ratio * n_channels))  # Number of channels to keep
+        k = max(int(sparsity_ratio * n_channels), 10)  # Ensure minimum channels
         
         # Calculate L2-norm importance for each channel
         channel_importance = torch.norm(W_comp, dim=0, p=2)  # Shape: (n_channels,)
@@ -88,13 +88,19 @@ def lost_inspired_factorization(T: torch.Tensor, rank: int = 1024, sparsity_rati
         _, top_indices = torch.topk(channel_importance, k)
         top_indices = top_indices.sort()[0]  # Sort indices for consistent ordering
         
-        # Create sparse component using selected channels
+        # Create sparse component using selected channels with SCALING
         sparse_component = W_comp[:, top_indices]  # Shape: (d, k)
         
-        print(f"[DEBUG] Selected {k} channels out of {n_channels}")
+        # Apply importance-based scaling to sparse component
+        importance_weights = channel_importance[top_indices]
+        importance_weights = importance_weights / importance_weights.max()  # Normalize to [0,1]
+        sparse_component = sparse_component * importance_weights.unsqueeze(0)  # Broadcasting
+        
+        print(f"[DEBUG] Selected {k} channels out of {n_channels} ({100*k/n_channels:.1f}%)")
         print(f"[DEBUG] Sparse component shape: {sparse_component.shape}")
         print(f"[DEBUG] Sparse component norm: {torch.norm(sparse_component):.6f}")
         print(f"[DEBUG] Top channel indices: {top_indices[:10].tolist()}")
+        print(f"[DEBUG] Importance weights range: [{importance_weights.min():.3f}, {importance_weights.max():.3f}]")
         
     else:
         # If rank >= matrix size, no sparse component
@@ -129,9 +135,9 @@ def lost_inspired_factorization(T: torch.Tensor, rank: int = 1024, sparsity_rati
 
 def apply_lost_inspired_transform(model, layer_idx: int, U: torch.Tensor, V: torch.Tensor, 
                                  sparse_component: torch.Tensor, sparse_indices: torch.Tensor, 
-                                 gamma: float = 0.7):
+                                 gamma: float = 0.3):
     """
-    Apply LOST-inspired transformation: W_new = gamma * (UV^T)^T @ W + (1-gamma) * sparse_transform @ W
+    Apply LOST-inspired transformation with improved weight preservation
     
     Args:
         model: The transformer model
@@ -143,7 +149,7 @@ def apply_lost_inspired_transform(model, layer_idx: int, U: torch.Tensor, V: tor
         gamma: Trade-off coefficient between low-rank and sparse components
     """
     print(f"[DEBUG] Applying LOST-inspired transform to layer {layer_idx}")
-    print(f"[DEBUG] Using gamma = {gamma}")
+    print(f"[DEBUG] Using gamma = {gamma} (reduced from 0.7 to balance components)")
     
     # Get the down_proj layer
     down_proj = model.model.layers[layer_idx].mlp.down_proj
@@ -175,25 +181,23 @@ def apply_lost_inspired_transform(model, layer_idx: int, U: torch.Tensor, V: tor
     print(f"[DEBUG] Low-rank transform shape: {low_rank_transform.shape}")
     print(f"[DEBUG] Low-rank transformed weight shape: {low_rank_transformed_weight.shape}")
     
-    # Create sparse contribution - Fix dimension issue
+    # Create sparse contribution with better scaling
     if sparse_component.shape[1] > 1:  # If we have meaningful sparse component
-        # Create sparse transformation matrix with correct dimensions
-        # sparse_component is (d, k) where d=4096, k=num_selected_channels
-        # We need to apply it to the weight properly
-        
-        # Method: Apply sparse component as a channel-wise scaling
+        # Create sparse transformation that preserves more original structure
         sparse_weight_contribution = original_weight_fp64.clone()
         
-        # Apply sparse component to selected input channels of the weight
-        # original_weight is (output_dim, input_dim) = (4096, 14336)
-        # We select channels from input dimension based on sparse_indices
+        # Apply sparse component with BETTER SCALING
+        sparse_scale_factor = torch.norm(original_weight_fp64) / (torch.norm(sparse_component) + 1e-8)
+        scaled_sparse_component = sparse_component * sparse_scale_factor * 0.1  # Conservative scaling
         
+        # Apply to selected channels
         for i, channel_idx in enumerate(sparse_indices):
-            if channel_idx < original_weight_fp64.shape[1] and i < sparse_component.shape[1]:
-                # Apply sparse component to this channel
-                # sparse_component[:, i] is the sparse values for this channel
-                sparse_weight_contribution[:, channel_idx] = sparse_component[:, i]
+            if channel_idx < original_weight_fp64.shape[1] and i < scaled_sparse_component.shape[1]:
+                # Additive approach: add scaled sparse values instead of replacing
+                sparse_weight_contribution[:, channel_idx] += scaled_sparse_component[:, i]
         
+        print(f"[DEBUG] Sparse scale factor: {sparse_scale_factor:.6f}")
+        print(f"[DEBUG] Scaled sparse component norm: {torch.norm(scaled_sparse_component):.6f}")
         print(f"[DEBUG] Sparse contribution shape: {sparse_weight_contribution.shape}")
         print(f"[DEBUG] Sparse contribution norm: {torch.norm(sparse_weight_contribution):.6f}")
         
@@ -201,16 +205,22 @@ def apply_lost_inspired_transform(model, layer_idx: int, U: torch.Tensor, V: tor
         sparse_contribution_diff = sparse_weight_contribution - original_weight_fp64
         print(f"[DEBUG] Sparse diff norm: {torch.norm(sparse_contribution_diff):.6f}")
         
-        # Final combination: base weight + gamma*low_rank_change + (1-gamma)*sparse_change
+        # IMPROVED COMBINATION: Reduce magnitude of changes to preserve weight norms
         low_rank_change = low_rank_transformed_weight - original_weight_fp64
+        low_rank_scale = min(1.0, original_norm / (torch.norm(low_rank_change) + 1e-8) * 0.5)  # Conservative scaling
+        
         final_transformed_weight = (original_weight_fp64 + 
-                                  gamma * low_rank_change + 
+                                  gamma * low_rank_scale * low_rank_change + 
                                   (1 - gamma) * sparse_contribution_diff)
+        
+        print(f"[DEBUG] Low-rank scale factor: {low_rank_scale:.6f}")
         
     else:
         # No meaningful sparse component, use only low-rank
         print(f"[DEBUG] Using only low-rank transformation (no sparse component)")
-        final_transformed_weight = gamma * low_rank_transformed_weight + (1 - gamma) * original_weight_fp64
+        low_rank_change = low_rank_transformed_weight - original_weight_fp64
+        low_rank_scale = min(1.0, original_norm / (torch.norm(low_rank_change) + 1e-8) * 0.5)
+        final_transformed_weight = original_weight_fp64 + gamma * low_rank_scale * low_rank_change
     
     print(f"[DEBUG] Final transformed weight shape: {final_transformed_weight.shape}")
     
@@ -218,6 +228,7 @@ def apply_lost_inspired_transform(model, layer_idx: int, U: torch.Tensor, V: tor
     transformed_norm = torch.norm(final_transformed_weight).item()
     print(f"[DEBUG] Transformed weight norm: {transformed_norm:.6f}")
     print(f"[DEBUG] Weight norm ratio (new/old): {transformed_norm/original_norm:.6f}")
+    print(f"[DEBUG] Weight norm preservation: {100*min(transformed_norm/original_norm, original_norm/transformed_norm):.1f}%")
     
     # Check components contribution
     if sparse_component.shape[1] > 1:
@@ -515,5 +526,4 @@ def lost_inspired_replace(
     print(f"[DEBUG] Used parameters - rank: {low_rank}, sparsity: {sparsity_ratio}, gamma: {gamma}")
     
     return final_save_path
-
 
