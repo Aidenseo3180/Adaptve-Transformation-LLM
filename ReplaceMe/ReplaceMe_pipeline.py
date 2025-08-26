@@ -11,7 +11,7 @@ from .cosine_dist import cosine_dist
 from .distance import profile_distances
 from .evaluator import evaluator
 from .low_rank_replace import low_rank_replace  # New import
-from .lost_inspired_method import lost_inspired_replace  # New import
+from .grasp_inspired_method import grasp_inspired_replace  # New GRASP-inspired import
 
 from .utils import seed_all, select_non_overlapping_blocks
 
@@ -61,12 +61,12 @@ def ReplaceMe_pipeline(config):
             path = low_rank_replace(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
 
-    elif config["method"] == "lost_inspired":  # New LOST-inspired method
-        signature = inspect.signature(lost_inspired_replace)
+    elif config["method"] == "grasp_inspired":  # New GRASP-inspired method
+        signature = inspect.signature(grasp_inspired_replace)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
         # Load average distances and select non-overlapping blocks
-        average_distances = torch.load(filtered_config['distances_path'], weights_only=False)  
+        average_distances = torch.load(filtered_config['distances_path'])  
         selected_blocks = select_non_overlapping_blocks(
             average_distances, 
             filtered_config['layers_to_skip'], 
@@ -82,7 +82,7 @@ def ReplaceMe_pipeline(config):
         
         # Iterate over each selected block
         for i in range(len(selected_blocks)):
-            path = lost_inspired_replace(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
+            path = grasp_inspired_replace(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
     
     else:  # Original cosine/adam methods
