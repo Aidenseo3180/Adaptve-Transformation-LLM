@@ -70,9 +70,9 @@ def learn_shared_atoms(activations_list: List[Tuple[torch.Tensor, torch.Tensor]]
     
     logging.info(f"{Fore.GREEN}Learning shared atoms dictionary with {num_atoms} atoms{Fore.RESET}")
     
-    # Prepare all data
-    all_inputs = torch.cat([pair[0] for pair in activations_list], dim=0).to(device)
-    all_targets = torch.cat([pair[1] for pair in activations_list], dim=0).to(device)
+    # Prepare all data and convert to float32 for computation
+    all_inputs = torch.cat([pair[0].to(torch.float32) for pair in activations_list], dim=0).to(device)
+    all_targets = torch.cat([pair[1].to(torch.float32) for pair in activations_list], dim=0).to(device)
     
     # Training loop for atom dictionary
     for epoch in tqdm(range(50), desc="Learning Shared Atoms"):
