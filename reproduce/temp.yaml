@@ -21,3 +21,9 @@ distances_path: null
 num_A: 1
 merge_consecutive: False 
 accurate: False # False will run cosine(xA, y - z) where z is the residual attention info, True to run cosine(xA + z, y)
+# Evaluation tasks
+tasks:
+  boolq:
+    fewshots: 0
+  lambada_openai:
+    fewshots: 0
