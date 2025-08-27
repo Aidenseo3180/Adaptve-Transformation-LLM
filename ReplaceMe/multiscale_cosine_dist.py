@@ -191,18 +191,19 @@ def multiscale_cosine_dist(
             device='cpu'
         )
     
-    # Multi-scale data storage
+    # Memory-efficient multi-scale data storage with limits
+    max_samples_per_scale = min(1000, dataset_size // 4)  # Limit samples to prevent RAM overflow
     token_level_data = []
     sentence_level_data = []
     document_level_data = []
     
     cnt = 0
-    for batch in tqdm(
+    for batch_idx, batch in enumerate(tqdm(
         dataloader,
         desc=Fore.RED + "Gathering Multi-Scale Activations" + Fore.RESET,
         dynamic_ncols=True,
         colour="red"
-    ):
+    )):
         inputs = tokenizer(
             batch,
             return_tensors="pt",
@@ -236,29 +237,41 @@ def multiscale_cosine_dist(
         a1[cnt:cnt+a1_batch.shape[0]] = a1_batch
         a2[cnt:cnt+a2_batch.shape[0]] = a2_batch
         
-        # Multi-scale data collection
-        collect_multiscale_data(
-            inputs, hidden_states_mlp, hidden_states_i, hidden_states_n,
-            token_level_data, sentence_level_data, document_level_data,
-            tokenizer, window_size, stride
-        )
+        # Memory-efficient multi-scale data collection with sampling
+        if (len(token_level_data) < max_samples_per_scale or 
+            len(sentence_level_data) < max_samples_per_scale or 
+            len(document_level_data) < max_samples_per_scale):
+            
+            collect_multiscale_data_efficient(
+                inputs, hidden_states_mlp, hidden_states_i, hidden_states_n,
+                token_level_data, sentence_level_data, document_level_data,
+                tokenizer, window_size, stride, max_samples_per_scale
+            )
         
         cnt += a2_batch.shape[0]
         
-        del hidden_states_mlp, hidden_states_i, hidden_states_n
+        del hidden_states_mlp, hidden_states_i, hidden_states_n, outputs
         
-        # A100 GPU memory management
+        # Enhanced memory management
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        
+        # RAM cleanup every 50 batches
+        if (batch_idx + 1) % 50 == 0:
+            import gc
+            gc.collect()
+            logging.info(f"{Fore.YELLOW}Memory cleanup at batch {batch_idx + 1}, "
+                        f"Token samples: {len(token_level_data)}, "
+                        f"Sentence samples: {len(sentence_level_data)}, "
+                        f"Document samples: {len(document_level_data)}{Fore.RESET}")
     
     a1 = a1[:cnt]
     a2 = a2[:cnt]
     if accurate:
         a3 = a3[:cnt]
     
-    logging.info(f"{Fore.GREEN}Collected {len(token_level_data)} token-level samples{Fore.RESET}")
-    logging.info(f"{Fore.GREEN}Collected {len(sentence_level_data)} sentence-level samples{Fore.RESET}")
-    logging.info(f"{Fore.GREEN}Collected {len(document_level_data)} document-level samples{Fore.RESET}")
+    logging.info(f"{Fore.GREEN}Final collection - Token: {len(token_level_data)}, "
+                f"Sentence: {len(sentence_level_data)}, Document: {len(document_level_data)}{Fore.RESET}")
     
     # Multi-scale transformation estimation
     if solver == "adam":
@@ -321,6 +334,91 @@ def multiscale_cosine_dist(
         torch.cuda.empty_cache()
     
     return final_save_path
+
+
+def collect_multiscale_data_efficient(
+    inputs: dict,
+    hidden_states_mlp: torch.Tensor,
+    hidden_states_i: torch.Tensor, 
+    hidden_states_n: torch.Tensor,
+    token_level_data: list,
+    sentence_level_data: list,
+    document_level_data: list,
+    tokenizer,
+    window_size: int,
+    stride: int,
+    max_samples_per_scale: int
+):
+    """Memory-efficient multi-scale calibration data collection with sampling."""
+    
+    batch_size, seq_len = inputs['input_ids'].shape
+    
+    # Sample tokens instead of collecting all
+    import random
+    
+    for b in range(batch_size):
+        input_ids = inputs['input_ids'][b]
+        attention_mask = inputs['attention_mask'][b]
+        actual_len = attention_mask.sum().item()
+        
+        # Token-level: Sample random tokens instead of all tokens
+        if len(token_level_data) < max_samples_per_scale:
+            sample_size = min(10, actual_len, max_samples_per_scale - len(token_level_data))
+            sampled_positions = random.sample(range(actual_len), sample_size)
+            
+            for t in sampled_positions:
+                token_level_data.append({
+                    'mlp': hidden_states_mlp[b * seq_len + t].cpu(),
+                    'input': hidden_states_i[b * seq_len + t].cpu(),
+                    'target': hidden_states_n[b * seq_len + t].cpu(),
+                    'token_id': input_ids[t].item()
+                })
+        
+        # Sentence-level: Sample fewer sentences
+        if len(sentence_level_data) < max_samples_per_scale:
+            sentence_boundaries = find_sentence_boundaries(input_ids[:actual_len], tokenizer)
+            
+            # Sample max 3 sentences per batch
+            max_sentences = min(3, len(sentence_boundaries), max_samples_per_scale - len(sentence_level_data))
+            if sentence_boundaries and max_sentences > 0:
+                sampled_sentences = random.sample(sentence_boundaries, max_sentences)
+                
+                for start, end in sampled_sentences:
+                    if end - start > 1:
+                        sent_mlp = hidden_states_mlp[b * seq_len + start:b * seq_len + end].mean(dim=0).cpu()
+                        sent_input = hidden_states_i[b * seq_len + start:b * seq_len + end].mean(dim=0).cpu()
+                        sent_target = hidden_states_n[b * seq_len + start:b * seq_len + end].mean(dim=0).cpu()
+                        
+                        sentence_level_data.append({
+                            'mlp': sent_mlp,
+                            'input': sent_input,
+                            'target': sent_target,
+                            'length': end - start
+                        })
+        
+        # Document-level: Sample fewer windows
+        if len(document_level_data) < max_samples_per_scale and actual_len > window_size:
+            possible_starts = list(range(0, actual_len - window_size + 1, stride))
+            
+            # Sample max 2 windows per batch
+            max_windows = min(2, len(possible_starts), max_samples_per_scale - len(document_level_data))
+            if max_windows > 0:
+                sampled_starts = random.sample(possible_starts, max_windows)
+                
+                for start in sampled_starts:
+                    end = min(start + window_size, actual_len)
+                    
+                    doc_mlp = hidden_states_mlp[b * seq_len + start:b * seq_len + end].mean(dim=0).cpu()
+                    doc_input = hidden_states_i[b * seq_len + start:b * seq_len + end].mean(dim=0).cpu()
+                    doc_target = hidden_states_n[b * seq_len + start:b * seq_len + end].mean(dim=0).cpu()
+                    
+                    document_level_data.append({
+                        'mlp': doc_mlp,
+                        'input': doc_input,
+                        'target': doc_target,
+                        'window_start': start,
+                        'window_end': end
+                    })
 
 
 def collect_multiscale_data(
