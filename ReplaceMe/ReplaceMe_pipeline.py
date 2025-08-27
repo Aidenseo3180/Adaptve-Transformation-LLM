@@ -68,7 +68,7 @@ def ReplaceMe_pipeline(config):
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
         # Load average distances and select non-overlapping blocks
-        average_distances = torch.load(filtered_config['distances_path'])  
+        average_distances = torch.load(filtered_config['distances_path'], weights_only=False)  
         selected_blocks = select_non_overlapping_blocks(
             average_distances, 
             filtered_config['layers_to_skip'], 
