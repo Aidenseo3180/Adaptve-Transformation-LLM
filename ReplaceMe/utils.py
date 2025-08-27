@@ -216,8 +216,14 @@ def adam_method(
     loss: str = "cosine",
     diag: bool = False,
     two_vectors: bool = False,
-    thri: bool = False
+    thri: bool = False,
+    beta: float = 0.1  # VIB용 beta 파라미터 추가
 ) -> torch.Tensor:
+    
+    # VIB loss function with beta parameter
+    def vib_loss_with_beta(XA: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
+        return vib_loss(XA, Y, beta=beta)
+    
     """Optimize transformation using Adam optimizer."""
     class ActivationDataset(Dataset):
         def __init__(self, a1: torch.Tensor, a2: torch.Tensor, a3: torch.Tensor):
@@ -256,7 +262,8 @@ def adam_method(
         "mse": nn.MSELoss(reduction='mean'),
         "elasticnet": lambda XA, Y: nn.MSELoss(reduction='mean')(XA, Y) + \
                                    0.09 * torch.norm(XA, p=1) + \
-                                   0.045 * torch.norm(XA, p=2)**2
+                                   0.045 * torch.norm(XA, p=2)**2,
+        "vib": vib_loss_with_beta  # VIB loss 추가
     }[loss]
 
     # Training loop
@@ -397,327 +404,40 @@ def select_non_overlapping_blocks(
     print(f"List of layers to prune {selected}")
     return selected
 
-
-# utils.py에 추가할 Multi-Scale 관련 함수들
-
-import torch
-import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-from tqdm import tqdm
-from termcolor import colored
-
-class MultiScaleActivationDataset(Dataset):
-    """Dataset for multi-scale activation data."""
-    
-    def __init__(self, token_data, sentence_data, document_data, 
-                 token_weight, sentence_weight, document_weight):
-        self.token_data = token_data
-        self.sentence_data = sentence_data
-        self.document_data = document_data
-        self.token_weight = token_weight
-        self.sentence_weight = sentence_weight
-        self.document_weight = document_weight
-        
-        # Calculate total samples for each scale
-        self.total_samples = len(token_data) + len(sentence_data) + len(document_data)
-        
-        # Create unified index mapping
-        self.index_mapping = []
-        
-        # Add token-level indices
-        for i in range(len(token_data)):
-            self.index_mapping.append(('token', i))
-        
-        # Add sentence-level indices  
-        for i in range(len(sentence_data)):
-            self.index_mapping.append(('sentence', i))
-            
-        # Add document-level indices
-        for i in range(len(document_data)):
-            self.index_mapping.append(('document', i))
-            
-    def __len__(self):
-        return self.total_samples
-        
-    def __getitem__(self, idx):
-        scale_type, scale_idx = self.index_mapping[idx]
-        
-        if scale_type == 'token':
-            data = self.token_data[scale_idx]
-            weight = self.token_weight
-        elif scale_type == 'sentence':
-            data = self.sentence_data[scale_idx]
-            weight = self.sentence_weight
-        else:  # document
-            data = self.document_data[scale_idx]
-            weight = self.document_weight
-            
-        return (
-            data['mlp'],
-            data['target'] - data['input'],  # Following ReplaceMe approximation
-            weight,
-            scale_type
-        )
-
-
-def multiscale_cosine_loss(XA: torch.Tensor, Y: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+def vib_loss(XA: torch.Tensor, Y: torch.Tensor, beta: float = 0.1) -> torch.Tensor:
     """
-    Multi-scale weighted cosine loss function.
+    Variational Information Bottleneck loss for better perplexity preservation.
+    
+    L_VIB = Reconstruction_Loss + β * KL_Regularization
     
     Args:
-        XA: Transformed activations (batch_size, hidden_size)
-        Y: Target activations (batch_size, hidden_size)  
-        weights: Per-sample weights (batch_size,)
-    """
-    XA_norm = XA / XA.norm(dim=1, keepdim=True)
-    Y_norm = Y / Y.norm(dim=1, keepdim=True)
+        XA: Transformed activations (Mi * T + residual)
+        Y: Target activations (Li+n)
+        beta: Trade-off parameter between reconstruction and compression
     
-    # Cosine similarity per sample
-    cosine_sim = (XA_norm * Y_norm).sum(dim=1)
-    
-    # Weighted cosine distance
-    cosine_dist = 1 - cosine_sim
-    weighted_loss = (cosine_dist * weights).mean()
-    
-    return weighted_loss
-
-
-def multiscale_adam_method(
-    a1: torch.Tensor,
-    a2: torch.Tensor,
-    a3: torch.Tensor = None,
-    loss: str = "multiscale_cosine",
-    diag: bool = False,
-    two_vectors: bool = False,
-    thri: bool = False,
-    token_data: list = None,
-    sentence_data: list = None,
-    document_data: list = None,
-    token_weight: float = 0.4,
-    sentence_weight: float = 0.4,
-    document_weight: float = 0.2,
-    lr: float = 1e-4,
-    epochs: int = 15  # Increased for multi-scale convergence
-) -> torch.Tensor:
-    """
-    Multi-Scale Adam optimization method for linear transformation estimation.
-    
-    This method combines three different scales of calibration data:
-    - Token-level: Fine-grained individual token patterns
-    - Sentence-level: Mid-level semantic coherence  
-    - Document-level: Long-range contextual consistency
-    
-    Args:
-        a1, a2, a3: Original ReplaceMe activation tensors
-        loss: Loss function type (should be "multiscale_cosine")
-        diag, two_vectors, thri: Matrix structure constraints
-        token_data: Token-level calibration data
-        sentence_data: Sentence-level calibration data  
-        document_data: Document-level calibration data
-        token_weight, sentence_weight, document_weight: Scale weights
-        lr: Learning rate for Adam optimizer
-        epochs: Number of training epochs
-        
     Returns:
-        Optimized linear transformation matrix
+        VIB loss tensor
     """
+    # Reconstruction loss (MSE component)
+    reconstruction_loss = torch.nn.MSELoss(reduction='mean')(XA, Y)
     
-    print(f"{colored('Starting Multi-Scale Adam Optimization...', 'green')}")
+    # Normalize activations for information bottleneck calculation
+    XA_norm = XA / (XA.norm(dim=1, keepdim=True) + 1e-8)
+    Y_norm = Y / (Y.norm(dim=1, keepdim=True) + 1e-8)
     
-    # Validate multi-scale data availability
-    if not all([token_data, sentence_data, document_data]):
-        print(f"{colored('Warning: Missing multi-scale data, falling back to standard method', 'yellow')}")
-        return standard_adam_method(a1, a2, a3, loss="cosine", diag=diag, two_vectors=two_vectors, thri=thri)
+    # Information bottleneck regularization
+    # Approximate mutual information using cosine similarity
+    cosine_sim = (XA_norm * Y_norm).sum(dim=1)
+    mutual_info = -torch.log(torch.clamp(cosine_sim.abs(), min=1e-8)).mean()
     
-    # Initialize model based on constraints
-    if diag:
-        transform = torch.ones(a1.shape[1], requires_grad=True, device="cuda")
-        optimizer = torch.optim.Adam([transform], lr=lr)
-    elif two_vectors:
-        t1 = torch.ones((a1.shape[1], 1), requires_grad=True, device="cuda")
-        t2 = torch.ones((a1.shape[1], 1), requires_grad=True, device="cuda")
-        optimizer = torch.optim.Adam([t1, t2], lr=lr)
-    else:
-        model = LowerTriangularLinear(a1.shape[1], a1.shape[1]).to("cuda") if thri \
-               else nn.Linear(a1.shape[1], a1.shape[1], bias=False).to("cuda")
-        if not thri:
-            model.weight.data.copy_(torch.eye(a1.shape[1]))
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-
-    # Create multi-scale dataset and dataloader
-    multiscale_dataset = MultiScaleActivationDataset(
-        token_data, sentence_data, document_data,
-        token_weight, sentence_weight, document_weight
-    )
+    # KL divergence approximation for compression regularization
+    # Encourage compressed representation to be close to standard normal
+    mean_XA = XA_norm.mean(dim=0)
+    var_XA = XA_norm.var(dim=0)
+    kl_reg = 0.5 * (var_XA + mean_XA**2 - 1 - torch.log(var_XA + 1e-8)).mean()
     
-    # Use smaller batch size for multi-scale to handle memory better on A100
-    multiscale_loader = DataLoader(multiscale_dataset, batch_size=512, shuffle=True)
+    # Combined VIB loss
+    vib_loss = reconstruction_loss + beta * (mutual_info + kl_reg)
     
-    # Also create standard dataloader for baseline comparison
-    standard_dataset = ActivationDataset(a1, a2, a3)
-    standard_loader = DataLoader(standard_dataset, batch_size=1024, shuffle=True)
-    
-    print(f"Multi-scale dataset size: {len(multiscale_dataset)}")
-    print(f"Token samples: {len(token_data)}, Sentence samples: {len(sentence_data)}, Document samples: {len(document_data)}")
-    
-    # Training loop with dual objectives
-    with tqdm(range(epochs), desc="Multi-Scale Optimization") as pbar:
-        for epoch in pbar:
-            epoch_loss = 0.0
-            batch_count = 0
-            
-            # Multi-scale training phase (70% of each epoch)
-            multiscale_batches = int(len(multiscale_loader) * 0.7)
-            for batch_idx, (X, Y, weights, scale_types) in enumerate(multiscale_loader):
-                if batch_idx >= multiscale_batches:
-                    break
-                    
-                X, Y, weights = X.float().to("cuda"), Y.float().to("cuda"), weights.float().to("cuda")
-                
-                optimizer.zero_grad()
-                
-                # Apply transformation based on model type
-                if diag:
-                    XA = X @ torch.diag(transform)
-                elif two_vectors:
-                    XA = X @ (t1 @ t2.T)
-                else:
-                    XA = model(X)
-                
-                # Multi-scale weighted cosine loss
-                loss_val = multiscale_cosine_loss(XA, Y, weights)
-                loss_val.backward()
-                optimizer.step()
-                
-                epoch_loss += loss_val.item()
-                batch_count += 1
-            
-            # Standard training phase (30% of each epoch) for consistency
-            standard_batches = int(len(standard_loader) * 0.3)
-            for batch_idx, (X, Y, Z) in enumerate(standard_loader):
-                if batch_idx >= standard_batches:
-                    break
-                    
-                X, Y = X.float().to("cuda"), Y.float().to("cuda")
-                
-                optimizer.zero_grad()
-                
-                if diag:
-                    XA = X @ torch.diag(transform)
-                elif two_vectors:
-                    XA = X @ (t1 @ t2.T)
-                else:
-                    XA = model(X)
-                
-                if len(Z) != 1:
-                    XA += Z.float().to("cuda")
-                    
-                # Standard cosine loss (unweighted)
-                XA_norm = XA / XA.norm(dim=1, keepdim=True)
-                Y_norm = Y / Y.norm(dim=1, keepdim=True)
-                loss_val = 1 - (XA_norm * Y_norm).sum(dim=1).mean()
-                
-                loss_val.backward()
-                optimizer.step()
-                
-                epoch_loss += loss_val.item()
-                batch_count += 1
-            
-            avg_loss = epoch_loss / batch_count if batch_count > 0 else 0
-            pbar.set_postfix({
-                'Multi-Scale Loss': colored(f'{avg_loss:.4f}', 'green'),
-                'Epoch': f'{epoch+1}/{epochs}'
-            })
-    
-    # Return appropriate transformation matrix
-    if diag:
-        final_transform = torch.diag(transform).to(torch.float64)
-    elif two_vectors:
-        final_transform = (t1 @ t2.T).to(torch.float64)
-    else:
-        if thri:
-            final_transform = model.weight.T.to(torch.float64) 
-        else:
-            final_transform = model.weight.T.to(torch.float64)
-    
-    print(f"{colored('Multi-Scale Optimization Complete!', 'green')}")
-    return final_transform
+    return vib_loss
 
-
-class ActivationDataset(Dataset):
-    """Standard activation dataset for ReplaceMe compatibility."""
-    def __init__(self, a1: torch.Tensor, a2: torch.Tensor, a3: torch.Tensor):
-        self.a1, self.a2, self.a3 = a1, a2, a3            
-    def __len__(self) -> int:
-        return len(self.a1)
-    def __getitem__(self, idx: int):
-        attn = [-1]
-        if self.a3 is not None:
-            attn = self.a3[idx]
-        return self.a1[idx], self.a2[idx], attn
-
-
-def standard_adam_method(a1, a2, a3=None, loss="cosine", diag=False, two_vectors=False, thri=False):
-    """Fallback to standard adam method if multi-scale data is unavailable."""
-    def __init__(self, a1: torch.Tensor, a2: torch.Tensor, a3: torch.Tensor):
-        self.a1, self.a2, self.a3 = a1, a2, a3            
-    def __len__(self) -> int:
-        return len(self.a1)
-    def __getitem__(self, idx: int):
-        attn = [-1]
-        if self.a3 is not None:
-            attn = self.a3[idx]
-        return self.a1[idx], self.a2[idx], attn
-
-    # Initialize model and optimizer
-    if diag:
-        transform = torch.ones(a1.shape[1], requires_grad=True, device="cuda")
-        optimizer = torch.optim.Adam([transform], lr=1e-4)
-    elif two_vectors:
-        t1 = torch.ones((a1.shape[1], 1), requires_grad=True, device="cuda")
-        t2 = torch.ones((a1.shape[1], 1), requires_grad=True, device="cuda")
-        optimizer = torch.optim.Adam([t1, t2], lr=1e-4)
-    else:
-        model = LowerTriangularLinear(a1.shape[1], a1.shape[1]).to("cuda") if thri \
-               else nn.Linear(a1.shape[1], a1.shape[1], bias=False).to("cuda")
-        if not thri:
-            model.weight.data.copy_(torch.eye(a1.shape[1]))
-        optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-
-    # Define cosine loss function
-    def cosine_loss(XA: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
-        XA_norm = XA / XA.norm(dim=1, keepdim=True)
-        Y_norm = Y / Y.norm(dim=1, keepdim=True)
-        return 1 - (XA_norm * Y_norm).sum(dim=1).mean()
-
-    # Training loop
-    dataset = ActivationDataset(a1, a2, a3)
-    loader = DataLoader(dataset, batch_size=1024, shuffle=True)
-
-    with tqdm(range(10), desc="Standard Optimization") as pbar:
-        for _ in pbar:
-            for X, Y, Z in loader:
-                optimizer.zero_grad()
-                
-                if diag:
-                    XA = X.float().to("cuda") @ torch.diag(transform)
-                elif two_vectors:
-                    XA = X.float().to("cuda") @ (t1 @ t2.T)
-                else:
-                    XA = model(X.float().to("cuda"))
-                    
-                if len(Z) != 1:
-                    XA += Z.float().to("cuda")
-                    
-                loss_val = cosine_loss(XA, Y.float().to("cuda"))
-                loss_val.backward()
-                optimizer.step()
-                
-                pbar.set_postfix({'Cosine Loss': colored(f'{loss_val.item():.4f}', 'green')})
-
-    # Return appropriate transformation
-    if diag:
-        return torch.diag(transform).to(torch.float64)
-    elif two_vectors:
-        return (t1 @ t2.T).to(torch.float64)
-    return model.weight.T.to(torch.float64) if not thri else model.weight.T.to(torch.float64)

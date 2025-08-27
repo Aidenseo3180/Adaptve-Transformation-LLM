@@ -1,4 +1,7 @@
-method: "multiscale_cosine"
+method: "vib"
+loss: "vib" 
+beta: 0.1  # 0.01~1.0 범위에서 실험 가능
+solver: "adam"
 model_path: "meta-llama/Meta-Llama-3-8B-Instruct" # meta-llama/Llama-3.2-3B-Instruct
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
@@ -14,15 +17,7 @@ save_transform_only: True
 diag: False # whether to force the LT to be a diagonal matrix
 two_vectors: False # whether to force the LT to be a multiplication of two vectors
 thri: False # whether to force the LT to be a lower triangular matrix
-solver: "adam" # adam, cg, l-bfgs, trust-ncg are supported
-loss: "multiscale_cosine" # multiscale_cosine, cosine, mse, elasticnet are supported
 distances_path: null
 num_A: 1
 merge_consecutive: False 
 accurate: False # False will run cosine(xA, y - z) where z is the residual attention info, True to run cosine(xA + z, y)
-# Multi-Scale Specific Parameters
-token_weight: 0.4 # Weight for token-level calibration
-sentence_weight: 0.4 # Weight for sentence-level calibration  
-document_weight: 0.2 # Weight for document-level calibration
-window_size: 512 # Document-level sliding window size
-stride: 256 # Sliding window stride (50% overlap)
