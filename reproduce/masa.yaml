@@ -1,23 +1,27 @@
-method: "masa_sequential"
-model_path: "meta-llama/Meta-Llama-3-8B-Instruct" 
+# procrustes_sequential_config.yaml
+method: "procrustes_sequential"
+model_path: "meta-llama/Meta-Llama-3-8B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
-batch_size: 4 
-max_length: 512 
+batch_size: 4
+max_length: 512
 layers_to_skip: 4
-dataset_size: 50000  # Increased to 50k as planned
+dataset_size: 2000  # 50k calibration data as discussed
 dataset_subset: "train"
 use_4bit: True
 save_path: null
-min_distance_layer: 20
-save_transform_only: False
-distances_path: null
-num_A: 1
-merge_consecutive: False 
+token: null
 
-# MASA Sequential specific parameters
-num_shared_atoms: 32      # Number of atoms in shared dictionary
-sequential_alpha: 0.8     # Weight for sequential dependency (0.0 = no dependency, 1.0 = full dependency)
+# Distance profiling (if not already computed)
+distances_path: null  # Will auto-compute if null
 
-# Evaluation settings
-# tasks: "default"
+# Block selection parameters
+num_A: 3  # Number of transformer block groups to replace
+merge_consecutive: False
+
+# ProcrustesGPT specific parameters
+sequential_constraint_weight: 0.1  # Weight for sequential dependency loss
+orthogonal_regularization: 0.01    # Orthogonality constraint strength
+
+# Evaluation tasks (optional)
+tasks: "default"
