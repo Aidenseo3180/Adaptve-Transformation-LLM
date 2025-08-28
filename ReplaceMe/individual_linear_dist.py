@@ -254,8 +254,7 @@ def individual_linear_dist(
                 loss=loss,
                 diag=diag,
                 two_vectors=two_vectors,
-                thri=thri,
-                beta=beta
+                thri=thri
             )
         else:
             transform = optimizing_method(a1, a2, a3=a3, solver=solver)
