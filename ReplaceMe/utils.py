@@ -216,14 +216,8 @@ def adam_method(
     loss: str = "cosine",
     diag: bool = False,
     two_vectors: bool = False,
-    thri: bool = False,
-    beta: float = 0.1  # VIB용 beta 파라미터 추가
+    thri: bool = False
 ) -> torch.Tensor:
-    
-    # VIB loss function with beta parameter
-    def vib_loss_with_beta(XA: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
-        return vib_loss(XA, Y, beta=beta)
-    
     """Optimize transformation using Adam optimizer."""
     class ActivationDataset(Dataset):
         def __init__(self, a1: torch.Tensor, a2: torch.Tensor, a3: torch.Tensor):
@@ -262,15 +256,14 @@ def adam_method(
         "mse": nn.MSELoss(reduction='mean'),
         "elasticnet": lambda XA, Y: nn.MSELoss(reduction='mean')(XA, Y) + \
                                    0.09 * torch.norm(XA, p=1) + \
-                                   0.045 * torch.norm(XA, p=2)**2,
-        "vib": vib_loss_with_beta  # VIB loss 추가
+                                   0.045 * torch.norm(XA, p=2)**2
     }[loss]
 
     # Training loop
     dataset = ActivationDataset(a1, a2, a3)
     loader = DataLoader(dataset, batch_size=1024, shuffle=True)
 
-    with tqdm(range(20), desc="Optimizing Transformation") as pbar:
+    with tqdm(range(10), desc="Optimizing Transformation") as pbar:
         for _ in pbar:
             for X, Y, Z in loader:
                 optimizer.zero_grad()
@@ -404,40 +397,68 @@ def select_non_overlapping_blocks(
     print(f"List of layers to prune {selected}")
     return selected
 
-def vib_loss(XA: torch.Tensor, Y: torch.Tensor, beta: float = 0.1) -> torch.Tensor:
-    """
-    Variational Information Bottleneck loss for better perplexity preservation.
-    
-    L_VIB = Reconstruction_Loss + β * KL_Regularization
+def select_most_linear_individual_blocks(
+    hidden_states: List[torch.Tensor], 
+    num_blocks_to_replace: int
+) -> List[int]:
+    """Select most linear individual transformer blocks based on cosine distance.
     
     Args:
-        XA: Transformed activations (Mi * T + residual)
-        Y: Target activations (Li+n)
-        beta: Trade-off parameter between reconstruction and compression
-    
+        hidden_states: List of hidden states from each transformer layer
+        num_blocks_to_replace: Number of most linear blocks to select
+        
     Returns:
-        VIB loss tensor
+        List of block indices (0-based) that are most linear
     """
-    # Reconstruction loss (MSE component)
-    reconstruction_loss = torch.nn.MSELoss(reduction='mean')(XA, Y)
+    print(f"Analyzing {len(hidden_states)} transformer blocks for linearity...")
     
-    # Normalize activations for information bottleneck calculation
-    XA_norm = XA / (XA.norm(dim=1, keepdim=True) + 1e-8)
-    Y_norm = Y / (Y.norm(dim=1, keepdim=True) + 1e-8)
+    individual_linearity_scores = []
     
-    # Information bottleneck regularization
-    # Approximate mutual information using cosine similarity
-    cosine_sim = (XA_norm * Y_norm).sum(dim=1)
-    mutual_info = -torch.log(torch.clamp(cosine_sim.abs(), min=1e-8)).mean()
+    # Measure linearity for each individual block
+    for i in range(len(hidden_states) - 1):
+        # Input: hidden_states[i], Output: hidden_states[i+1] 
+        input_states = hidden_states[i]
+        output_states = hidden_states[i + 1]
+        
+        # Calculate cosine distance (lower = more linear)
+        cosine_dist = angular_distance(input_states, output_states).mean().item()
+        individual_linearity_scores.append((i, cosine_dist))
+        
+        print(f"Block {i}: cosine distance = {cosine_dist:.4f}")
     
-    # KL divergence approximation for compression regularization
-    # Encourage compressed representation to be close to standard normal
-    mean_XA = XA_norm.mean(dim=0)
-    var_XA = XA_norm.var(dim=0)
-    kl_reg = 0.5 * (var_XA + mean_XA**2 - 1 - torch.log(var_XA + 1e-8)).mean()
+    # Sort by cosine distance (ascending - most linear first)
+    sorted_blocks = sorted(individual_linearity_scores, key=lambda x: x[1])
     
-    # Combined VIB loss
-    vib_loss = reconstruction_loss + beta * (mutual_info + kl_reg)
+    print(f"\nMost linear blocks (top {num_blocks_to_replace}):")
+    for rank, (block_idx, score) in enumerate(sorted_blocks[:num_blocks_to_replace]):
+        print(f"  Rank {rank+1}: Block {block_idx} (cosine distance: {score:.4f})")
     
-    return vib_loss
+    # Select top num_blocks_to_replace most linear blocks
+    selected_blocks = [block_idx for block_idx, _ in sorted_blocks[:num_blocks_to_replace]]
+    
+    print(f"\nSelected blocks for replacement: {selected_blocks}")
+    return selected_blocks
 
+
+def compute_individual_block_linearity(
+    hidden_states: List[torch.Tensor]
+) -> List[float]:
+    """Compute linearity scores for individual transformer blocks.
+    
+    Args:
+        hidden_states: List of hidden states from each transformer layer
+        
+    Returns:
+        List of cosine distances (linearity scores) for each block
+    """
+    linearity_scores = []
+    
+    for i in range(len(hidden_states) - 1):
+        input_states = hidden_states[i]
+        output_states = hidden_states[i + 1]
+        
+        # Calculate cosine distance 
+        cosine_dist = angular_distance(input_states, output_states).mean().item()
+        linearity_scores.append(cosine_dist)
+    
+    return linearity_scores
