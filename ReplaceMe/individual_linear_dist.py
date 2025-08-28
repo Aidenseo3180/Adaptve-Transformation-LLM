@@ -116,7 +116,7 @@ def individual_linear_dist(
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
         
         with torch.no_grad():
-            outputs = model(**outputs)
+            outputs = model(**inputs)
         
         # Get hidden states from all layers
         hidden_states = outputs.hidden_states  # [layer_0, layer_1, ..., layer_N]
