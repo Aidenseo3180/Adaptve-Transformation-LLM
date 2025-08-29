@@ -61,20 +61,11 @@ def ReplaceMe_pipeline(config):
             path = low_rank_replace(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
 
-    elif config["method"] == "sparse_linear":
-        # Our new sparse linear replacement method
-        print(f"{Fore.GREEN}Using Sparse Linear Replacement Method{Fore.RESET}")
-        
-        signature = inspect.signature(sparse_linear_replacement)
+    elif config["method"] == "identity_convergence":
+        from .identity_convergence_method import identity_convergence_method
+        signature = inspect.signature(identity_convergence_method)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-        
-        # Sparse linear method doesn't need distance profiling for block selection
-        # It does its own linearity analysis
-        
-        print(f"Will replace {filtered_config.get('layers_to_skip', 4)} sparse linear blocks")
-        
-        # Execute sparse linear replacement
-        path = sparse_linear_replacement(**filtered_config)
+        path = identity_convergence_method(**filtered_config)
     
     else:  # Original cosine/adam methods
         signature = inspect.signature(cosine_dist)
