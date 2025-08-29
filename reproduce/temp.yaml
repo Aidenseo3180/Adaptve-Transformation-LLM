@@ -1,4 +1,4 @@
-method: "sparse_linear"
+method: "identity_convergence"
 model_path: "meta-llama/Meta-Llama-3-8B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
@@ -7,7 +7,7 @@ max_length: 512
 layers_to_skip: 4  # 4개의 가장 linear한 block들을 sparse하게 교체 (인접하지 않게)
 dataset_size: 2000
 dataset_subset: "train"
-use_4bit: True
+use_4bit: False
 save_path: null
 min_distance_layer: 20  # sparse_linear에서는 사용 안됨
 save_transform_only: True

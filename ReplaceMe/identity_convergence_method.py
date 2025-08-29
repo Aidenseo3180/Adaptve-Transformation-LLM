@@ -86,29 +86,43 @@ def compute_identity_convergence_score(model, layer_idx: int) -> float:
         
         # Compute identity distances
         if value_weight is not None:
+            # Convert to float if quantized
+            if value_weight.dtype in [torch.int8, torch.uint8]:
+                # For quantized weights, we need to dequantize first
+                # This is a simplified approach - in practice, proper dequantization might be needed
+                value_weight_float = value_weight.float()
+            else:
+                value_weight_float = value_weight.float()
+                
             # Handle rectangular matrices by using minimum dimension
-            min_dim = min(value_weight.size(0), value_weight.size(1))
-            if value_weight.size(0) == value_weight.size(1):
+            min_dim = min(value_weight_float.size(0), value_weight_float.size(1))
+            if value_weight_float.size(0) == value_weight_float.size(1):
                 # Square matrix case
-                identity = torch.eye(value_weight.size(0), device=value_weight.device, dtype=value_weight.dtype)
-                identity_dist_v = torch.norm(value_weight - identity).item()
+                identity = torch.eye(value_weight_float.size(0), device=value_weight_float.device, dtype=value_weight_float.dtype)
+                identity_dist_v = torch.norm(value_weight_float - identity).item()
             else:
                 # Rectangular matrix case - compare to identity-like structure
                 # For rectangular matrices, we measure how close the matrix is to having
                 # identity-like properties in its square submatrix
-                square_part = value_weight[:min_dim, :min_dim]
-                identity = torch.eye(min_dim, device=value_weight.device, dtype=value_weight.dtype)
+                square_part = value_weight_float[:min_dim, :min_dim]
+                identity = torch.eye(min_dim, device=value_weight_float.device, dtype=value_weight_float.dtype)
                 identity_dist_v = torch.norm(square_part - identity).item()
             identity_distances.append(identity_dist_v)
             
         if proj_weight is not None:
-            min_dim = min(proj_weight.size(0), proj_weight.size(1))
-            if proj_weight.size(0) == proj_weight.size(1):
-                identity = torch.eye(proj_weight.size(0), device=proj_weight.device, dtype=proj_weight.dtype)
-                identity_dist_p = torch.norm(proj_weight - identity).item()
+            # Convert to float if quantized
+            if proj_weight.dtype in [torch.int8, torch.uint8]:
+                proj_weight_float = proj_weight.float()
             else:
-                square_part = proj_weight[:min_dim, :min_dim]
-                identity = torch.eye(min_dim, device=proj_weight.device, dtype=proj_weight.dtype)
+                proj_weight_float = proj_weight.float()
+                
+            min_dim = min(proj_weight_float.size(0), proj_weight_float.size(1))
+            if proj_weight_float.size(0) == proj_weight_float.size(1):
+                identity = torch.eye(proj_weight_float.size(0), device=proj_weight_float.device, dtype=proj_weight_float.dtype)
+                identity_dist_p = torch.norm(proj_weight_float - identity).item()
+            else:
+                square_part = proj_weight_float[:min_dim, :min_dim]
+                identity = torch.eye(min_dim, device=proj_weight_float.device, dtype=proj_weight_float.dtype)
                 identity_dist_p = torch.norm(square_part - identity).item()
             identity_distances.append(identity_dist_p)
         
