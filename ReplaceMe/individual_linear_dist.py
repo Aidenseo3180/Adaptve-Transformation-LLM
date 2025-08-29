@@ -261,6 +261,23 @@ def individual_linear_dist(
         
         print(f"Block {block_idx}: Using {data['cnt']} samples")
         
+        # Debug: Check input data properties
+        print(f"  Input data stats:")
+        print(f"    - a1 (MLP output) norm: {a1.norm():.6f}")
+        print(f"    - a2 (target) norm: {a2.norm():.6f}")
+        print(f"    - a1 mean: {a1.mean():.6f}, std: {a1.std():.6f}")
+        print(f"    - a2 mean: {a2.mean():.6f}, std: {a2.std():.6f}")
+        
+        # Check if a1 and a2 are too similar (which caused the original problem)
+        similarity = torch.nn.functional.cosine_similarity(a1.flatten(), a2.flatten(), dim=0)
+        print(f"    - Cosine similarity between a1 and a2: {similarity:.6f}")
+        
+        if similarity > 0.99:
+            print(f"    ⚠️  WARNING: a1 and a2 are too similar for Block {block_idx}!")
+        
+        if data['cnt'] < 1000:
+            print(f"    ⚠️  WARNING: Very few samples ({data['cnt']}) for Block {block_idx}!")
+        
         if solver == "adam":
             # Removed beta parameter
             transform = adam_method(
@@ -276,6 +293,22 @@ def individual_linear_dist(
         
         transforms[block_idx] = transform
         print(f"Block {block_idx}: Transform estimated, shape={transform.shape}")
+        
+        # Debug: Check transform properties
+        print(f"  Transform matrix stats:")
+        print(f"    - Matrix norm: {transform.norm():.6f}")
+        print(f"    - Matrix determinant: {torch.det(transform):.6f}")
+        print(f"    - Min eigenvalue: {torch.linalg.eigvals(transform).real.min():.6f}")
+        print(f"    - Max eigenvalue: {torch.linalg.eigvals(transform).real.max():.6f}")
+        
+        # Check if transform is close to identity
+        identity = torch.eye(transform.shape[0], dtype=transform.dtype, device=transform.device)
+        identity_distance = (transform - identity).norm()
+        print(f"    - Distance from identity: {identity_distance:.6f}")
+        
+        if identity_distance < 0.01:
+            print(f"    ⚠️  WARNING: Transform for Block {block_idx} is very close to identity!")
+        print()
     
     # Clean up hooks
     for hook in hooks:
@@ -301,13 +334,40 @@ def individual_linear_dist(
         
         transform = transforms[block_idx]
         
-        # Apply transformation to down_proj of selected block
+        # Get original weight and apply transformation
         original_weight = model.model.layers[block_idx].mlp.down_proj.weight.to(torch.float64)
+        print(f"  Block {block_idx}: Original weight shape: {original_weight.shape}")
+        print(f"  Block {block_idx}: Transform matrix shape: {transform.shape}")
+        print(f"  Block {block_idx}: Original weight norm: {original_weight.norm():.6f}")
+        print(f"  Block {block_idx}: Transform matrix norm: {transform.norm():.6f}")
+        
+        # Check if transform is close to identity (which would indicate potential issues)
+        identity = torch.eye(transform.shape[0], dtype=torch.float64)
+        identity_diff = (transform.cpu() - identity).norm()
+        print(f"  Block {block_idx}: Distance from Identity matrix: {identity_diff:.6f}")
+        
         new_weight = (transform.T.cpu() @ original_weight).to(torch.bfloat16)
+        print(f"  Block {block_idx}: New weight norm: {new_weight.norm():.6f}")
+        print(f"  Block {block_idx}: Weight change ratio: {(new_weight.norm() / original_weight.norm()):.6f}")
+        
+        # Store original weight for comparison
+        original_weight_backup = original_weight.clone()
         
         model.model.layers[block_idx].mlp.down_proj.load_state_dict({
             "weight": new_weight
         })
+        
+        # Verify the weight was actually updated
+        updated_weight = model.model.layers[block_idx].mlp.down_proj.weight
+        verification_diff = (updated_weight.to(torch.float64) - original_weight_backup).norm()
+        print(f"  Block {block_idx}: Verification - Weight actually changed: {verification_diff:.6f}")
+        
+        if verification_diff < 1e-6:
+            print(f"  ⚠️  WARNING: Block {block_idx} weight barely changed! Transform may not be applied correctly.")
+        else:
+            print(f"  ✓ Block {block_idx}: Transform successfully applied!")
+        
+        print()
     
     # Save model
     if save_path is None:
