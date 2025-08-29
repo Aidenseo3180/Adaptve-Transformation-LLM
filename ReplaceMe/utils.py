@@ -397,59 +397,86 @@ def select_non_overlapping_blocks(
     print(f"List of layers to prune {selected}")
     return selected
 
-def select_most_linear_individual_blocks(
+
+def select_sparse_linear_blocks(
     hidden_states: List[torch.Tensor], 
     num_blocks_to_replace: int
 ) -> List[int]:
-    """Select most linear individual transformer blocks based on cosine distance.
+    """Select sparse linear blocks avoiding adjacent blocks.
     
     Args:
         hidden_states: List of hidden states from each transformer layer
-        num_blocks_to_replace: Number of most linear blocks to select
+        num_blocks_to_replace: Number of blocks to replace
         
     Returns:
-        List of block indices (0-based) that are most linear
+        List of selected block indices that are not adjacent to each other
     """
-    print(f"Analyzing {len(hidden_states)} transformer blocks for linearity...")
+    print(f"Analyzing {len(hidden_states)} transformer blocks for sparse linear replacement...")
     
-    individual_linearity_scores = []
-    
-    # Measure linearity for each individual block
+    # Calculate linearity for each block
+    linearity_scores = []
     for i in range(len(hidden_states) - 1):
-        # Input: hidden_states[i], Output: hidden_states[i+1] 
         input_states = hidden_states[i]
         output_states = hidden_states[i + 1]
         
         # Calculate cosine distance (lower = more linear)
         cosine_dist = angular_distance(input_states, output_states).mean().item()
-        individual_linearity_scores.append((i, cosine_dist))
+        linearity_scores.append((i, cosine_dist))
         
-        print(f"Block {i}: cosine distance = {cosine_dist:.4f}")
+        print(f"Block {i}: cosine distance (linearity) = {cosine_dist:.4f}")
     
-    # Sort by cosine distance (ascending - most linear first)
-    sorted_blocks = sorted(individual_linearity_scores, key=lambda x: x[1])
+    # Sort by linearity (most linear first)
+    sorted_blocks = sorted(linearity_scores, key=lambda x: x[1])
     
-    print(f"\nMost linear blocks (top {num_blocks_to_replace}):")
-    for rank, (block_idx, score) in enumerate(sorted_blocks[:num_blocks_to_replace]):
+    print(f"\nAll blocks sorted by linearity:")
+    for rank, (block_idx, score) in enumerate(sorted_blocks):
         print(f"  Rank {rank+1}: Block {block_idx} (cosine distance: {score:.4f})")
     
-    # Select top num_blocks_to_replace most linear blocks
-    selected_blocks = [block_idx for block_idx, _ in sorted_blocks[:num_blocks_to_replace]]
+    # Select blocks avoiding adjacent ones
+    selected_blocks = []
+    excluded_blocks = set()
     
-    print(f"\nSelected blocks for replacement: {selected_blocks}")
+    print(f"\nSelecting {num_blocks_to_replace} blocks (avoiding adjacent blocks):")
+    
+    for block_idx, score in sorted_blocks:
+        if len(selected_blocks) >= num_blocks_to_replace:
+            break
+            
+        if block_idx in excluded_blocks:
+            print(f"  Block {block_idx}: SKIPPED (adjacent to already selected block)")
+            continue
+            
+        # This block is available for selection
+        selected_blocks.append(block_idx)
+        print(f"  Block {block_idx}: SELECTED (cosine distance: {score:.4f})")
+        
+        # Exclude adjacent blocks
+        if block_idx - 1 >= 0:
+            excluded_blocks.add(block_idx - 1)
+            print(f"    - Excluding Block {block_idx - 1} (previous block)")
+        if block_idx + 1 < len(hidden_states) - 1:
+            excluded_blocks.add(block_idx + 1)
+            print(f"    - Excluding Block {block_idx + 1} (next block)")
+        
+        # Also exclude the selected block itself
+        excluded_blocks.add(block_idx)
+    
+    print(f"\nFinal selected blocks for replacement: {selected_blocks}")
+    print(f"Total excluded blocks: {sorted(excluded_blocks)}")
+    
     return selected_blocks
 
 
-def compute_individual_block_linearity(
+def compute_sparse_linearity_scores(
     hidden_states: List[torch.Tensor]
-) -> List[float]:
-    """Compute linearity scores for individual transformer blocks.
+) -> List[Tuple[int, float]]:
+    """Compute linearity scores for all transformer blocks.
     
     Args:
         hidden_states: List of hidden states from each transformer layer
         
     Returns:
-        List of cosine distances (linearity scores) for each block
+        List of (block_index, linearity_score) tuples sorted by linearity
     """
     linearity_scores = []
     
@@ -457,8 +484,9 @@ def compute_individual_block_linearity(
         input_states = hidden_states[i]
         output_states = hidden_states[i + 1]
         
-        # Calculate cosine distance 
+        # Calculate cosine distance (linearity measure)
         cosine_dist = angular_distance(input_states, output_states).mean().item()
-        linearity_scores.append(cosine_dist)
+        linearity_scores.append((i, cosine_dist))
     
-    return linearity_scores
+    # Sort by linearity (most linear first)
+    return sorted(linearity_scores, key=lambda x: x[1])

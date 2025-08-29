@@ -1,31 +1,31 @@
-method: "individual_linear"
+method: "sparse_linear"
 model_path: "meta-llama/Meta-Llama-3-8B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
 batch_size: 4
 max_length: 512
-layers_to_skip: 4  # 4개의 가장 linear한 block들을 교체
+layers_to_skip: 4  # 4개의 가장 linear한 block들을 sparse하게 교체 (인접하지 않게)
 dataset_size: 2000
 dataset_subset: "train"
 use_4bit: True
 save_path: null
-min_distance_layer: 20  # individual_linear에서는 사용 안됨
+min_distance_layer: 20  # sparse_linear에서는 사용 안됨
 save_transform_only: True
 diag: False
 two_vectors: False
 thri: False
 solver: "adam"
-loss: "cosine"  # individual block 교체 시에도 cosine loss 사용
-distances_path: null  # individual_linear에서는 distance 계산 안 함
-num_A: 1  # individual_linear에서는 사용 안됨
-merge_consecutive: False  # individual_linear에서는 사용 안됨
+loss: "cosine"
+distances_path: null  # sparse_linear에서는 자체적으로 linearity 분석
+num_A: 1  # sparse_linear에서는 사용 안됨
+merge_consecutive: False  # sparse_linear에서는 사용 안됨
 accurate: False
 # Evaluation tasks
 tasks:
   boolq:
-    fewshots: 0
+    fewshots: 5
   lambada_openai:
-    fewshots: 0
+    fewshots: 5
 #   openbookqa:
 #     fewshots: 5
 #   piqa:
