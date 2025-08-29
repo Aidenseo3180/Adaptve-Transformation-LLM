@@ -20,4 +20,19 @@ distances_path: null  # individual_linear에서는 distance 계산 안 함
 num_A: 1  # individual_linear에서는 사용 안됨
 merge_consecutive: False  # individual_linear에서는 사용 안됨
 accurate: False
-beta: 0.1  # 만약 VIB loss 사용 시
+# Evaluation tasks
+tasks:
+  boolq:
+    fewshots: 0
+  lambada_openai:
+    fewshots: 0
+#   openbookqa:
+#     fewshots: 5
+#   piqa:
+#     fewshots: 5
+#   race:
+#     fewshots: 5
+#   sciq:
+#     fewshots: 5
+#   winogrande:
+#     fewshots: 5

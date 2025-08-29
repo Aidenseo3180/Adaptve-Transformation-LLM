@@ -42,15 +42,14 @@ def individual_linear_dist(
     distances_path: str = "./distances.pth",
     num_A: int = 1,
     merge_consecutive: bool = True,
-    accurate: bool = False,
-    beta: float = 0.1
+    accurate: bool = False
     
 ) -> str:
     """Replace individual linear transformer blocks with matrix transformations.
     
     Args:
         layers_to_skip: Number of most linear blocks to replace (not skip distance)
-        Other args same as cosine_dist
+        Other args same as cosine_dist (beta parameter removed)
     
     Returns:
         Path where transformed model is saved
@@ -136,11 +135,11 @@ def individual_linear_dist(
         all_hidden_states.append(batch_hidden_states)
         sample_count += len(batch)
         
-        if sample_count >= 100:  # Use smaller sample for linearity analysis
+        if sample_count >= 200:  # Reduced sample count for linearity analysis
             break
     
     # Concatenate all samples
-    print(f"Collected {sample_count} samples for analysis")
+    print(f"Collected {sample_count} samples for linearity analysis")
     concatenated_states = []
     for layer_idx in range(len(all_hidden_states[0])):
         layer_states = torch.cat([batch_states[layer_idx] for batch_states in all_hidden_states], dim=0)
@@ -179,16 +178,19 @@ def individual_linear_dist(
                 )
             )
     
-    # Prepare storage for each selected block
+    # Prepare storage for each selected block - reduced memory usage
+    max_samples = min(dataset_size * max_length, 100000)  # Limit to 100k samples max
+    print(f"Limiting activation collection to {max_samples} samples per block")
+    
     block_data = {}
     for block_idx in selected_block_indices:
         block_data[block_idx] = {
-            'a1': torch.empty((dataset_size * max_length, hidden_size), dtype=torch.bfloat16, device='cpu'),
-            'a2': torch.empty((dataset_size * max_length, hidden_size), dtype=torch.bfloat16, device='cpu'),
+            'a1': torch.empty((max_samples, hidden_size), dtype=torch.float32, device='cpu'),  # Changed to float32
+            'a2': torch.empty((max_samples, hidden_size), dtype=torch.float32, device='cpu'),  # Changed to float32
             'cnt': 0
         }
         if accurate:
-            block_data[block_idx]['a3'] = torch.empty((dataset_size * max_length, hidden_size), dtype=torch.bfloat16, device='cpu')
+            block_data[block_idx]['a3'] = torch.empty((max_samples, hidden_size), dtype=torch.float32, device='cpu')  # Changed to float32
     
     # Collect activations for transformation estimation
     print("Collecting activations for transformation estimation...")
@@ -214,24 +216,36 @@ def individual_linear_dist(
         
         # Process each selected block
         for block_idx in selected_block_indices:
+            # Check if we have enough samples already
+            if block_data[block_idx]['cnt'] >= max_samples:
+                continue
+                
             # Get MLP output for this block
             mlp_output = mlp_activations[f'layer_{block_idx}_mlp']
             
-            # Get input and output hidden states for this block
-            input_states = hidden_states[block_idx].view(-1, hidden_size).to(torch.float64)
-            output_states = hidden_states[block_idx].view(-1, hidden_size).to(torch.float64)  # Same layer since we're replacing individual blocks
+            # FIXED: Get correct input and output hidden states
+            input_states = hidden_states[block_idx].view(-1, hidden_size).to(torch.float32)  # Block N input, changed to float32
+            output_states = hidden_states[block_idx + 1].view(-1, hidden_size).to(torch.float32) if block_idx + 1 < len(hidden_states) else hidden_states[block_idx].view(-1, hidden_size).to(torch.float32)  # Block N output, changed to float32
             
-            a1_batch = mlp_output.view(-1, hidden_size).to(torch.float64)
+            a1_batch = mlp_output.view(-1, hidden_size).to(torch.float32)  # Changed to float32
             a2_batch = output_states + a1_batch - input_states
             
-            if accurate:
-                a2_batch = output_states
-                a3_batch = input_states - a1_batch
-                block_data[block_idx]['a3'][block_data[block_idx]['cnt']:block_data[block_idx]['cnt']+a3_batch.shape[0]] = a3_batch
+            # Calculate how many samples we can add
+            current_cnt = block_data[block_idx]['cnt']
+            available_space = max_samples - current_cnt
+            samples_to_add = min(a1_batch.shape[0], available_space)
             
-            block_data[block_idx]['a1'][block_data[block_idx]['cnt']:block_data[block_idx]['cnt']+a1_batch.shape[0]] = a1_batch
-            block_data[block_idx]['a2'][block_data[block_idx]['cnt']:block_data[block_idx]['cnt']+a2_batch.shape[0]] = a2_batch
-            block_data[block_idx]['cnt'] += a1_batch.shape[0]
+            if samples_to_add <= 0:
+                continue
+            
+            if accurate:
+                a2_batch = output_states[:samples_to_add]
+                a3_batch = input_states[:samples_to_add] - a1_batch[:samples_to_add]
+                block_data[block_idx]['a3'][current_cnt:current_cnt+samples_to_add] = a3_batch
+            
+            block_data[block_idx]['a1'][current_cnt:current_cnt+samples_to_add] = a1_batch[:samples_to_add]
+            block_data[block_idx]['a2'][current_cnt:current_cnt+samples_to_add] = a2_batch[:samples_to_add]
+            block_data[block_idx]['cnt'] += samples_to_add
     
     # Estimate transformations for each selected block
     print("Estimating transformations for selected blocks...")
@@ -248,6 +262,7 @@ def individual_linear_dist(
         print(f"Block {block_idx}: Using {data['cnt']} samples")
         
         if solver == "adam":
+            # Removed beta parameter
             transform = adam_method(
                 a1, a2,
                 a3=a3,
