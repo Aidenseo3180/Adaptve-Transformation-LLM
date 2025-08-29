@@ -261,6 +261,23 @@ def identity_convergence_method(
     start_id = optimal_start_idx
     end_id = optimal_end_idx
     
+    # Clean up model from identity analysis to free memory
+    del model
+    gc.collect()
+    torch.cuda.empty_cache()
+    
+    # Reload model with minimal memory footprint for activation gathering
+    logging.info(f"{Fore.GREEN}Reloading model for activation gathering...{Fore.RESET}")
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        device_map=device_map,
+        quantization_config=quantization_config,
+        output_hidden_states=True,
+        token=token,
+        torch_dtype=torch.bfloat16,  # Use bfloat16 to save memory
+        low_cpu_mem_usage=True
+    )
+    
     # Step 3: Proceed with standard ReplaceMe pipeline for activation gathering
     dataloader = get_calib_dataloader(
         dataset,
@@ -274,7 +291,7 @@ def identity_convergence_method(
     def save_mlp_activation(name):
         """Returns a hook function that saves the module output under the key 'name'."""
         def hook(module, input, output):
-            mlp_activations[name] = output.detach()
+            mlp_activations[name] = output.detach().cpu()  # Move to CPU immediately
         return hook
 
     hooks = []
@@ -325,13 +342,14 @@ def identity_convergence_method(
         with torch.no_grad():
             outputs = model(**inputs)
         
-        hidden_states = outputs.hidden_states[1:]
+        # Move to CPU immediately to save GPU memory
+        hidden_states = [h.cpu() for h in outputs.hidden_states[1:]]
         hidden_states_mlp_list = [
             mlp_activations[f'layer_{i}_mlp'] for i in range(model.config.num_hidden_layers)
         ]
         hidden_states_mlp = hidden_states_mlp_list[start_id - num_layer - 1]
 
-        # Reshape activations
+        # Reshape activations - everything on CPU
         hidden_states_mlp = hidden_states_mlp.view(-1, hidden_size).to(torch.float64)
         hidden_states_i = hidden_states[start_id - num_layer - 1].view(-1, hidden_size).to(torch.float64)
         hidden_states_n = hidden_states[end_id - num_layer - 1].view(-1, hidden_size).to(torch.float64)
@@ -347,7 +365,9 @@ def identity_convergence_method(
         
         cnt += a2_batch.shape[0]
         
-        del hidden_states_mlp, hidden_states_i, hidden_states_n
+        # Clear GPU memory immediately
+        del hidden_states_mlp, hidden_states_i, hidden_states_n, hidden_states
+        torch.cuda.empty_cache()
     
     # Remove hooks
     for hook in hooks:
