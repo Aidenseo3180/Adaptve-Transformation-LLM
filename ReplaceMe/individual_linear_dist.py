@@ -329,66 +329,97 @@ def individual_linear_dist(
     )
     
     # Apply transformations to selected blocks and remove them
-    print(f"Applying transformations and removing selected blocks: {selected_block_indices}")
+    print(f"Selected blocks for replacement: {selected_block_indices}")
     
-    # Sort block indices in descending order for safe removal
-    sorted_blocks = sorted(selected_block_indices, reverse=True)
-    print(f"Processing blocks in reverse order: {sorted_blocks}")
+    # Sort block indices in ascending order for proper matrix multiplication order
+    sorted_blocks = sorted(selected_block_indices)
+    print(f"Processing blocks in order: {sorted_blocks}")
     
-    for block_idx in sorted_blocks:
-        print(f"\nProcessing Block {block_idx}...")
-        
+    # Find the block before the first selected block (where we'll apply combined transform)
+    first_block_idx = sorted_blocks[0]
+    target_block_idx = first_block_idx - 1
+    
+    if target_block_idx < 0:
+        print(f"⚠️ ERROR: Cannot apply transform before Block 0. First selected block is {first_block_idx}")
+        return None
+    
+    print(f"Will apply combined transform to Block {target_block_idx}'s down_proj")
+    print(f"Will remove blocks: {sorted_blocks}")
+    
+    # Combine transforms using matrix multiplication
+    print(f"\nCombining transforms using matrix multiplication...")
+    
+    # Start with identity and multiply transforms in sequence
+    combined_transform = torch.eye(4096, dtype=torch.float64)  # Assuming hidden_size = 4096
+    
+    for i, block_idx in enumerate(sorted_blocks):
         transform = transforms[block_idx]
+        print(f"  Step {i+1}: Multiplying with Transform for Block {block_idx}")
+        print(f"    Current combined norm: {combined_transform.norm():.6f}")
+        print(f"    Block {block_idx} transform norm: {transform.norm():.6f}")
         
-        # Apply transformation to the PREVIOUS block's down_proj (like ReplaceMe)
-        prev_block_idx = block_idx - 1
-        if prev_block_idx < 0:
-            print(f"  ⚠️  WARNING: Cannot apply transform to block before Block 0. Skipping Block {block_idx}.")
-            continue
-            
-        print(f"  Applying transform to Block {prev_block_idx}'s down_proj (to replace Block {block_idx})")
+        # Apply transform: combined = T_new @ combined
+        combined_transform = transform.cpu().to(torch.float64) @ combined_transform
+        print(f"    After multiplication norm: {combined_transform.norm():.6f}")
         
-        # Get original weight and apply transformation
-        original_weight = model.model.layers[prev_block_idx].mlp.down_proj.weight.to(torch.float64)
-        print(f"  Block {prev_block_idx}: Original down_proj weight shape: {original_weight.shape}")
-        print(f"  Transform matrix shape: {transform.shape}")
-        print(f"  Original weight norm: {original_weight.norm():.6f}")
-        print(f"  Transform matrix norm: {transform.norm():.6f}")
-        
-        # Check if transform is close to identity
-        identity = torch.eye(transform.shape[0], dtype=torch.float64)
-        identity_diff = (transform.cpu() - identity).norm()
-        print(f"  Distance from Identity matrix: {identity_diff:.6f}")
-        
-        # Apply transformation
-        new_weight = (transform.T.cpu() @ original_weight).to(torch.bfloat16)
-        print(f"  New weight norm: {new_weight.norm():.6f}")
-        print(f"  Weight change ratio: {(new_weight.norm() / original_weight.norm()):.6f}")
-        
-        # Store original weight for verification
-        original_weight_backup = original_weight.clone()
-        
-        # Update the previous block's down_proj
-        model.model.layers[prev_block_idx].mlp.down_proj.load_state_dict({
-            "weight": new_weight
-        })
-        
-        # Verify the weight was actually updated
-        updated_weight = model.model.layers[prev_block_idx].mlp.down_proj.weight
-        verification_diff = (updated_weight.to(torch.float64) - original_weight_backup).norm()
-        print(f"  Verification - Weight actually changed: {verification_diff:.6f}")
-        
-        if verification_diff < 1e-6:
-            print(f"  ⚠️  WARNING: Block {prev_block_idx} weight barely changed!")
-        else:
-            print(f"  ✓ Transform successfully applied to Block {prev_block_idx}!")
+        # Check condition number to detect potential numerical issues
+        try:
+            cond_num = torch.linalg.cond(combined_transform)
+            print(f"    Condition number: {cond_num:.2e}")
+            if cond_num > 1e12:
+                print(f"    ⚠️  WARNING: High condition number detected!")
+        except:
+            print(f"    Could not compute condition number")
     
-    # Now remove the selected blocks (in reverse order to maintain indices)
-    print(f"\nRemoving selected blocks: {sorted_blocks}")
+    print(f"\nFinal combined transform:")
+    print(f"  Shape: {combined_transform.shape}")
+    print(f"  Norm: {combined_transform.norm():.6f}")
+    print(f"  Determinant: {torch.det(combined_transform):.6f}")
+    
+    # Check if combined transform is close to identity
+    identity = torch.eye(combined_transform.shape[0], dtype=torch.float64)
+    identity_diff = (combined_transform - identity).norm()
+    print(f"  Distance from identity: {identity_diff:.6f}")
+    
+    if identity_diff < 0.01:
+        print(f"  ⚠️  WARNING: Combined transform is very close to identity!")
+    
+    # Apply combined transformation to target block
+    print(f"\nApplying combined transform to Block {target_block_idx}...")
+    
+    original_weight = model.model.layers[target_block_idx].mlp.down_proj.weight.to(torch.float64)
+    print(f"  Original weight shape: {original_weight.shape}")
+    print(f"  Original weight norm: {original_weight.norm():.6f}")
+    
+    # Apply combined transformation
+    new_weight = (combined_transform.T @ original_weight).to(torch.bfloat16)
+    print(f"  New weight norm: {new_weight.norm():.6f}")
+    print(f"  Weight change ratio: {(new_weight.norm() / original_weight.norm()):.6f}")
+    
+    # Store original for verification
+    original_weight_backup = original_weight.clone()
+    
+    # Update the target block's down_proj
+    model.model.layers[target_block_idx].mlp.down_proj.load_state_dict({
+        "weight": new_weight
+    })
+    
+    # Verify the weight was actually updated
+    updated_weight = model.model.layers[target_block_idx].mlp.down_proj.weight
+    verification_diff = (updated_weight.to(torch.float64) - original_weight_backup).norm()
+    print(f"  Verification - Weight changed by: {verification_diff:.6f}")
+    
+    if verification_diff < 1e-6:
+        print(f"  ⚠️  WARNING: Weight barely changed!")
+    else:
+        print(f"  ✓ Combined transform successfully applied!")
+    
+    # Remove the selected blocks (in reverse order to maintain indices)
+    print(f"\nRemoving selected blocks: {sorted(sorted_blocks, reverse=True)}")
     original_num_layers = len(model.model.layers)
     
     layers_list = list(model.model.layers)
-    for block_idx in sorted_blocks:
+    for block_idx in sorted(sorted_blocks, reverse=True):
         print(f"  Removing Block {block_idx}...")
         if 0 <= block_idx < len(layers_list):
             layers_list.pop(block_idx)
@@ -407,6 +438,8 @@ def individual_linear_dist(
     print(f"  New layers: {len(model.model.layers)}")
     print(f"  Removed layers: {original_num_layers - len(model.model.layers)}")
     print(f"  Compression ratio: {(1 - len(model.model.layers) / original_num_layers) * 100:.1f}%")
+    print(f"  Combined transform applied to Block {target_block_idx}")
+    print(f"  Blocks {sorted_blocks} → Block {target_block_idx} → remaining blocks")
     
     # Save model
     if save_path is None:
