@@ -328,46 +328,85 @@ def individual_linear_dist(
         torch_dtype=torch.bfloat16
     )
     
-    # Apply transformations to selected blocks
-    for block_idx in selected_block_indices:
-        print(f"Applying transformation to Block {block_idx}")
+    # Apply transformations to selected blocks and remove them
+    print(f"Applying transformations and removing selected blocks: {selected_block_indices}")
+    
+    # Sort block indices in descending order for safe removal
+    sorted_blocks = sorted(selected_block_indices, reverse=True)
+    print(f"Processing blocks in reverse order: {sorted_blocks}")
+    
+    for block_idx in sorted_blocks:
+        print(f"\nProcessing Block {block_idx}...")
         
         transform = transforms[block_idx]
         
-        # Get original weight and apply transformation
-        original_weight = model.model.layers[block_idx].mlp.down_proj.weight.to(torch.float64)
-        print(f"  Block {block_idx}: Original weight shape: {original_weight.shape}")
-        print(f"  Block {block_idx}: Transform matrix shape: {transform.shape}")
-        print(f"  Block {block_idx}: Original weight norm: {original_weight.norm():.6f}")
-        print(f"  Block {block_idx}: Transform matrix norm: {transform.norm():.6f}")
+        # Apply transformation to the PREVIOUS block's down_proj (like ReplaceMe)
+        prev_block_idx = block_idx - 1
+        if prev_block_idx < 0:
+            print(f"  ⚠️  WARNING: Cannot apply transform to block before Block 0. Skipping Block {block_idx}.")
+            continue
+            
+        print(f"  Applying transform to Block {prev_block_idx}'s down_proj (to replace Block {block_idx})")
         
-        # Check if transform is close to identity (which would indicate potential issues)
+        # Get original weight and apply transformation
+        original_weight = model.model.layers[prev_block_idx].mlp.down_proj.weight.to(torch.float64)
+        print(f"  Block {prev_block_idx}: Original down_proj weight shape: {original_weight.shape}")
+        print(f"  Transform matrix shape: {transform.shape}")
+        print(f"  Original weight norm: {original_weight.norm():.6f}")
+        print(f"  Transform matrix norm: {transform.norm():.6f}")
+        
+        # Check if transform is close to identity
         identity = torch.eye(transform.shape[0], dtype=torch.float64)
         identity_diff = (transform.cpu() - identity).norm()
-        print(f"  Block {block_idx}: Distance from Identity matrix: {identity_diff:.6f}")
+        print(f"  Distance from Identity matrix: {identity_diff:.6f}")
         
+        # Apply transformation
         new_weight = (transform.T.cpu() @ original_weight).to(torch.bfloat16)
-        print(f"  Block {block_idx}: New weight norm: {new_weight.norm():.6f}")
-        print(f"  Block {block_idx}: Weight change ratio: {(new_weight.norm() / original_weight.norm()):.6f}")
+        print(f"  New weight norm: {new_weight.norm():.6f}")
+        print(f"  Weight change ratio: {(new_weight.norm() / original_weight.norm()):.6f}")
         
-        # Store original weight for comparison
+        # Store original weight for verification
         original_weight_backup = original_weight.clone()
         
-        model.model.layers[block_idx].mlp.down_proj.load_state_dict({
+        # Update the previous block's down_proj
+        model.model.layers[prev_block_idx].mlp.down_proj.load_state_dict({
             "weight": new_weight
         })
         
         # Verify the weight was actually updated
-        updated_weight = model.model.layers[block_idx].mlp.down_proj.weight
+        updated_weight = model.model.layers[prev_block_idx].mlp.down_proj.weight
         verification_diff = (updated_weight.to(torch.float64) - original_weight_backup).norm()
-        print(f"  Block {block_idx}: Verification - Weight actually changed: {verification_diff:.6f}")
+        print(f"  Verification - Weight actually changed: {verification_diff:.6f}")
         
         if verification_diff < 1e-6:
-            print(f"  ⚠️  WARNING: Block {block_idx} weight barely changed! Transform may not be applied correctly.")
+            print(f"  ⚠️  WARNING: Block {prev_block_idx} weight barely changed!")
         else:
-            print(f"  ✓ Block {block_idx}: Transform successfully applied!")
-        
-        print()
+            print(f"  ✓ Transform successfully applied to Block {prev_block_idx}!")
+    
+    # Now remove the selected blocks (in reverse order to maintain indices)
+    print(f"\nRemoving selected blocks: {sorted_blocks}")
+    original_num_layers = len(model.model.layers)
+    
+    layers_list = list(model.model.layers)
+    for block_idx in sorted_blocks:
+        print(f"  Removing Block {block_idx}...")
+        if 0 <= block_idx < len(layers_list):
+            layers_list.pop(block_idx)
+            print(f"  ✓ Block {block_idx} removed successfully")
+        else:
+            print(f"  ⚠️  WARNING: Block {block_idx} index out of range")
+    
+    # Update the model with new layer list
+    model.model.layers = torch.nn.ModuleList(layers_list)
+    
+    # Update model config to reflect new number of layers
+    model.config.num_hidden_layers = len(model.model.layers)
+    
+    print(f"\nModel compression completed:")
+    print(f"  Original layers: {original_num_layers}")
+    print(f"  New layers: {len(model.model.layers)}")
+    print(f"  Removed layers: {original_num_layers - len(model.model.layers)}")
+    print(f"  Compression ratio: {(1 - len(model.model.layers) / original_num_layers) * 100:.1f}%")
     
     # Save model
     if save_path is None:
