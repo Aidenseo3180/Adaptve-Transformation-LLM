@@ -7,7 +7,7 @@ max_length: 512 # 1024
 layers_to_skip: 4
 dataset_size: 2000 # 8000
 dataset_subset: "train"
-use_4bit: True
+use_4bit: False
 save_path: null
 min_distance_layer: 20
 save_transform_only: True

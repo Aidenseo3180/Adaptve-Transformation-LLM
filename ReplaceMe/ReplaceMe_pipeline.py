@@ -11,7 +11,7 @@ from .cosine_dist import cosine_dist
 from .distance import profile_distances
 from .evaluator import evaluator
 from .low_rank_replace import low_rank_replace  # New import
-from .sparse_linear_dist import sparse_linear_replacement
+from .bidirectional_cosine_dist import bidirectional_cosine_dist  # New import
 
 from .utils import seed_all, select_non_overlapping_blocks
 
@@ -61,11 +61,32 @@ def ReplaceMe_pipeline(config):
             path = low_rank_replace(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
 
-    elif config["method"] == "identity_convergence":
-        from .identity_convergence_method import identity_convergence_method
-        signature = inspect.signature(identity_convergence_method)
+    elif config["method"] == "bidirectional":  # New bidirectional method
+        signature = inspect.signature(bidirectional_cosine_dist)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-        path = identity_convergence_method(**filtered_config)
+        
+        # Load average distances and select non-overlapping blocks
+        average_distances = torch.load(filtered_config['distances_path'])  
+        selected_blocks = select_non_overlapping_blocks(
+            average_distances, 
+            filtered_config['layers_to_skip'], 
+            num_blocks=filtered_config['num_A'], 
+            merge_consecutive=filtered_config['merge_consecutive']
+        )
+        
+        # Calculate start and end IDs, and number of layers
+        start_ids = sorted([x[0] for x in selected_blocks])
+        end_ids = sorted([x[1] for x in selected_blocks])
+        num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
+        num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
+        
+        # Iterate over each selected block
+        for i in range(len(selected_blocks)):
+            path = bidirectional_cosine_dist(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
+            filtered_config["model_path"] = path
+            
+        print(f"{Fore.GREEN}Bidirectional ReplaceMe pipeline completed{Fore.RESET}")
+
     
     else:  # Original cosine/adam methods
         signature = inspect.signature(cosine_dist)
