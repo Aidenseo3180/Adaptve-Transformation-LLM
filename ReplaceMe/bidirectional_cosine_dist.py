@@ -222,12 +222,17 @@ def bidirectional_cosine_dist(
     
     # For up_proj compensation, we want to adapt the next layer to the changed input
     # We use the residual between original output and transformed output
-    residual_activations = a2 - (a1 @ transform_down.T.float())  # What we're missing
+    # Ensure all tensors are on the same device (CPU) and same dtype
+    a1_cpu = a1.to('cpu').to(torch.float64)
+    a2_cpu = a2.to('cpu').to(torch.float64)
+    transform_down_cpu = transform_down.to('cpu').to(torch.float64)
+    
+    residual_activations = a2_cpu - (a1_cpu @ transform_down_cpu.T)  # What we're missing
     
     if solver == "adam":
-        transform_up = adam_method(residual_activations, a2, loss=loss, diag=diag, two_vectors=two_vectors, thri=thri)
+        transform_up = adam_method(residual_activations, a2_cpu, loss=loss, diag=diag, two_vectors=two_vectors, thri=thri)
     else:
-        transform_up = optimizing_method(residual_activations, a2, solver=solver)
+        transform_up = optimizing_method(residual_activations, a2_cpu, solver=solver)
     
     # Clean up
     del model
@@ -290,7 +295,7 @@ def bidirectional_cosine_dist(
         }, f"{model_save_path}_transforms.pth")
     
     # Final cleanup
-    del model, a1, a2
+    del model, a1, a2, a1_cpu, a2_cpu, transform_down_cpu, residual_activations
     if accurate:
         del a3
     gc.collect()
