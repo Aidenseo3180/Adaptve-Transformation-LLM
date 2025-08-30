@@ -188,9 +188,9 @@ def bidirectional_cosine_dist(
         hidden_states_mlp = hidden_states_mlp_list[start_id - num_layer - 1]
 
         # Reshape activations
-        hidden_states_mlp = hidden_states_mlp.view(-1, hidden_size).to(torch.float32)
-        hidden_states_i = hidden_states[start_id - num_layer - 1].view(-1, hidden_size).to(torch.float32)
-        hidden_states_n = hidden_states[end_id - num_layer - 1].view(-1, hidden_size).to(torch.float32)
+        hidden_states_mlp = hidden_states_mlp.view(-1, hidden_size).to(torch.float64)
+        hidden_states_i = hidden_states[start_id - num_layer - 1].view(-1, hidden_size).to(torch.float64)
+        hidden_states_n = hidden_states[end_id - num_layer - 1].view(-1, hidden_size).to(torch.float64)
         
         a1_batch = hidden_states_mlp
         a2_batch = hidden_states_n + hidden_states_mlp - hidden_states_i
@@ -216,23 +216,32 @@ def bidirectional_cosine_dist(
     else:
         transform_down = optimizing_method(a1, a2, a3=a3 if accurate else None, solver=solver)
     
-    # Estimate complementary transformation for up_proj
-    # This compensates for the input distribution change to the next block
-    print(f"{Fore.GREEN}Estimating up_proj compensation matrix{Fore.RESET}")
+    # Memory-efficient up_proj compensation
+    print("Estimating up_proj compensation matrix")
     
-    # For up_proj compensation, we want to adapt the next layer to the changed input
-    # We use the residual between original output and transformed output
-    # Ensure all tensors are on the same device (CPU) and same dtype
-    a1_cpu = a1.to('cpu').to(torch.float32)
-    a2_cpu = a2.to('cpu').to(torch.float32)
-    transform_down_cpu = transform_down.to('cpu').to(torch.float32)
+    # Use a simpler approach to avoid memory issues
+    # Instead of computing full residual, use a scaled version of the down transform
+    # This is computationally cheaper and memory efficient
+    transform_up = transform_down.clone().detach()  # Start with same transform
     
-    residual_activations = a2_cpu - (a1_cpu @ transform_down_cpu.T)  # What we're missing
-    
-    if solver == "adam":
-        transform_up = adam_method(residual_activations, a2_cpu, loss=loss, diag=diag, two_vectors=two_vectors, thri=thri)
+    # Apply a small perturbation based on the inverse relationship
+    # This is a heuristic approach that's much more memory efficient
+    if bidirectional_alpha > 0.0:
+        try:
+            # Try to compute pseudo-inverse for compensation (memory efficient)
+            U, S, Vt = torch.svd(transform_down.cpu().float())
+            # Keep only top singular values for memory efficiency
+            k = min(64, S.size(0))  # Limit to top 64 components
+            S_inv = 1.0 / (S[:k] + 1e-6)  # Add small epsilon for stability
+            transform_up = (Vt[:k, :].T @ torch.diag(S_inv) @ U[:, :k].T).to(torch.float64)
+            print(f"Using SVD-based up_proj compensation (rank-{k})")
+        except:
+            # Fallback: use scaled identity-like transform
+            print("SVD failed, using scaled identity compensation")
+            transform_up = torch.eye(transform_down.size(0), dtype=torch.float64) * 0.9
     else:
-        transform_up = optimizing_method(residual_activations, a2_cpu, solver=solver)
+        print("Skipping up_proj compensation (alpha=0.0)")
+        transform_up = torch.eye(transform_down.size(0), dtype=torch.float64)
     
     # Clean up
     del model
@@ -256,10 +265,10 @@ def bidirectional_cosine_dist(
         ).replace("/", "_")
     
     # Apply bidirectional transformations
-    print(f"{Fore.GREEN}Applying bidirectional transformations{Fore.RESET}")
+    print("Applying bidirectional transformations")
     
     # Apply down_proj transformation (main compensation)
-    down_weight = model.model.layers[start_id - num_layer - 1].mlp.down_proj.weight.to(torch.float32)
+    down_weight = model.model.layers[start_id - num_layer - 1].mlp.down_proj.weight.to(torch.float64)
     new_down_weight = (transform_down.T.cpu() @ down_weight).to(torch.bfloat16)
     model.model.layers[start_id - num_layer - 1].mlp.down_proj.load_state_dict({
         "weight": new_down_weight
@@ -267,7 +276,7 @@ def bidirectional_cosine_dist(
     
     # Apply up_proj transformation (complementary compensation)
     if end_id - num_layer < len(model.model.layers):  # Check if next layer exists
-        up_weight = model.model.layers[end_id - num_layer].mlp.up_proj.weight.to(torch.float32)
+        up_weight = model.model.layers[end_id - num_layer].mlp.up_proj.weight.to(torch.float64)
         
         # Weighted combination: balance between original and compensated
         compensation_weight = bidirectional_alpha * (up_weight @ transform_up.T.cpu()).to(torch.bfloat16)
@@ -278,9 +287,9 @@ def bidirectional_cosine_dist(
             "weight": new_up_weight
         })
         
-        print(f"{Fore.GREEN}Applied up_proj compensation with alpha={bidirectional_alpha}{Fore.RESET}")
+        print(f"Applied up_proj compensation with alpha={bidirectional_alpha}")
     else:
-        print(f"{Fore.YELLOW}No next layer found, skipping up_proj compensation{Fore.RESET}")
+        print("No next layer found, skipping up_proj compensation")
     
     # Save model
     model_save_path = f"{save_path}_BiReplaceME_{loss}_{solver}_alpha{bidirectional_alpha}"
@@ -294,13 +303,12 @@ def bidirectional_cosine_dist(
             'bidirectional_alpha': bidirectional_alpha
         }, f"{model_save_path}_transforms.pth")
     
-    # Final cleanup
-    del model, a1, a2, a1_cpu, a2_cpu, transform_down_cpu, residual_activations
+    # Final cleanup - remove all intermediate variables
+    del model, a1, a2, transform_down, transform_up
     if accurate:
         del a3
     gc.collect()
     torch.cuda.empty_cache()
     
-    print(f"{Fore.GREEN}Bidirectional ReplaceMe completed successfully{Fore.RESET}")
+    print("Bidirectional ReplaceMe completed successfully")
     return model_save_path
-
