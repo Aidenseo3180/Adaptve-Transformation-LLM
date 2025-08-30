@@ -188,9 +188,9 @@ def bidirectional_cosine_dist(
         hidden_states_mlp = hidden_states_mlp_list[start_id - num_layer - 1]
 
         # Reshape activations
-        hidden_states_mlp = hidden_states_mlp.view(-1, hidden_size).to(torch.float64)
-        hidden_states_i = hidden_states[start_id - num_layer - 1].view(-1, hidden_size).to(torch.float64)
-        hidden_states_n = hidden_states[end_id - num_layer - 1].view(-1, hidden_size).to(torch.float64)
+        hidden_states_mlp = hidden_states_mlp.view(-1, hidden_size).to(torch.float32)
+        hidden_states_i = hidden_states[start_id - num_layer - 1].view(-1, hidden_size).to(torch.float32)
+        hidden_states_n = hidden_states[end_id - num_layer - 1].view(-1, hidden_size).to(torch.float32)
         
         a1_batch = hidden_states_mlp
         a2_batch = hidden_states_n + hidden_states_mlp - hidden_states_i
@@ -223,9 +223,9 @@ def bidirectional_cosine_dist(
     # For up_proj compensation, we want to adapt the next layer to the changed input
     # We use the residual between original output and transformed output
     # Ensure all tensors are on the same device (CPU) and same dtype
-    a1_cpu = a1.to('cpu').to(torch.float64)
-    a2_cpu = a2.to('cpu').to(torch.float64)
-    transform_down_cpu = transform_down.to('cpu').to(torch.float64)
+    a1_cpu = a1.to('cpu').to(torch.float32)
+    a2_cpu = a2.to('cpu').to(torch.float32)
+    transform_down_cpu = transform_down.to('cpu').to(torch.float32)
     
     residual_activations = a2_cpu - (a1_cpu @ transform_down_cpu.T)  # What we're missing
     
@@ -259,7 +259,7 @@ def bidirectional_cosine_dist(
     print(f"{Fore.GREEN}Applying bidirectional transformations{Fore.RESET}")
     
     # Apply down_proj transformation (main compensation)
-    down_weight = model.model.layers[start_id - num_layer - 1].mlp.down_proj.weight.to(torch.float64)
+    down_weight = model.model.layers[start_id - num_layer - 1].mlp.down_proj.weight.to(torch.float32)
     new_down_weight = (transform_down.T.cpu() @ down_weight).to(torch.bfloat16)
     model.model.layers[start_id - num_layer - 1].mlp.down_proj.load_state_dict({
         "weight": new_down_weight
@@ -267,7 +267,7 @@ def bidirectional_cosine_dist(
     
     # Apply up_proj transformation (complementary compensation)
     if end_id - num_layer < len(model.model.layers):  # Check if next layer exists
-        up_weight = model.model.layers[end_id - num_layer].mlp.up_proj.weight.to(torch.float64)
+        up_weight = model.model.layers[end_id - num_layer].mlp.up_proj.weight.to(torch.float32)
         
         # Weighted combination: balance between original and compensated
         compensation_weight = bidirectional_alpha * (up_weight @ transform_up.T.cpu()).to(torch.bfloat16)

@@ -20,4 +20,10 @@ distances_path: null
 num_A: 1
 merge_consecutive: False 
 accurate: False # False will run cosine(xA, y - z) where z is the residual attention info, True to run cosine(xA + z, y)
-bidirectional_alpha: 0.3 # Weight for up_proj compensation (0.0 = only down_proj, 1.0 = only up_proj)
+bidirectional_alpha: 0.1 # Weight for up_proj compensation (0.0 = only down_proj, 1.0 = only up_proj)
+# Evaluation tasks
+tasks:
+  boolq:
+    fewshots: 0
+  lambada_openai:
+    fewshots: 0
