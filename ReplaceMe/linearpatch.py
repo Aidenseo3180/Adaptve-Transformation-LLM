@@ -493,7 +493,7 @@ def linearpatch_compression(
     gc.collect()
     torch.cuda.empty_cache()
     
-    # Reload model for transformation
+    # Reload model for transformation  
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         device_map='cpu',
@@ -503,6 +503,64 @@ def linearpatch_compression(
     
     # Truncate model (remove target blocks)
     model = truncate_model(model, start_id - num_layer, end_id - num_layer)
+    
+    # Find the optimal target layer (same logic as in KD)
+    target_layer_idx = start_id - num_layer - 1
+    
+    if debug_mode:
+        print(f"{Fore.CYAN}[DEBUG] Analyzing model architecture for layer {target_layer_idx}:")
+    
+    if 'falcon' in model_path.lower():
+        layer = model.transformer.h[target_layer_idx]
+        target_layer = layer.mlp.dense_4h_to_h
+        target_layer_name = "dense_4h_to_h"
+        if debug_mode:
+            print(f"  - Falcon architecture: using {target_layer_name}")
+    else:
+        layer = model.model.layers[target_layer_idx]
+        mlp = layer.mlp
+        
+        if debug_mode:
+            print(f"  - LLaMA layer structure:")
+            
+        # Priority order: gate_proj > up_proj > down_proj  
+        target_layer = None
+        target_layer_name = None
+        
+        mlp_components_priority = [
+            ('gate_proj', 'Gate projection (4096 → intermediate)'),
+            ('up_proj', 'Up projection (4096 → intermediate)'), 
+            ('down_proj', 'Down projection (intermediate → 4096)')
+        ]
+        
+        for comp_name, comp_desc in mlp_components_priority:
+            if hasattr(mlp, comp_name):
+                comp = getattr(mlp, comp_name)
+                if hasattr(comp, 'weight'):
+                    comp_shape = comp.weight.shape
+                    if debug_mode:
+                        print(f"    - {comp_name}: {comp_shape} ({comp.weight.dtype}) - {comp_desc}")
+                    
+                    # Look for layer with input dimension = hidden_size (4096)
+                    if comp_shape[1] == model.config.hidden_size:  # [xxx, 4096] - perfect match
+                        target_layer = comp
+                        target_layer_name = comp_name
+                        if debug_mode:
+                            print(f"  ✓ Selected {comp_name}: input dimension matches LinearPatch ({comp_shape[1]})")
+                        break
+                else:
+                    if debug_mode:
+                        print(f"    - {comp_name}: No weight attribute")
+            else:
+                if debug_mode:
+                    print(f"    - {comp_name}: Not found")
+        
+        # Fallback if no perfect match found
+        if target_layer is None:
+            if debug_mode:
+                print(f"  ! No perfect match found, falling back to down_proj")
+            target_layer = mlp.down_proj
+            target_layer_name = "down_proj"
     
     # Apply LinearPatch to the layer before removed blocks
     target_layer_idx = start_id - num_layer - 1
