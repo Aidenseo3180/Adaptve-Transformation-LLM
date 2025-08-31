@@ -632,23 +632,51 @@ def apply_knowledge_distillation_memory_efficient(
             print(f"{Fore.RED}[DEBUG KD] WARNING: Unexpected weight shape {original_weight.shape}")
             print(f"Expected one of: {expected_shapes}{Fore.RESET}")
             
-            # If weight is flattened, try to reshape it
+            # Handle flattened or quantized weights
             if len(original_weight.shape) == 2 and original_weight.shape[1] == 1:
                 total_params = original_weight.shape[0]
-                # Try to find a reasonable 2D shape
-                import math
-                sqrt_params = int(math.sqrt(total_params))
-                if sqrt_params * sqrt_params == total_params:
-                    print(f"{Fore.YELLOW}[DEBUG KD] Attempting to reshape flattened weight to {sqrt_params}x{sqrt_params}{Fore.RESET}")
-                    original_weight = original_weight.view(sqrt_params, sqrt_params)
-                else:
-                    # Try standard LLaMA sizes
-                    if total_params == 4096 * 11008:
-                        print(f"{Fore.YELLOW}[DEBUG KD] Reshaping to standard LLaMA down_proj: 11008x4096{Fore.RESET}")
-                        original_weight = original_weight.view(11008, 4096)
-                    else:
-                        raise RuntimeError(f"Cannot handle weight shape {original_weight.shape}. "
-                                         f"Expected 2D weight matrix, got {len(original_weight.shape)}D with shape {original_weight.shape}")
+                print(f"{Fore.YELLOW}[DEBUG KD] Detected flattened weight with {total_params} parameters{Fore.RESET}")
+                
+                # Standard LLaMA-3-8B down_proj sizes
+                possible_shapes = [
+                    (11008, 4096),   # LLaMA-2/3 down_proj: 11008 -> 4096
+                    (14336, 4096),   # Some variants
+                    (4096, 11008),   # Transpose case
+                    (4096, 14336)    # Transpose variant
+                ]
+                
+                reshaped = False
+                for out_dim, in_dim in possible_shapes:
+                    if out_dim * in_dim == total_params:
+                        print(f"{Fore.YELLOW}[DEBUG KD] Attempting reshape to {out_dim}x{in_dim}{Fore.RESET}")
+                        try:
+                            original_weight = original_weight.view(out_dim, in_dim)
+                            reshaped = True
+                            break
+                        except:
+                            continue
+                
+                if not reshaped:
+                    # Last resort: try square matrix
+                    import math
+                    sqrt_params = int(math.sqrt(total_params))
+                    if sqrt_params * sqrt_params == total_params:
+                        print(f"{Fore.YELLOW}[DEBUG KD] Attempting square reshape to {sqrt_params}x{sqrt_params}{Fore.RESET}")
+                        original_weight = original_weight.view(sqrt_params, sqrt_params)
+                        reshaped = True
+                
+                if not reshaped:
+                    raise RuntimeError(f"Cannot reshape weight with {total_params} parameters. "
+                                     f"Not compatible with standard LLaMA architectures.")
+            
+            # Handle quantized weights (uint8)
+            if original_weight.dtype == torch.uint8:
+                print(f"{Fore.YELLOW}[DEBUG KD] Detected quantized weights, converting to float32{Fore.RESET}")
+                # Convert uint8 to float32 (simple scaling)
+                original_weight = original_weight.to(torch.float32) / 255.0 * 2.0 - 1.0  # Scale to [-1, 1]
+        
+        print(f"{Fore.GREEN}[DEBUG KD] Final weight shape after processing: {original_weight.shape}")
+        print(f"[DEBUG KD] Final weight dtype: {original_weight.dtype}{Fore.RESET}")
         
         print(f"{Fore.GREEN}[DEBUG KD] Final weight shape: {original_weight.shape}{Fore.RESET}")
     
@@ -713,20 +741,37 @@ def apply_knowledge_distillation_memory_efficient(
                 patch_param_device = patch_param.to(model.device)
                 original_weight_device = original_weight.to(model.device)
                 
-                # Apply LinearPatch transformation
-                # LinearPatch transforms the INPUT to the layer, so we modify the weight differently
-                if patch_param_device.shape[1] == original_weight_device.shape[1]:
-                    # Standard case: transform input dimension
-                    enhanced_weight = original_weight_device @ patch_param_device.T
-                else:
-                    # Alternative: transform output dimension  
-                    enhanced_weight = patch_param_device @ original_weight_device
+                # Apply LinearPatch transformation - need to handle different weight shapes
+                patch_shape = patch_param_device.shape  # Should be [4096, 4096]
+                weight_shape = original_weight_device.shape  # Could be [11008, 4096] or other
                 
                 if debug_mode and batch_idx == 0:
-                    print(f"{Fore.CYAN}[DEBUG KD] Weight transformation:")
-                    print(f"  - Original: {original_weight_device.shape}")
-                    print(f"  - Patch: {patch_param_device.shape}") 
-                    print(f"  - Enhanced: {enhanced_weight.shape}{Fore.RESET}")
+                    print(f"{Fore.CYAN}[DEBUG KD] Matrix multiplication setup:")
+                    print(f"  - Patch matrix: {patch_shape}")
+                    print(f"  - Weight matrix: {weight_shape}{Fore.RESET}")
+                
+                # Apply transformation based on weight shape
+                if weight_shape[1] == patch_shape[0]:  # weight: [out, in], patch: [in, in]
+                    # Transform input dimension: weight @ patch^T
+                    enhanced_weight = original_weight_device @ patch_param_device.T
+                    if debug_mode and batch_idx == 0:
+                        print(f"{Fore.CYAN}[DEBUG KD] Using input transformation: weight @ patch.T{Fore.RESET}")
+                        
+                elif weight_shape[0] == patch_shape[1]:  # weight: [in, out], patch: [in, in] 
+                    # Transform output dimension: patch @ weight
+                    enhanced_weight = patch_param_device @ original_weight_device
+                    if debug_mode and batch_idx == 0:
+                        print(f"{Fore.CYAN}[DEBUG KD] Using output transformation: patch @ weight{Fore.RESET}")
+                        
+                else:
+                    # Incompatible shapes - skip this batch
+                    if debug_mode:
+                        print(f"{Fore.RED}[DEBUG KD] Incompatible shapes, skipping batch")
+                        print(f"  Cannot multiply {patch_shape} with {weight_shape}{Fore.RESET}")
+                    continue
+                
+                if debug_mode and batch_idx == 0:
+                    print(f"{Fore.GREEN}[DEBUG KD] Enhanced weight shape: {enhanced_weight.shape}{Fore.RESET}")
                 
                 original_layer.weight.data = enhanced_weight.to(original_layer.weight.dtype)
                 

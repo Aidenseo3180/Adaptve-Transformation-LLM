@@ -13,7 +13,7 @@ dataset_size: 2000  # Smaller but more effective calibration set
 # Model processing parameters
 batch_size: 4
 max_length: 512
-use_4bit: True
+use_4bit: False # True
 save_path: null
 
 # Layer selection parameters
@@ -23,7 +23,7 @@ merge_consecutive: False
 distances_path: null
 
 # LinearPatch specific parameters
-knowledge_distillation: True  # Enable KD for better performance
+knowledge_distillation: False  # Enable KD for better performance
 kd_temperature: 4.0          # Temperature for soft targets
 kd_alpha: 0.3               # Weight for KD loss (0.3 KD + 0.7 regularization)
 enhanced_selection: True     # Use multi-metric layer selection
@@ -31,3 +31,5 @@ enhanced_selection: True     # Use multi-metric layer selection
 # Advanced options
 calibration_size_override: 256  # Override dataset_size for calibration
 min_distance_layer: 20
+
+debug_mode: True               # LinearPatch 기본 효과만 확인
