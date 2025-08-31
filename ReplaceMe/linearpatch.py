@@ -264,13 +264,25 @@ def linearpatch_compression(
     def save_activation_before(name):
         def hook(module, input, output):
             if len(activations_before) < max_samples_in_memory:
-                activations_before.append(output.detach().cpu())  # Move to CPU immediately
+                # Handle both single tensor and tuple outputs
+                if isinstance(output, tuple):
+                    # Take the first element if it's a tuple (usually the main output)
+                    activation = output[0].detach().cpu()
+                else:
+                    activation = output.detach().cpu()
+                activations_before.append(activation)
         return hook
     
     def save_activation_after(name):
         def hook(module, input, output):
             if len(activations_after) < max_samples_in_memory:
-                activations_after.append(output.detach().cpu())   # Move to CPU immediately
+                # Handle both single tensor and tuple outputs  
+                if isinstance(output, tuple):
+                    # Take the first element if it's a tuple (usually the main output)
+                    activation = output[0].detach().cpu()
+                else:
+                    activation = output.detach().cpu()
+                activations_after.append(activation)
         return hook
     
     # Register hooks
@@ -279,18 +291,32 @@ def linearpatch_compression(
     target_after_idx = end_id - num_layer - 1
     
     if debug_mode:
-        print(f"{Fore.YELLOW}[DEBUG] Registering hooks on layers {target_before_idx} and {target_after_idx}{Fore.RESET}")
+        print(f"{Fore.YELLOW}[DEBUG] Target layer indices: before={target_before_idx}, after={target_after_idx}{Fore.RESET}")
+        print(f"{Fore.YELLOW}[DEBUG] Total layers in model: {model.config.num_hidden_layers}{Fore.RESET}")
     
-    if 'falcon' in model_path.lower():
-        hooks.append(model.transformer.h[target_before_idx].register_forward_hook(
-            save_activation_before('before')))
-        hooks.append(model.transformer.h[target_after_idx].register_forward_hook(
-            save_activation_after('after')))
-    else:
-        hooks.append(model.model.layers[target_before_idx].register_forward_hook(
-            save_activation_before('before')))
-        hooks.append(model.model.layers[target_after_idx].register_forward_hook(
-            save_activation_after('after')))
+    try:
+        if 'falcon' in model_path.lower():
+            if debug_mode:
+                print(f"{Fore.YELLOW}[DEBUG] Using Falcon model architecture{Fore.RESET}")
+            before_layer = model.transformer.h[target_before_idx]
+            after_layer = model.transformer.h[target_after_idx]
+            hooks.append(before_layer.register_forward_hook(save_activation_before('before')))
+            hooks.append(after_layer.register_forward_hook(save_activation_after('after')))
+        else:
+            if debug_mode:
+                print(f"{Fore.YELLOW}[DEBUG] Using LLaMA model architecture{Fore.RESET}")
+            before_layer = model.model.layers[target_before_idx]
+            after_layer = model.model.layers[target_after_idx]
+            hooks.append(before_layer.register_forward_hook(save_activation_before('before')))
+            hooks.append(after_layer.register_forward_hook(save_activation_after('after')))
+            
+        if debug_mode:
+            print(f"{Fore.GREEN}[DEBUG] Successfully registered hooks on layers {target_before_idx} and {target_after_idx}{Fore.RESET}")
+            
+    except IndexError as e:
+        raise RuntimeError(f"Layer index out of bounds. Model has {model.config.num_hidden_layers} layers, "
+                          f"but trying to access layers {target_before_idx} and {target_after_idx}. "
+                          f"Check start_id ({start_id}), end_id ({end_id}), num_layer ({num_layer})") from e
     
     # Process calibration data with memory management
     processed_batches = 0
@@ -325,18 +351,37 @@ def linearpatch_compression(
         hook.remove()
     
     if debug_mode:
-        print(f"{Fore.GREEN}[DEBUG] Collected {len(activations_before)} activation pairs{Fore.RESET}")
+        print(f"{Fore.GREEN}[DEBUG] Collected {len(activations_before)} before activations, {len(activations_after)} after activations{Fore.RESET}")
+        if len(activations_before) > 0:
+            print(f"{Fore.GREEN}[DEBUG] Sample activation shapes: before={activations_before[0].shape}, after={activations_after[0].shape}{Fore.RESET}")
     
     # Check if we have enough data
     if len(activations_before) == 0 or len(activations_after) == 0:
-        raise RuntimeError("No activations collected! Check layer indices and model architecture.")
+        raise RuntimeError(f"No activations collected! "
+                          f"Before: {len(activations_before)}, After: {len(activations_after)}. "
+                          f"Check layer indices and model architecture.")
+    
+    if len(activations_before) != len(activations_after):
+        min_len = min(len(activations_before), len(activations_after))
+        if debug_mode:
+            print(f"{Fore.YELLOW}[DEBUG] Mismatched activation counts, truncating to {min_len}{Fore.RESET}")
+        activations_before = activations_before[:min_len]
+        activations_after = activations_after[:min_len]
     
     # Concatenate activations efficiently
     if debug_mode:
-        print(f"{Fore.YELLOW}[DEBUG] Processing activations...{Fore.RESET}")
+        print(f"{Fore.YELLOW}[DEBUG] Concatenating {len(activations_before)} activation tensors...{Fore.RESET}")
     
-    acts_before = torch.cat(activations_before, dim=0).view(-1, model.config.hidden_size)
-    acts_after = torch.cat(activations_after, dim=0).view(-1, model.config.hidden_size)
+    try:
+        acts_before = torch.cat(activations_before, dim=0).view(-1, model.config.hidden_size)
+        acts_after = torch.cat(activations_after, dim=0).view(-1, model.config.hidden_size)
+    except RuntimeError as e:
+        if debug_mode:
+            print(f"{Fore.RED}[DEBUG] Error concatenating activations:")
+            print(f"  Before shapes: {[act.shape for act in activations_before[:3]]}")
+            print(f"  After shapes: {[act.shape for act in activations_after[:3]]}")
+            print(f"  Model hidden size: {model.config.hidden_size}{Fore.RESET}")
+        raise RuntimeError(f"Failed to concatenate activations. Check tensor shapes and model architecture.") from e
     
     if debug_mode:
         print(f"{Fore.GREEN}[DEBUG] Activation shapes: before={acts_before.shape}, after={acts_after.shape}{Fore.RESET}")
