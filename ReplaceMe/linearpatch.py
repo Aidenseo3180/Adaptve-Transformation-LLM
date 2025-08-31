@@ -83,11 +83,15 @@ def compute_channel_scaling(
         activations_after: Activations after pruning [N, d]
         
     Returns:
-        Scaling factors [d]
+        Scaling factors [d] in float32 dtype
     """
+    # Convert to float32 for numerical stability
+    before = activations_before.to(dtype=torch.float32)
+    after = activations_after.to(dtype=torch.float32)
+    
     # Compute channel-wise mean magnitudes
-    mag_before = torch.mean(torch.abs(activations_before), dim=0)
-    mag_after = torch.mean(torch.abs(activations_after), dim=0)
+    mag_before = torch.mean(torch.abs(before), dim=0)
+    mag_after = torch.mean(torch.abs(after), dim=0)
     
     # Avoid division by zero
     epsilon = 1e-8
@@ -114,10 +118,13 @@ def create_linearpatch_matrix(
     Returns:
         LinearPatch matrix [d, d]
     """
+    # Ensure consistent dtype (float32 for numerical stability)
+    dtype = torch.float32
+    
     # Create Hadamard matrix
     if hidden_size & (hidden_size - 1) == 0:
         # Power of 2 - can use efficient Hadamard
-        H = torch.ones(1, 1, device=device)
+        H = torch.ones(1, 1, device=device, dtype=dtype)
         while H.shape[0] < hidden_size:
             H = torch.cat([
                 torch.cat([H, H], dim=1),
@@ -125,10 +132,11 @@ def create_linearpatch_matrix(
             ], dim=0)
     else:
         # Use identity matrix if not power of 2
-        H = torch.eye(hidden_size, device=device)
+        H = torch.eye(hidden_size, device=device, dtype=dtype)
     
-    # Create diagonal scaling matrix
-    D = torch.diag(channel_scaling.to(device))
+    # Create diagonal scaling matrix with consistent dtype
+    channel_scaling = channel_scaling.to(device=device, dtype=dtype)
+    D = torch.diag(channel_scaling)
     
     # Combine: P = H^T @ D @ H
     if hidden_size & (hidden_size - 1) == 0:
@@ -321,19 +329,24 @@ def linearpatch_compression(
     # Process calibration data with memory management
     processed_batches = 0
     for batch in tqdm(dataloader, desc=f"{Fore.BLUE}LinearPatch Calibration{Fore.RESET}"):
-        if processed_batches >= 16:  # Limit total batches for memory
-            if debug_mode:
-                print(f"{Fore.YELLOW}[DEBUG] Stopping at {processed_batches} batches to preserve memory{Fore.RESET}")
-            break
+        # if processed_batches >= 16:  # Limit total batches for memory
+        #     if debug_mode:
+        #         print(f"{Fore.YELLOW}[DEBUG] Stopping at {processed_batches} batches to preserve memory{Fore.RESET}")
+        #     break
             
+        # Fixed tokenization to ensure consistent sequence lengths
         inputs = tokenizer(
             batch,
             return_tensors="pt",
-            padding="longest",
+            padding="max_length",  # Changed from "longest" to "max_length"
             max_length=min(max_length, 512),  # Shorter sequences for memory
             truncation=True
         )
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
+        
+        # Verify input shape consistency
+        if debug_mode and processed_batches < 3:
+            print(f"{Fore.CYAN}[DEBUG] Batch {processed_batches} input shape: {inputs['input_ids'].shape}{Fore.RESET}")
         
         with torch.no_grad():
             _ = model(**inputs)
@@ -353,7 +366,10 @@ def linearpatch_compression(
     if debug_mode:
         print(f"{Fore.GREEN}[DEBUG] Collected {len(activations_before)} before activations, {len(activations_after)} after activations{Fore.RESET}")
         if len(activations_before) > 0:
-            print(f"{Fore.GREEN}[DEBUG] Sample activation shapes: before={activations_before[0].shape}, after={activations_after[0].shape}{Fore.RESET}")
+            print(f"{Fore.GREEN}[DEBUG] Sample activation shapes:")
+            for i, (before, after) in enumerate(zip(activations_before[:3], activations_after[:3])):
+                print(f"  Batch {i}: before={before.shape}, after={after.shape}")
+            print(f"{Fore.RESET}")
     
     # Check if we have enough data
     if len(activations_before) == 0 or len(activations_after) == 0:
@@ -368,20 +384,45 @@ def linearpatch_compression(
         activations_before = activations_before[:min_len]
         activations_after = activations_after[:min_len]
     
-    # Concatenate activations efficiently
+    # Concatenate activations efficiently with shape validation
     if debug_mode:
         print(f"{Fore.YELLOW}[DEBUG] Concatenating {len(activations_before)} activation tensors...{Fore.RESET}")
     
     try:
-        acts_before = torch.cat(activations_before, dim=0).view(-1, model.config.hidden_size)
-        acts_after = torch.cat(activations_after, dim=0).view(-1, model.config.hidden_size)
+        # Validate shapes before concatenation
+        expected_seq_len = activations_before[0].shape[1]
+        expected_hidden_size = activations_before[0].shape[2]
+        
+        # Filter out tensors with different sequence lengths
+        valid_before = []
+        valid_after = []
+        
+        for i, (before, after) in enumerate(zip(activations_before, activations_after)):
+            if before.shape[1] == expected_seq_len and after.shape[1] == expected_seq_len:
+                valid_before.append(before)
+                valid_after.append(after)
+            elif debug_mode:
+                print(f"{Fore.YELLOW}[DEBUG] Skipping batch {i} due to shape mismatch: "
+                     f"before={before.shape}, after={after.shape} (expected seq_len={expected_seq_len}){Fore.RESET}")
+        
+        if len(valid_before) == 0:
+            raise RuntimeError("No valid activations after shape filtering!")
+        
+        if debug_mode:
+            print(f"{Fore.GREEN}[DEBUG] Using {len(valid_before)}/{len(activations_before)} batches after shape filtering{Fore.RESET}")
+        
+        acts_before = torch.cat(valid_before, dim=0).view(-1, expected_hidden_size)
+        acts_after = torch.cat(valid_after, dim=0).view(-1, expected_hidden_size)
+        
     except RuntimeError as e:
         if debug_mode:
-            print(f"{Fore.RED}[DEBUG] Error concatenating activations:")
-            print(f"  Before shapes: {[act.shape for act in activations_before[:3]]}")
-            print(f"  After shapes: {[act.shape for act in activations_after[:3]]}")
+            print(f"{Fore.RED}[DEBUG] Detailed error information:")
+            print(f"  Expected sequence length: {expected_seq_len}")
+            print(f"  Expected hidden size: {expected_hidden_size}")
+            print(f"  All before shapes: {[act.shape for act in activations_before]}")
+            print(f"  All after shapes: {[act.shape for act in activations_after]}")
             print(f"  Model hidden size: {model.config.hidden_size}{Fore.RESET}")
-        raise RuntimeError(f"Failed to concatenate activations. Check tensor shapes and model architecture.") from e
+        raise RuntimeError(f"Failed to concatenate activations. Shape inconsistency detected.") from e
     
     if debug_mode:
         print(f"{Fore.GREEN}[DEBUG] Activation shapes: before={acts_before.shape}, after={acts_after.shape}{Fore.RESET}")
@@ -470,12 +511,32 @@ def linearpatch_compression(
     else:
         target_layer = model.model.layers[target_layer_idx].mlp.down_proj
     
-    # Merge LinearPatch with existing weights
-    original_weight = target_layer.weight.data.to(torch.float64)
-    enhanced_weight = linearpatch_matrix.cpu().to(torch.float64) @ original_weight.to(torch.float64)
+    if debug_mode:
+        print(f"{Fore.YELLOW}[DEBUG] Applying LinearPatch to layer {target_layer_idx}")
+        print(f"  - Original weight shape: {target_layer.weight.shape}")
+        print(f"  - Original weight dtype: {target_layer.weight.dtype}")
+        print(f"  - LinearPatch matrix shape: {linearpatch_matrix.shape}")
+        print(f"  - LinearPatch matrix dtype: {linearpatch_matrix.dtype}{Fore.RESET}")
     
+    # Merge LinearPatch with existing weights (ensure dtype consistency)
+    original_weight = target_layer.weight.data.to(torch.float32)  # Convert to float32
+    linearpatch_cpu = linearpatch_matrix.cpu().to(torch.float32)   # Ensure float32
+    
+    enhanced_weight = linearpatch_cpu @ original_weight.cpu()  # Compute on CPU
+    
+    # Convert back to original dtype for storage
+    target_dtype = target_layer.weight.dtype
+    enhanced_weight = enhanced_weight.to(target_dtype)
+    
+    if debug_mode:
+        print(f"{Fore.GREEN}[DEBUG] Weight transformation completed")
+        print(f"  - Enhanced weight shape: {enhanced_weight.shape}")
+        print(f"  - Enhanced weight dtype: {enhanced_weight.dtype}")
+        print(f"  - Weight norm ratio: {torch.norm(enhanced_weight) / torch.norm(target_layer.weight.data):.3f}{Fore.RESET}")
+    
+    # Load the new weight
     target_layer.load_state_dict({
-        "weight": enhanced_weight.to(torch.bfloat16)
+        "weight": enhanced_weight
     })
     
     # Save compressed model
@@ -552,7 +613,64 @@ def apply_knowledge_distillation_memory_efficient(
     original_weight = original_layer.weight.data.clone()
     
     if debug_mode:
-        print(f"{Fore.CYAN}[DEBUG KD] Target layer: {start_id - num_layer - 1}, Original weight shape: {original_weight.shape}{Fore.RESET}")
+        print(f"{Fore.CYAN}[DEBUG KD] Target layer: {start_id - num_layer - 1}")
+        print(f"  - Original weight shape: {original_weight.shape}")
+        print(f"  - Original weight dtype: {original_weight.dtype}")
+        print(f"  - LinearPatch matrix shape: {linearpatch_matrix.shape}")
+        
+        # Check if weight shape is reasonable
+        if len(original_weight.shape) != 2:
+            print(f"{Fore.RED}[DEBUG KD] WARNING: Weight has unexpected shape! Expected 2D matrix.{Fore.RESET}")
+        
+        expected_shapes = [
+            (4096, 4096),    # Standard down_proj for LLaMA
+            (14336, 4096),   # Alternate down_proj size
+            (11008, 4096)    # Another common size
+        ]
+        
+        if original_weight.shape not in expected_shapes:
+            print(f"{Fore.RED}[DEBUG KD] WARNING: Unexpected weight shape {original_weight.shape}")
+            print(f"Expected one of: {expected_shapes}{Fore.RESET}")
+            
+            # If weight is flattened, try to reshape it
+            if len(original_weight.shape) == 2 and original_weight.shape[1] == 1:
+                total_params = original_weight.shape[0]
+                # Try to find a reasonable 2D shape
+                import math
+                sqrt_params = int(math.sqrt(total_params))
+                if sqrt_params * sqrt_params == total_params:
+                    print(f"{Fore.YELLOW}[DEBUG KD] Attempting to reshape flattened weight to {sqrt_params}x{sqrt_params}{Fore.RESET}")
+                    original_weight = original_weight.view(sqrt_params, sqrt_params)
+                else:
+                    # Try standard LLaMA sizes
+                    if total_params == 4096 * 11008:
+                        print(f"{Fore.YELLOW}[DEBUG KD] Reshaping to standard LLaMA down_proj: 11008x4096{Fore.RESET}")
+                        original_weight = original_weight.view(11008, 4096)
+                    else:
+                        raise RuntimeError(f"Cannot handle weight shape {original_weight.shape}. "
+                                         f"Expected 2D weight matrix, got {len(original_weight.shape)}D with shape {original_weight.shape}")
+        
+        print(f"{Fore.GREEN}[DEBUG KD] Final weight shape: {original_weight.shape}{Fore.RESET}")
+    
+    # Verify that LinearPatch matrix is compatible
+    patch_out_dim, patch_in_dim = linearpatch_matrix.shape
+    weight_out_dim, weight_in_dim = original_weight.shape
+    
+    if patch_in_dim != weight_in_dim:
+        if debug_mode:
+            print(f"{Fore.RED}[DEBUG KD] Dimension mismatch!")
+            print(f"  LinearPatch matrix: {linearpatch_matrix.shape}")
+            print(f"  Weight matrix: {original_weight.shape}")
+            print(f"  Cannot multiply {patch_out_dim}x{patch_in_dim} @ {weight_out_dim}x{weight_in_dim}{Fore.RESET}")
+        
+        # Try to adjust LinearPatch matrix if possible
+        if patch_out_dim == weight_in_dim and patch_in_dim == weight_in_dim:
+            # LinearPatch is square and matches input dimension - this is correct
+            pass
+        else:
+            raise RuntimeError(f"LinearPatch matrix {linearpatch_matrix.shape} is incompatible with "
+                             f"weight matrix {original_weight.shape}. Expected LinearPatch to be "
+                             f"{weight_in_dim}x{weight_in_dim} to transform the input dimension.")
     
     model.eval()  # Keep in eval mode for KD
     
@@ -593,7 +711,23 @@ def apply_knowledge_distillation_memory_efficient(
                 
                 # Student outputs (with current LinearPatch)
                 patch_param_device = patch_param.to(model.device)
-                enhanced_weight = patch_param_device @ original_weight.to(model.device)
+                original_weight_device = original_weight.to(model.device)
+                
+                # Apply LinearPatch transformation
+                # LinearPatch transforms the INPUT to the layer, so we modify the weight differently
+                if patch_param_device.shape[1] == original_weight_device.shape[1]:
+                    # Standard case: transform input dimension
+                    enhanced_weight = original_weight_device @ patch_param_device.T
+                else:
+                    # Alternative: transform output dimension  
+                    enhanced_weight = patch_param_device @ original_weight_device
+                
+                if debug_mode and batch_idx == 0:
+                    print(f"{Fore.CYAN}[DEBUG KD] Weight transformation:")
+                    print(f"  - Original: {original_weight_device.shape}")
+                    print(f"  - Patch: {patch_param_device.shape}") 
+                    print(f"  - Enhanced: {enhanced_weight.shape}{Fore.RESET}")
+                
                 original_layer.weight.data = enhanced_weight.to(original_layer.weight.dtype)
                 
                 student_outputs = model(**inputs, output_hidden_states=False)
