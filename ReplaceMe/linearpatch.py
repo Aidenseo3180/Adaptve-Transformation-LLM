@@ -504,7 +504,7 @@ def linearpatch_compression(
     # Truncate model (remove target blocks)
     model = truncate_model(model, start_id - num_layer, end_id - num_layer)
     
-    # Find the optimal target layer (same logic as in KD)
+    # Find the optimal target layer - CORRECTED VERSION
     target_layer_idx = start_id - num_layer - 1
     
     if debug_mode:
@@ -561,39 +561,22 @@ def linearpatch_compression(
                 print(f"  ! No perfect match found, falling back to down_proj")
             target_layer = mlp.down_proj
             target_layer_name = "down_proj"
-    
-    # Apply LinearPatch to the layer before removed blocks
-    target_layer_idx = start_id - num_layer - 1
-    if 'falcon' in model_path.lower():
-        target_layer = model.transformer.h[target_layer_idx].mlp.dense_4h_to_h
-    else:
-        target_layer = model.model.layers[target_layer_idx].mlp.down_proj
-    
-    if debug_mode:
-        print(f"{Fore.YELLOW}[DEBUG] Applying LinearPatch to layer {target_layer_idx}")
-        print(f"  - Original weight shape: {target_layer.weight.shape}")
-        print(f"  - Original weight dtype: {target_layer.weight.dtype}")
-        print(f"  - LinearPatch matrix shape: {linearpatch_matrix.shape}")
-        print(f"  - LinearPatch matrix dtype: {linearpatch_matrix.dtype}{Fore.RESET}")
 
     if debug_mode:
         print(f"{Fore.RED}[VERIFICATION] Detailed weight analysis:")
         
-        # 실제 gate_proj 구조 확인
-        layer_21 = model.model.layers[target_layer_idx]
-        gate_proj = layer_21.mlp.gate_proj
-        
-        print(f"  - gate_proj object: {type(gate_proj)}")
-        print(f"  - gate_proj.weight shape: {gate_proj.weight.shape}")
-        print(f"  - gate_proj.weight.data shape: {gate_proj.weight.data.shape}")
+        # 실제 target layer 구조 확인
+        print(f"  - target_layer object: {type(target_layer)}")
+        print(f"  - target_layer.weight shape: {target_layer.weight.shape}")
+        print(f"  - target_layer.weight.data shape: {target_layer.weight.data.shape}")
         
         # 실제 forward pass 테스트
-        test_input = torch.randn(1, 4096, device=gate_proj.weight.device, dtype=gate_proj.weight.dtype)
-        test_output = gate_proj(test_input)
+        test_input = torch.randn(1, 4096, device=target_layer.weight.device, dtype=target_layer.weight.dtype)
+        test_output = target_layer(test_input)
         print(f"  - Forward pass: {test_input.shape} -> {test_output.shape}")
         
         # LinearPatch 변환 전후 비교
-        original_weight = gate_proj.weight.data.clone()
+        original_weight = target_layer.weight.data.clone()
         print(f"  - Original weight shape: {original_weight.shape}")
         print(f"  - Original weight norm: {torch.norm(original_weight):.3f}")
         
@@ -604,62 +587,52 @@ def linearpatch_compression(
         
         print(f"{Fore.RESET}")
     
-    # Merge LinearPatch with existing weights (ensure dtype consistency)
-    original_weight = target_layer.weight.data.to(torch.float32)  # Convert to float32
-    linearpatch_cpu = linearpatch_matrix.cpu().to(torch.float32)   # Ensure float32
-    
-    # 개선된 변환 로직
-    original_weight_cpu = original_weight.cpu().to(torch.float32)
+    # CORRECTED 변환 로직 - 실제 target_layer.weight 사용
+    original_weight_cpu = target_layer.weight.data.cpu().to(torch.float32)  # 실제 target layer weight 사용
     linearpatch_cpu = linearpatch_matrix.cpu().to(torch.float32)
 
-    print(f"{Fore.YELLOW}[DEBUG] Matrix multiplication setup:")
-    print(f"  - Original weight: {original_weight_cpu.shape}")
-    print(f"  - LinearPatch: {linearpatch_cpu.shape}{Fore.RESET}")
+    if debug_mode:
+        print(f"{Fore.YELLOW}[DEBUG] CORRECTED Matrix multiplication setup:")
+        print(f"  - Actual weight shape: {original_weight_cpu.shape}")
+        print(f"  - LinearPatch shape: {linearpatch_cpu.shape}")
+        print(f"  - Weight norm: {torch.norm(original_weight_cpu):.3f}{Fore.RESET}")
 
-    # 차원 호환성에 따른 변환 방식 선택
-    if linearpatch_cpu.shape[1] == original_weight_cpu.shape[0]:
-        # Case 1: LP @ weight (출력 변환)
-        enhanced_weight = linearpatch_cpu @ original_weight_cpu
-        print(f"{Fore.GREEN}[DEBUG] Using output transformation: LP @ weight{Fore.RESET}")
-        
-    elif original_weight_cpu.shape[1] == linearpatch_cpu.shape[0]:
-        # Case 2: weight @ LP (입력 변환)
+    # 올바른 변환 방식 선택
+    if original_weight_cpu.shape[1] == linearpatch_cpu.shape[0]:
+        # Case: weight @ LP (입력 변환) - 이것이 올바른 방식
         enhanced_weight = original_weight_cpu @ linearpatch_cpu
-        print(f"{Fore.GREEN}[DEBUG] Using input transformation: weight @ LP{Fore.RESET}")
+        print(f"{Fore.GREEN}[DEBUG] Using CORRECT input transformation: weight @ LP")
+        print(f"  Result shape: {enhanced_weight.shape}{Fore.RESET}")
+        
+    elif linearpatch_cpu.shape[1] == original_weight_cpu.shape[0]:
+        # Case: LP @ weight (출력 변환)
+        enhanced_weight = linearpatch_cpu @ original_weight_cpu
+        print(f"{Fore.GREEN}[DEBUG] Using output transformation: LP @ weight")
+        print(f"  Result shape: {enhanced_weight.shape}{Fore.RESET}")
         
     else:
-        # Case 3: 호환되지 않는 경우 - transpose 시도
-        if linearpatch_cpu.shape[1] == original_weight_cpu.shape[1]:
-            enhanced_weight = linearpatch_cpu @ original_weight_cpu.T
-            enhanced_weight = enhanced_weight.T
-            print(f"{Fore.GREEN}[DEBUG] Using transpose transformation: (LP @ weight.T).T{Fore.RESET}")
-        else:
-            print(f"{Fore.RED}[ERROR] Matrix dimensions incompatible!")
-            print(f"  LP: {linearpatch_cpu.shape}, weight: {original_weight_cpu.shape}{Fore.RESET}")
-            # Fallback: identity transformation
-            enhanced_weight = original_weight_cpu
+        print(f"{Fore.RED}[ERROR] Matrix dimensions incompatible!")
+        print(f"  LP: {linearpatch_cpu.shape}, weight: {original_weight_cpu.shape}{Fore.RESET}")
+        enhanced_weight = original_weight_cpu  # Fallback
 
     # Norm 보존
     original_norm = torch.norm(original_weight_cpu)
     enhanced_norm = torch.norm(enhanced_weight)
     if enhanced_norm > 0:
         enhanced_weight = enhanced_weight * (original_norm / enhanced_norm)
-        print(f"{Fore.GREEN}[DEBUG] Norm preserved: {original_norm:.3f} -> {torch.norm(enhanced_weight):.3f}{Fore.RESET}")
 
-    # dtype 복원
-    target_dtype = target_layer.weight.dtype
-    enhanced_weight = enhanced_weight.to(target_dtype)
+    if debug_mode:
+        print(f"{Fore.GREEN}[DEBUG] Norm preserved: {original_norm:.3f} -> {torch.norm(enhanced_weight):.3f}")
+        print(f"  Final enhanced shape: {enhanced_weight.shape}{Fore.RESET}")
+
+    # dtype 복원하여 적용
+    target_layer.weight.data = enhanced_weight.to(target_layer.weight.dtype)
     
     if debug_mode:
         print(f"{Fore.GREEN}[DEBUG] Weight transformation completed")
-        print(f"  - Enhanced weight shape: {enhanced_weight.shape}")
-        print(f"  - Enhanced weight dtype: {enhanced_weight.dtype}")
-        print(f"  - Weight norm ratio: {torch.norm(enhanced_weight) / torch.norm(target_layer.weight.data):.3f}{Fore.RESET}")
-    
-    # Load the new weight
-    target_layer.load_state_dict({
-        "weight": enhanced_weight
-    })
+        print(f"  - Enhanced weight shape: {target_layer.weight.data.shape}")
+        print(f"  - Enhanced weight dtype: {target_layer.weight.dtype}")
+        print(f"  - Weight norm ratio: {torch.norm(target_layer.weight.data) / original_norm:.3f}{Fore.RESET}")
     
     # Save compressed model
     if save_path is None:
