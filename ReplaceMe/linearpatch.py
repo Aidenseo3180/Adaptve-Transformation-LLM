@@ -575,14 +575,78 @@ def linearpatch_compression(
         print(f"  - Original weight dtype: {target_layer.weight.dtype}")
         print(f"  - LinearPatch matrix shape: {linearpatch_matrix.shape}")
         print(f"  - LinearPatch matrix dtype: {linearpatch_matrix.dtype}{Fore.RESET}")
+
+    if debug_mode:
+        print(f"{Fore.RED}[VERIFICATION] Detailed weight analysis:")
+        
+        # 실제 gate_proj 구조 확인
+        layer_21 = model.model.layers[target_layer_idx]
+        gate_proj = layer_21.mlp.gate_proj
+        
+        print(f"  - gate_proj object: {type(gate_proj)}")
+        print(f"  - gate_proj.weight shape: {gate_proj.weight.shape}")
+        print(f"  - gate_proj.weight.data shape: {gate_proj.weight.data.shape}")
+        
+        # 실제 forward pass 테스트
+        test_input = torch.randn(1, 4096, device=gate_proj.weight.device, dtype=gate_proj.weight.dtype)
+        test_output = gate_proj(test_input)
+        print(f"  - Forward pass: {test_input.shape} -> {test_output.shape}")
+        
+        # LinearPatch 변환 전후 비교
+        original_weight = gate_proj.weight.data.clone()
+        print(f"  - Original weight shape: {original_weight.shape}")
+        print(f"  - Original weight norm: {torch.norm(original_weight):.3f}")
+        
+        # Matrix multiplication 호환성 체크
+        print(f"  - LinearPatch matrix: {linearpatch_matrix.shape}")
+        print(f"  - Can multiply LP @ weight? {linearpatch_matrix.shape[1] == original_weight.shape[0]}")
+        print(f"  - Can multiply weight @ LP? {original_weight.shape[1] == linearpatch_matrix.shape[0]}")
+        
+        print(f"{Fore.RESET}")
     
     # Merge LinearPatch with existing weights (ensure dtype consistency)
     original_weight = target_layer.weight.data.to(torch.float32)  # Convert to float32
     linearpatch_cpu = linearpatch_matrix.cpu().to(torch.float32)   # Ensure float32
     
-    enhanced_weight = linearpatch_cpu @ original_weight.cpu()  # Compute on CPU
-    
-    # Convert back to original dtype for storage
+    # 개선된 변환 로직
+    original_weight_cpu = original_weight.cpu().to(torch.float32)
+    linearpatch_cpu = linearpatch_matrix.cpu().to(torch.float32)
+
+    print(f"{Fore.YELLOW}[DEBUG] Matrix multiplication setup:")
+    print(f"  - Original weight: {original_weight_cpu.shape}")
+    print(f"  - LinearPatch: {linearpatch_cpu.shape}{Fore.RESET}")
+
+    # 차원 호환성에 따른 변환 방식 선택
+    if linearpatch_cpu.shape[1] == original_weight_cpu.shape[0]:
+        # Case 1: LP @ weight (출력 변환)
+        enhanced_weight = linearpatch_cpu @ original_weight_cpu
+        print(f"{Fore.GREEN}[DEBUG] Using output transformation: LP @ weight{Fore.RESET}")
+        
+    elif original_weight_cpu.shape[1] == linearpatch_cpu.shape[0]:
+        # Case 2: weight @ LP (입력 변환)
+        enhanced_weight = original_weight_cpu @ linearpatch_cpu
+        print(f"{Fore.GREEN}[DEBUG] Using input transformation: weight @ LP{Fore.RESET}")
+        
+    else:
+        # Case 3: 호환되지 않는 경우 - transpose 시도
+        if linearpatch_cpu.shape[1] == original_weight_cpu.shape[1]:
+            enhanced_weight = linearpatch_cpu @ original_weight_cpu.T
+            enhanced_weight = enhanced_weight.T
+            print(f"{Fore.GREEN}[DEBUG] Using transpose transformation: (LP @ weight.T).T{Fore.RESET}")
+        else:
+            print(f"{Fore.RED}[ERROR] Matrix dimensions incompatible!")
+            print(f"  LP: {linearpatch_cpu.shape}, weight: {original_weight_cpu.shape}{Fore.RESET}")
+            # Fallback: identity transformation
+            enhanced_weight = original_weight_cpu
+
+    # Norm 보존
+    original_norm = torch.norm(original_weight_cpu)
+    enhanced_norm = torch.norm(enhanced_weight)
+    if enhanced_norm > 0:
+        enhanced_weight = enhanced_weight * (original_norm / enhanced_norm)
+        print(f"{Fore.GREEN}[DEBUG] Norm preserved: {original_norm:.3f} -> {torch.norm(enhanced_weight):.3f}{Fore.RESET}")
+
+    # dtype 복원
     target_dtype = target_layer.weight.dtype
     enhanced_weight = enhanced_weight.to(target_dtype)
     
