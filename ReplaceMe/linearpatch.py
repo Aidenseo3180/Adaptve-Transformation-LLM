@@ -98,7 +98,7 @@ def compute_channel_scaling(
     scaling = mag_before / (mag_after + epsilon)
     
     # Clamp to reasonable range
-    scaling = torch.clamp(scaling, min=0.1, max=10.0)
+    scaling = torch.clamp(scaling, min=0.8, max=1.2)
     
     return scaling
 
