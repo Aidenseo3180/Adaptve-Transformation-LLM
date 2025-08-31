@@ -1,35 +1,26 @@
-# LinearPatch Configuration for Enhanced LLM Compression
-# This config achieves better perplexity preservation than standard ReplaceMe
-
-method: "linearpatch"
+method: "residual_linear"
 model_path: "meta-llama/Meta-Llama-3-8B-Instruct"
-
-# Dataset configuration (optimized for better performance)
-dataset: "Open-Orca/SlimOrca" # "HuggingFaceFW/fineweb"  # RefinedWeb performs better than SlimOrca for perplexity
+dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
-dataset_subset: "train"
-dataset_size: 2000  # Smaller but more effective calibration set
-
-# Model processing parameters
 batch_size: 4
 max_length: 512
-use_4bit: False # True
-save_path: null
-
-# Layer selection parameters
 layers_to_skip: 4
-num_A: 1
-merge_consecutive: False
-distances_path: null
-
-# LinearPatch specific parameters
-knowledge_distillation: False  # Enable KD for better performance
-kd_temperature: 4.0          # Temperature for soft targets
-kd_alpha: 0.3               # Weight for KD loss (0.3 KD + 0.7 regularization)
-enhanced_selection: True     # Use multi-metric layer selection
-
-# Advanced options
-calibration_size_override: 256  # Override dataset_size for calibration
+dataset_size: 2000
+dataset_subset: "train"
+use_4bit: False
+save_path: null
 min_distance_layer: 20
+save_transform_only: True
+solver: "adam"
+loss: "cosine" # cosine, mse are supported
+distances_path: null
+num_A: 1
+merge_consecutive: False 
 
-debug_mode: True               # LinearPatch 기본 효과만 확인
+# Residual Linear Approximation specific parameters
+num_residual_layers: 3  # Number of residual transformation layers to learn
+# Layer 1: Basic transformation
+# Layer 2: Attention-aware refinement  
+# Layer 3: Context-specific adjustments
+
+# Evaluation settings (optional)
