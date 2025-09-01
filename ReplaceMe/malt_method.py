@@ -58,7 +58,7 @@ def analyze_gate_importance(
     
     def gate_hook(module, input, output):
         """Hook to capture gate projection outputs"""
-        gate_activations.append(output.detach().cpu())
+        gate_activations.append(output.detach().to(torch.bfloat16).cpu())  # Convert to bfloat16
     
     # Register hooks for gate projections in target layers
     hooks = []
@@ -73,6 +73,8 @@ def analyze_gate_importance(
             print(f"Warning: Layer {layer_idx} does not have gate_proj")
     
     # Collect gate activations
+    all_gate_activations = []  # Store all activations for proper analysis
+    
     with torch.no_grad():
         for batch_idx, batch in enumerate(tqdm(dataloader, desc="Collecting gate activations")):
             if batch_idx >= 10:  # Limit samples for efficiency
@@ -95,26 +97,31 @@ def analyze_gate_importance(
             
             # Process collected activations
             if gate_activations:
-                # Average across layers and tokens
-                batch_gate_avg = torch.stack(gate_activations).mean(dim=[0, 1])
-                if batch_idx == 0:
-                    accumulated_gates = batch_gate_avg
-                    accumulated_variance = batch_gate_avg ** 2
-                else:
-                    accumulated_gates += batch_gate_avg
-                    accumulated_variance += batch_gate_avg ** 2
+                # Stack activations from all layers and flatten
+                batch_activations = torch.stack(gate_activations)  # [num_layers, batch_size, seq_len, hidden_size]
+                batch_flat = batch_activations.view(-1, batch_activations.shape[-1])  # [total_tokens, hidden_size]
+                all_gate_activations.append(batch_flat.cpu())
+                print(f"Batch {batch_idx}: collected {batch_flat.shape[0]} tokens")
+    
+    # Concatenate all activations and compute statistics
+    if all_gate_activations:
+        all_gates = torch.cat(all_gate_activations, dim=0)  # [total_tokens, hidden_size]
+        print(f"Total gate activations collected: {all_gates.shape}")
+        
+        # Calculate importance scores across all tokens
+        mean_activation = all_gates.mean(dim=0)  # [hidden_size]
+        variance = all_gates.var(dim=0)  # [hidden_size]
     
     # Remove hooks
     for hook in hooks:
         hook.remove()
     
-    # Calculate importance scores
-    mean_activation = accumulated_gates / (batch_idx + 1)
-    variance = (accumulated_variance / (batch_idx + 1)) - mean_activation ** 2
-    
-    # Importance = variance * absolute mean (captures both diversity and magnitude)
-    gate_importance = variance * torch.abs(mean_activation)
-    gate_importance = gate_importance / gate_importance.max()  # Normalize
+        # Importance = variance * absolute mean (captures both diversity and magnitude)
+        gate_importance = variance * torch.abs(mean_activation)
+        gate_importance = gate_importance / gate_importance.max()  # Normalize
+    else:
+        print("Warning: No gate activations collected, using uniform importance")
+        gate_importance = torch.ones(hidden_size)
     
     print(f"Gate importance analysis complete. Max importance: {gate_importance.max():.4f}")
     print(f"Mean importance: {gate_importance.mean():.4f}")
@@ -149,15 +156,15 @@ def coupled_optimization(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     hidden_size = up_activations.shape[-1]
     
-    # Initialize transformation matrices
-    T_up = torch.eye(hidden_size, requires_grad=True, device=device, dtype=torch.float32)
-    T_down = torch.eye(hidden_size, requires_grad=True, device=device, dtype=torch.float32)
+    # Initialize transformation matrices in bfloat16
+    T_up = torch.eye(hidden_size, requires_grad=True, device=device, dtype=torch.bfloat16)
+    T_down = torch.eye(hidden_size, requires_grad=True, device=device, dtype=torch.bfloat16)
     
-    # Move data to device
-    up_activations = up_activations.to(device).float()
-    down_activations = down_activations.to(device).float()
-    targets = targets.to(device).float()
-    gate_importance = gate_importance.to(device).float()
+    # Move data to device and convert to bfloat16
+    up_activations = up_activations.to(device).to(torch.bfloat16)
+    down_activations = down_activations.to(device).to(torch.bfloat16)
+    targets = targets.to(device).to(torch.bfloat16)
+    gate_importance = gate_importance.to(device).to(torch.bfloat16)
     
     # Optimizers
     optimizer_up = torch.optim.Adam([T_up], lr=lr)
@@ -177,7 +184,7 @@ def coupled_optimization(
         """Consistency regularization between transformations"""
         # Encourage T_up and T_down to be approximately inverse-related
         product = T_up.T @ T_down
-        identity = torch.eye(hidden_size, device=device)
+        identity = torch.eye(hidden_size, device=device, dtype=torch.bfloat16)
         return torch.norm(product - identity, p='fro') ** 2
     
     print("Phase 1: Alternating optimization")
@@ -329,7 +336,7 @@ def malt_method(
     def save_mlp_components(name, component_type):
         """Hook to save different MLP component outputs"""
         def hook(module, input, output):
-            mlp_components[f'{name}_{component_type}'] = output.detach()
+            mlp_components[f'{name}_{component_type}'] = output.detach().to(torch.bfloat16)  # Convert to bfloat16
         return hook
     
     # Register hooks for all MLP components
@@ -378,7 +385,7 @@ def malt_method(
             
             # Get target activation (what we want to approximate)
             target_hidden = hidden_states[end_id - num_layer - 1]
-            target_reshaped = target_hidden.view(-1, hidden_size)
+            target_reshaped = target_hidden.view(-1, hidden_size).to(torch.bfloat16)
             
             # Get source activations
             if f'layer_{start_id}_gate' in mlp_components:
@@ -548,12 +555,12 @@ def learn_single_transformation(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     hidden_size = source_activations.shape[-1]
     
-    T = torch.eye(hidden_size, requires_grad=True, device=device, dtype=torch.float32)
+    T = torch.eye(hidden_size, requires_grad=True, device=device, dtype=torch.bfloat16)
     optimizer = torch.optim.Adam([T], lr=lr)
     
-    source_activations = source_activations.to(device).float()
-    target_activations = target_activations.to(device).float()
-    gate_importance = gate_importance.to(device).float()
+    source_activations = source_activations.to(device).to(torch.bfloat16)
+    target_activations = target_activations.to(device).to(torch.bfloat16)
+    gate_importance = gate_importance.to(device).to(torch.bfloat16)
     
     def weighted_cosine_loss(pred, target, weights):
         pred_norm = pred / (pred.norm(dim=1, keepdim=True) + 1e-8)
@@ -573,4 +580,3 @@ def learn_single_transformation(
     
     print("Single transformation learning complete")
     return T.detach()
-
