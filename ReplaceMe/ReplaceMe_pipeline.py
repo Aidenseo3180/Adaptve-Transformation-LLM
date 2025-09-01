@@ -11,9 +11,10 @@ from .cosine_dist import cosine_dist
 from .distance import profile_distances
 from .evaluator import evaluator
 from .low_rank_replace import low_rank_replace  # New import
-from .gate_aware_methods import gate_aware_coupled_optimization
 
 from .utils import seed_all, select_non_overlapping_blocks
+
+from .gate_aware_coupled import gate_aware_coupled_method
 
 # Initialize colorama for Windows compatibility
 init(autoreset=True)
@@ -62,45 +63,20 @@ def ReplaceMe_pipeline(config):
             filtered_config["model_path"] = path
 
 
-    elif config["method"] == "gate_aware_coupled":
-        print(f"{Fore.CYAN}🎯 Using Gate-Aware Coupled Optimization Method{Fore.RESET}")
+    elif config["method"] == "gaco":  # Gate-Aware Coupled Optimization
+        print(f"[Pipeline] Using Gate-Aware Coupled Optimization (GACO) method")
+        signature = inspect.signature(gate_aware_coupled_method)
+        filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
-        # Load distances and select blocks
-        if config['distances_path'] is None:
-            signature = inspect.signature(profile_distances)
-            filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-            profile_distances(**filtered_config)
-            config['distances_path'] = "./distances.pth"
+        print(f"[Pipeline] GACO config parameters: {list(filtered_config.keys())}")
+        print(f"[Pipeline] Model path: {filtered_config.get('model_path', 'not specified')}")
+        print(f"[Pipeline] Dataset: {filtered_config.get('dataset', 'not specified')}")
+        print(f"[Pipeline] Layers to skip: {filtered_config.get('layers_to_skip', 'not specified')}")
         
-        # Select blocks
-        average_distances = torch.load(config['distances_path'], weights_only=False)
-        selected_blocks = select_non_overlapping_blocks(
-            average_distances,
-            config['layers_to_skip'],
-            num_blocks=config['num_A'],
-            merge_consecutive=config['merge_consecutive']
-        )
+        # Execute GACO method
+        path = gate_aware_coupled_method(**filtered_config)
+        print(f"[Pipeline] GACO method complete, output path: {path}")
         
-        start_ids = sorted([x[0] for x in selected_blocks])
-        end_ids = sorted([x[1] for x in selected_blocks])
-        num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
-        num_layers = [sum(num_layers[:i]) for i in range(len(start_ids)+1)]
-        
-        print(f"   📊 Selected {len(selected_blocks)} blocks: {selected_blocks}")
-        
-        # Process each block
-        for i in range(len(selected_blocks)):
-            print(f"\n{Fore.YELLOW}🔄 Processing block {i+1}/{len(selected_blocks)}{Fore.RESET}")
-            
-            path = gate_aware_coupled_optimization(
-                **config,
-                start_id=start_ids[i],
-                end_id=end_ids[i],
-                num_layer=num_layers[i]
-            )
-            config["model_path"] = path
-            
-            print(f"   ✅ Block {i+1} completed!")
 
 
     else:  # Original cosine/adam methods
@@ -128,10 +104,10 @@ def ReplaceMe_pipeline(config):
             filtered_config["model_path"] = path
     
     # Evaluate using the updated configuration
-    signature = inspect.signature(evaluator)
-    filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-    filtered_config["model_path"] = path
-    evaluator(**filtered_config)
+    # signature = inspect.signature(evaluator)
+    # filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
+    # filtered_config["model_path"] = path
+    # evaluator(**filtered_config)
 
 def read_config(config_path: str):
     # Read and return the YAML configuration

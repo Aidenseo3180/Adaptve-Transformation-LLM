@@ -1,4 +1,6 @@
-method: "gate_aware_coupled"
+# Gate-Aware Coupled Optimization (GACO) Configuration
+
+method: "gaco"  # Use our new gate-aware coupled optimization method
 model_path: "meta-llama/Meta-Llama-3-8B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
@@ -10,8 +12,21 @@ dataset_subset: "train"
 use_4bit: True
 save_path: null
 min_distance_layer: 20
-distances_path: null
+token: null  # Add your HuggingFace token here if needed
+
+# Distance computation parameters
+distances_path: null  # Will auto-generate if not provided
 num_A: 1
 merge_consecutive: False
-consistency_weight: 0.1
-importance_weight: 1.0
+
+# GACO-specific parameters (for future phases)
+gate_importance_weight: 1.0  # Weight for gate importance in optimization
+coupling_strength: 0.5       # Strength of coupling between up/down projections
+consistency_regularization: 0.1  # Regularization for transformation consistency
+
+# Evaluation parameters (optional)
+tasks: "default"
+
+# Debug settings
+verbose: True
+save_intermediate_results: False
