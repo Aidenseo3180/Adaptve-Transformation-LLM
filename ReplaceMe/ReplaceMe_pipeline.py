@@ -11,7 +11,7 @@ from .cosine_dist import cosine_dist
 from .distance import profile_distances
 from .evaluator import evaluator
 from .low_rank_replace import low_rank_replace  # New import
-from .malt_method import malt_method
+from .gate_aware_methods import gate_aware_coupled_optimization
 
 from .utils import seed_all, select_non_overlapping_blocks
 
@@ -62,28 +62,45 @@ def ReplaceMe_pipeline(config):
             filtered_config["model_path"] = path
 
 
-    elif config["method"] == "malt":
-        signature = inspect.signature(malt_method)
-        filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
+    elif config["method"] == "gate_aware_coupled":
+        print(f"{Fore.CYAN}🎯 Using Gate-Aware Coupled Optimization Method{Fore.RESET}")
         
-        # Load average distances and select non-overlapping blocks
-        average_distances = torch.load(filtered_config['distances_path'], weights_only=False)  
+        # Load distances and select blocks
+        if config['distances_path'] is None:
+            signature = inspect.signature(profile_distances)
+            filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
+            profile_distances(**filtered_config)
+            config['distances_path'] = "./distances.pth"
+        
+        # Select blocks
+        average_distances = torch.load(config['distances_path'], weights_only=False)
         selected_blocks = select_non_overlapping_blocks(
-            average_distances, 
-            filtered_config['layers_to_skip'], 
-            num_blocks=filtered_config['num_A'], 
-            merge_consecutive=filtered_config['merge_consecutive']
+            average_distances,
+            config['layers_to_skip'],
+            num_blocks=config['num_A'],
+            merge_consecutive=config['merge_consecutive']
         )
         
         start_ids = sorted([x[0] for x in selected_blocks])
         end_ids = sorted([x[1] for x in selected_blocks])
         num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
-        num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
+        num_layers = [sum(num_layers[:i]) for i in range(len(start_ids)+1)]
         
-        # Iterate over each selected block
+        print(f"   📊 Selected {len(selected_blocks)} blocks: {selected_blocks}")
+        
+        # Process each block
         for i in range(len(selected_blocks)):
-            path = malt_method(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
-            filtered_config["model_path"] = path
+            print(f"\n{Fore.YELLOW}🔄 Processing block {i+1}/{len(selected_blocks)}{Fore.RESET}")
+            
+            path = gate_aware_coupled_optimization(
+                **config,
+                start_id=start_ids[i],
+                end_id=end_ids[i],
+                num_layer=num_layers[i]
+            )
+            config["model_path"] = path
+            
+            print(f"   ✅ Block {i+1} completed!")
 
 
     else:  # Original cosine/adam methods
