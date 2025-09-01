@@ -76,7 +76,6 @@ def ReplaceMe_pipeline(config):
         # Execute GACO method
         path = gate_aware_coupled_method(**filtered_config)
         print(f"[Pipeline] GACO method complete, output path: {path}")
-        
 
 
     else:  # Original cosine/adam methods

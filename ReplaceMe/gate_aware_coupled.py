@@ -26,7 +26,8 @@ def collect_enhanced_activations(
     dataset_size: int,
     max_length: int,
     dataloader,
-    device: str = "cuda"
+    device: str = "cuda",
+    tokenizer = None
 ) -> Dict[str, List]:
     """
     Enhanced activation collection for gate-aware coupled optimization.
@@ -110,28 +111,36 @@ def collect_enhanced_activations(
         batch_count += 1
         print(f"[Phase 2] Processing batch {batch_count}...")
         
-        # Tokenize batch (assuming dataloader provides text)
-        if hasattr(model, 'tokenizer'):
-            inputs = model.tokenizer(
+        # Handle different batch formats from dataloader
+        if isinstance(batch, (list, tuple)):
+            # Dataloader returns list of texts, need to tokenize
+            if tokenizer is None:
+                raise ValueError("[Phase 2] ERROR: Tokenizer is required when batch contains text")
+            
+            inputs = tokenizer(
                 batch,
                 return_tensors="pt", 
                 padding="longest",
                 max_length=max_length,
                 truncation=True
             )
-        else:
-            # Assume batch is already tokenized
+            print(f"[Phase 2] Tokenized {len(batch)} texts")
+        elif isinstance(batch, dict) and 'input_ids' in batch:
+            # Batch is already tokenized dictionary
             inputs = batch
-        
-        # Move to device
-        if isinstance(inputs, dict):
-            inputs = {k: v.to(device) for k, v in inputs.items()}
-            batch_size = inputs['input_ids'].shape[0]
-            seq_len = inputs['input_ids'].shape[1]
+            print(f"[Phase 2] Using pre-tokenized batch")
+        elif torch.is_tensor(batch):
+            # Batch is tensor
+            inputs = {'input_ids': batch, 'attention_mask': torch.ones_like(batch)}
+            print(f"[Phase 2] Using tensor batch")
         else:
-            inputs = inputs.to(device)
-            batch_size = inputs.shape[0]
-            seq_len = inputs.shape[1]
+            raise ValueError(f"[Phase 2] ERROR: Unexpected batch type: {type(batch)}, content: {batch}")
+        
+        # Move to device and get dimensions
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        batch_size = inputs['input_ids'].shape[0]
+        seq_len = inputs['input_ids'].shape[1]
+        
         
         print(f"[Phase 2] Batch shape: {batch_size} x {seq_len}")
         
@@ -189,6 +198,7 @@ def collect_enhanced_activations(
             
             total_tokens_collected += batch_size * seq_len
             print(f"[Phase 2] Total tokens collected so far: {total_tokens_collected}")
+
         
         # Clear hook activations for next batch
         hook_activations.clear()
@@ -196,7 +206,7 @@ def collect_enhanced_activations(
         # Memory cleanup
         torch.cuda.empty_cache()
         
-        if total_tokens_collected >= dataset_size * max_length:
+        if total_tokens_collected >= 100000:
             print(f"[Phase 2] Reached target token collection: {total_tokens_collected}")
             break
     
@@ -308,7 +318,7 @@ def gate_aware_coupled_method(
     
     # Load pre-computed distances and select blocks
     print(f"[GACO] Loading distances from: {distances_path}")
-    average_distances = torch.load(distances_path)
+    average_distances = torch.load(distances_path, weights_only=False)
     selected_blocks = select_non_overlapping_blocks(
         average_distances,
         layers_to_skip,
@@ -341,7 +351,8 @@ def gate_aware_coupled_method(
             dataset_size=dataset_size,
             max_length=max_length,
             dataloader=dataloader,
-            device=next(model.parameters()).device
+            device=next(model.parameters()).device,
+            tokenizer=tokenizer  # Pass tokenizer explicitly
         )
         
         print(f"[GACO] Enhanced activations collected for block {i+1}")
