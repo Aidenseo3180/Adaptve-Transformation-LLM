@@ -362,10 +362,15 @@ def malt_method(
     
     total_tokens = 0
     max_tokens = dataset_size * max_length if dataset_size else 100000
+    batch_size_limit = 50  # Process in chunks of 50 batches
     
-    print(f"Collecting activations for up to {max_tokens} tokens...")
+    print(f"Collecting activations in chunks of {batch_size_limit} batches...")
+    
+    # Initialize transformation storage
+    all_transformations = {'up': [], 'down': [], 'single': []}
     
     with torch.no_grad():
+        batch_count = 0
         for batch_idx, batch in enumerate(tqdm(dataloader, desc="Collecting MALT activations")):
             inputs = tokenizer(
                 batch,
@@ -409,63 +414,97 @@ def malt_method(
             target_activations.append(target_reshaped.cpu())
             
             total_tokens += target_reshaped.shape[0]
-            if total_tokens >= max_tokens:
-                print(f"Collected {total_tokens} tokens, stopping collection")
-                break
-    
-    # Remove hooks
-    for hook in hooks:
-        hook.remove()
-    
-    print(f"Collected {len(target_activations)} batches of activations")
-    
-    # Concatenate all collected activations
-    if gate_activations:
-        gate_tensor = torch.cat(gate_activations, dim=0)
-        print(f"Gate activations shape: {gate_tensor.shape}")
-    else:
-        gate_tensor = None
-        print("No gate activations collected")
-    
-    if up_activations:
-        up_tensor = torch.cat(up_activations, dim=0)
-        print(f"Up activations shape: {up_tensor.shape}")
-    else:
-        up_tensor = None
-        print("No up activations collected")
-        
-    if down_input_activations:
-        down_input_tensor = torch.cat(down_input_activations, dim=0)
-        print(f"Down input activations shape: {down_input_tensor.shape}")
-    else:
-        down_input_tensor = None
-        print("No down input activations collected")
-    
-    target_tensor = torch.cat(target_activations, dim=0)
-    print(f"Target activations shape: {target_tensor.shape}")
-    
-    # Step 3: Coupled optimization
-    transformations = {}
-    
-    if up_tensor is not None and down_input_tensor is not None:
-        print("Performing coupled up/down optimization...")
-        T_up, T_down = coupled_optimization(
-            up_tensor, down_input_tensor, target_tensor, gate_importance
-        )
-        transformations['up'] = T_up
-        transformations['down'] = T_down
-    else:
-        print("Insufficient activations for coupled optimization, falling back to single transformation")
-        # Fallback: use available activations for single transformation
-        if down_input_tensor is not None:
-            source_tensor = down_input_tensor
-        elif up_tensor is not None:
-            source_tensor = up_tensor
-        else:
-            source_tensor = gate_tensor
+            batch_count += 1
             
-        T_single = learn_single_transformation(source_tensor, target_tensor, gate_importance)
-        transformations['single'] = T_single
+            # Process when we reach batch limit or end of data
+            if batch_count >= batch_size_limit or batch_idx >= len(dataloader) - 1 or total_tokens >= max_tokens:
+                print(f"\nProcessing chunk with {batch_count} batches, {total_tokens} tokens")
+                
+                # Concatenate collected activations
+                chunk_transformations = {}
+                
+                if gate_activations:
+                    gate_tensor = torch.cat(gate_activations, dim=0)
+                    print(f"Gate activations shape: {gate_tensor.shape}")
+                else:
+                    gate_tensor = None
+                
+                if up_activations:
+                    up_tensor = torch.cat(up_activations, dim=0)
+                    print(f"Up activations shape: {up_tensor.shape}")
+                else:
+                    up_tensor = None
+                    
+                if down_input_activations:
+                    down_input_tensor = torch.cat(down_input_activations, dim=0)
+                    print(f"Down input activations shape: {down_input_tensor.shape}")
+                else:
+                    down_input_tensor = None
+                
+                target_tensor = torch.cat(target_activations, dim=0)
+                print(f"Target activations shape: {target_tensor.shape}")
+                
+                # Perform optimization for this chunk
+                if up_tensor is not None and down_input_tensor is not None:
+                    print(f"Performing coupled optimization for chunk {len(all_transformations['up']) + 1}...")
+                    T_up, T_down = coupled_optimization(
+                        up_tensor, down_input_tensor, target_tensor, gate_importance
+                    )
+                    chunk_transformations['up'] = T_up
+                    chunk_transformations['down'] = T_down
+                    all_transformations['up'].append(T_up)
+                    all_transformations['down'].append(T_down)
+                else:
+                    print(f"Performing single transformation for chunk {len(all_transformations['single']) + 1}...")
+                    if down_input_tensor is not None:
+                        source_tensor = down_input_tensor
+                    elif up_tensor is not None:
+                        source_tensor = up_tensor
+                    else:
+                        source_tensor = gate_tensor
+                        
+                    T_single = learn_single_transformation(source_tensor, target_tensor, gate_importance)
+                    chunk_transformations['single'] = T_single
+                    all_transformations['single'].append(T_single)
+                
+                # Clear activations to free memory
+                gate_activations.clear()
+                up_activations.clear()
+                down_input_activations.clear()
+                target_activations.clear()
+                
+                # Force garbage collection
+                gc.collect()
+                torch.cuda.empty_cache()
+                
+                print(f"Chunk processing complete, memory cleared")
+                
+                # Reset counters
+                batch_count = 0
+                
+                # Break if we've collected enough tokens
+                if total_tokens >= max_tokens:
+                    print(f"Collected sufficient tokens ({total_tokens}), stopping")
+                    break
+    
+    print(f"\nCollected {len(all_transformations.get('up', [])) + len(all_transformations.get('single', []))} transformation chunks")
+    
+    # Average transformations across chunks
+    final_transformations = {}
+    
+    if all_transformations['up']:
+        print("Averaging coupled transformations across chunks...")
+        avg_T_up = torch.stack(all_transformations['up']).mean(dim=0)
+        avg_T_down = torch.stack(all_transformations['down']).mean(dim=0)
+        final_transformations['up'] = avg_T_up
+        final_transformations['down'] = avg_T_down
+        print(f"Averaged {len(all_transformations['up'])} coupled transformations")
+    
+    if all_transformations['single']:
+        print("Averaging single transformations across chunks...")
+        avg_T_single = torch.stack(all_transformations['single']).mean(dim=0)
+        final_transformations['single'] = avg_T_single
+        print(f"Averaged {len(all_transformations['single'])} single transformations")
     
     # Step 4: Apply transformations to model
     print("Applying transformations to model...")
