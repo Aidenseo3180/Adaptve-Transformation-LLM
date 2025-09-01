@@ -135,7 +135,8 @@ def coupled_optimization(
     targets: torch.Tensor,
     gate_importance: torch.Tensor,
     max_epochs: int = 10,
-    lr: float = 1e-4
+    lr: float = 1e-4,
+    chunk_idx: int = 0
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Perform coupled optimization of up_proj and down_proj transformations.
     
@@ -146,12 +147,14 @@ def coupled_optimization(
         gate_importance: Gate importance scores [hidden_size]
         max_epochs: Maximum optimization epochs
         lr: Learning rate
+        chunk_idx: Chunk index for debugging
         
     Returns:
         T_up: Up projection transformation matrix
         T_down: Down projection transformation matrix
     """
-    print("Starting coupled optimization...")
+    print(f"Starting coupled optimization for chunk {chunk_idx}...")
+    print(f"Input shapes - Up: {up_activations.shape}, Down: {down_activations.shape}, Targets: {targets.shape}")
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     hidden_size = up_activations.shape[-1]
@@ -166,19 +169,35 @@ def coupled_optimization(
     targets = targets.to(device).to(torch.bfloat16)
     gate_importance = gate_importance.to(device).to(torch.bfloat16)
     
+    print(f"Moved tensors to {device}, all using bfloat16")
+    
     # Optimizers
     optimizer_up = torch.optim.Adam([T_up], lr=lr)
     optimizer_down = torch.optim.Adam([T_down], lr=lr)
     optimizer_joint = torch.optim.Adam([T_up, T_down], lr=lr/2)
     
     def cosine_loss_weighted(pred, target, weights):
-        """Weighted cosine loss using gate importance"""
+        """Weighted cosine loss using gate importance - chunk independent"""
+        print(f"[LOSS DEBUG] Pred shape: {pred.shape}, Target shape: {target.shape}")
+        
+        # Ensure pred and target have same shape
+        if pred.shape[0] != target.shape[0]:
+            min_size = min(pred.shape[0], target.shape[0])
+            pred = pred[:min_size]
+            target = target[:min_size]
+            print(f"[LOSS DEBUG] Trimmed to common size: {min_size}")
+        
         pred_norm = pred / (pred.norm(dim=1, keepdim=True) + 1e-8)
         target_norm = target / (target.norm(dim=1, keepdim=True) + 1e-8)
         cosine_sim = (pred_norm * target_norm).sum(dim=1)
-        # Weight by gate importance (broadcast across batch)
-        weighted_loss = (1 - cosine_sim) * weights.mean()  # Simple weighting for now
-        return weighted_loss.mean()
+        
+        # Use scalar weight (mean of gate importance) instead of per-token weighting
+        weight_scalar = weights.mean()  # Convert to scalar
+        weighted_loss = (1 - cosine_sim) * weight_scalar
+        
+        loss_value = weighted_loss.mean()
+        print(f"[LOSS DEBUG] Loss computed: {loss_value.item():.6f}")
+        return loss_value
     
     def consistency_loss(T_up, T_down):
         """Consistency regularization between transformations"""
@@ -447,8 +466,10 @@ def malt_method(
                 # Perform optimization for this chunk
                 if up_tensor is not None and down_input_tensor is not None:
                     print(f"Performing coupled optimization for chunk {len(all_transformations['up']) + 1}...")
+                    print(f"Chunk data shapes - Up: {up_tensor.shape}, Down: {down_input_tensor.shape}, Target: {target_tensor.shape}")
                     T_up, T_down = coupled_optimization(
-                        up_tensor, down_input_tensor, target_tensor, gate_importance
+                        up_tensor, down_input_tensor, target_tensor, gate_importance,
+                        chunk_idx=len(all_transformations['up']) + 1  # Pass chunk index
                     )
                     chunk_transformations['up'] = T_up
                     chunk_transformations['down'] = T_down
@@ -462,8 +483,12 @@ def malt_method(
                         source_tensor = up_tensor
                     else:
                         source_tensor = gate_tensor
-                        
-                    T_single = learn_single_transformation(source_tensor, target_tensor, gate_importance)
+                    
+                    print(f"Single transform data shapes - Source: {source_tensor.shape}, Target: {target_tensor.shape}")
+                    T_single = learn_single_transformation(
+                        source_tensor, target_tensor, gate_importance,
+                        chunk_idx=len(all_transformations['single']) + 1  # Pass chunk index
+                    )
                     chunk_transformations['single'] = T_single
                     all_transformations['single'].append(T_single)
                 
@@ -586,10 +611,12 @@ def learn_single_transformation(
     target_activations: torch.Tensor, 
     gate_importance: torch.Tensor,
     max_epochs: int = 10,
-    lr: float = 1e-4
+    lr: float = 1e-4,
+    chunk_idx: int = 0
 ) -> torch.Tensor:
     """Learn single transformation matrix with gate importance weighting."""
-    print("Learning single transformation with gate importance weighting...")
+    print(f"Learning single transformation with gate importance weighting for chunk {chunk_idx}...")
+    print(f"Input shapes - Source: {source_activations.shape}, Target: {target_activations.shape}")
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     hidden_size = source_activations.shape[-1]
@@ -602,10 +629,19 @@ def learn_single_transformation(
     gate_importance = gate_importance.to(device).to(torch.bfloat16)
     
     def weighted_cosine_loss(pred, target, weights):
+        # Ensure pred and target have same shape
+        if pred.shape[0] != target.shape[0]:
+            min_size = min(pred.shape[0], target.shape[0])
+            pred = pred[:min_size]
+            target = target[:min_size]
+            print(f"[SINGLE LOSS DEBUG] Trimmed to common size: {min_size}")
+        
         pred_norm = pred / (pred.norm(dim=1, keepdim=True) + 1e-8)
         target_norm = target / (target.norm(dim=1, keepdim=True) + 1e-8)
         cosine_sim = (pred_norm * target_norm).sum(dim=1)
-        return ((1 - cosine_sim) * weights.mean()).mean()
+        # Use scalar weight instead of per-token weighting
+        weight_scalar = weights.mean()  # Convert to scalar
+        return ((1 - cosine_sim) * weight_scalar).mean()
     
     for epoch in range(max_epochs):
         optimizer.zero_grad()
