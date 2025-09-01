@@ -147,6 +147,9 @@ def collect_enhanced_activations(
             
             if (batch_idx + 1) % 10 == 0:
                 print(f"   Processed {batch_idx + 1} batches, {cnt} tokens")
+
+            if (batch_idx + 1) >= 100:
+                break
     
     # Cleanup
     for hook in hooks:
@@ -274,18 +277,12 @@ def estimate_coupled_transformations_fallback(storage, importance_data, config):
 
 def compute_gate_importance_scores(storage, config):
     """Wrapper for gate importance computation"""
-    if IMPROVED_AVAILABLE:
-        return compute_improved_gate_importance_scores(storage, config)
-    else:
-        return compute_gate_importance_scores_fallback(storage, config)
+    return compute_gate_importance_scores_fallback(storage, config)
 
 
 def estimate_coupled_transformations(storage, importance_data, config):
     """Wrapper for transformation estimation"""
-    if IMPROVED_AVAILABLE:
-        return estimate_improved_coupled_transformations(storage, importance_data, config)
-    else:
-        return estimate_coupled_transformations_fallback(storage, importance_data, config)
+    return estimate_coupled_transformations_fallback(storage, importance_data, config)
 
 
 def validate_transformation_quality_fallback(T_gate, T_up, T_down, storage, importance_data):
@@ -460,25 +457,8 @@ def gate_aware_coupled_optimization(
     
     # Phase 4: Validate transformation quality
     print(f"\n{Fore.GREEN}Phase 4: Transformation Quality Validation{Fore.RESET}")
-    if IMPROVED_AVAILABLE:
-        validation_results = validate_transformation_quality(T_gate, T_up, T_down, storage, importance_data)
-        
-        if not validation_results['overall_assessment']['overall_quality']:
-            print(f"{Fore.YELLOW}Warning: Transformation quality is suboptimal{Fore.RESET}")
-            print(f"   Quality score: {validation_results['overall_assessment']['quality_score']}/3")
-            
-            # Apply safety measures for poor quality transformations
-            if validation_results['overall_assessment']['quality_score'] < 1:
-                print(f"   Applying safety fallback: using identity-like transformations")
-                hidden_size = storage['input_activations'].shape[1] 
-                intermediate_size = storage['gate_projections'][0].shape[1]
-                
-                # Create near-identity transformations with small improvements
-                T_gate = torch.eye(hidden_size, dtype=torch.float64) + 0.01 * torch.randn(hidden_size, hidden_size, dtype=torch.float64)
-                T_up = torch.eye(hidden_size, dtype=torch.float64) + 0.01 * torch.randn(hidden_size, hidden_size, dtype=torch.float64)
-                T_down = torch.eye(intermediate_size, dtype=torch.float64) + 0.01 * torch.randn(intermediate_size, intermediate_size, dtype=torch.float64)
-    else:
-        validate_transformation_quality_fallback(T_gate, T_up, T_down, storage, importance_data)
+    
+    validate_transformation_quality_fallback(T_gate, T_up, T_down, storage, importance_data)
     
     # Phase 5: Apply transformations
     print(f"\n{Fore.GREEN}Phase 5: Apply Transformations to Model{Fore.RESET}")
