@@ -1134,6 +1134,9 @@ def collect_enhanced_activations(
             
             if (batch_idx + 1) % 10 == 0:
                 print(f"   🔄 Processed {batch_idx + 1} batches, {cnt} tokens")
+
+            if batch_idx >= len(dataloader) * 0.5:  # 50% 배치 처리하면 중단
+                break
     
     # Cleanup
     for hook in hooks:
