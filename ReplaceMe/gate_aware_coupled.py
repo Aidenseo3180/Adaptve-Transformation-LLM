@@ -452,6 +452,10 @@ def analyze_gate_patterns(activation_stats: Dict, start_id: int, end_id: int) ->
         print(f"[Phase 3] Least important layer: {least_important_layer} (importance: {min(layer_importances):.4f})")
         print(f"[Phase 3] Importance range: {max(layer_importances) - min(layer_importances):.4f}")
     
+    print(f"[Phase 3] Gate Importance Analysis complete!")
+    return gate_analysis
+
+
 def estimate_coupled_transformations(
     activation_stats: Dict, 
     gate_analysis: Dict, 
