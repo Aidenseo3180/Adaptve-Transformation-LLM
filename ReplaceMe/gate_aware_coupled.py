@@ -708,294 +708,6 @@ def analyze_gate_patterns_improved(activation_stats: Dict, start_id: int, end_id
     return gate_analysis
 
 
-def estimate_coupled_transformations(
-    activation_stats: Dict, 
-    gate_analysis: Dict, 
-    start_id: int, 
-    end_id: int,
-    hidden_size: int
-) -> Dict[str, torch.Tensor]:
-    """
-    Phase 4: Coupled Transformation Estimation (FIXED VERSION)
-    Estimates three coupled linear transformations (gate, up, down) using gate importance analysis.
-    
-    Args:
-        activation_stats: Statistics from Phase 2
-        gate_analysis: Analysis results from Phase 3
-        start_id: Starting layer index
-        end_id: Ending layer index
-        hidden_size: Model hidden dimension
-        
-    Returns:
-        Dictionary containing estimated transformations
-    """
-    print(f"[Phase 4 FIXED] Starting Coupled Transformation Estimation...")
-    print(f"[Phase 4 FIXED] Target layers: {start_id} to {end_id-1}")
-    print(f"[Phase 4 FIXED] Hidden size: {hidden_size}")
-    
-    # Get input/output data for transformation estimation
-    input_activations = activation_stats['input_activations']  # [samples, hidden_size]
-    output_activations = activation_stats['output_activations']  # [samples, hidden_size]
-    
-    num_samples = input_activations.shape[0]
-    print(f"[Phase 4 FIXED] Using {num_samples} samples for transformation estimation")
-    
-    if num_samples == 0:
-        raise ValueError("[Phase 4 FIXED] ERROR: No input/output samples available")
-    
-    # Convert to float64 for numerical stability
-    X = input_activations.to(torch.float64)  # [num_samples, hidden_size]
-    Y = output_activations.to(torch.float64)  # [num_samples, hidden_size]
-    
-    print(f"[Phase 4 FIXED] Input tensor shape: {X.shape}")
-    print(f"[Phase 4 FIXED] Output tensor shape: {Y.shape}")
-    
-    # Initialize transformation matrices
-    transformations = {
-        'T_gate': torch.eye(hidden_size, dtype=torch.float64),
-        'T_up': torch.eye(hidden_size, dtype=torch.float64),
-        'T_down': torch.eye(hidden_size, dtype=torch.float64),
-        'gate_compensation': {},
-        'layer_priorities': {},
-    }
-    
-    # Extract layer priorities from gate analysis
-    if 'cross_layer_analysis' in gate_analysis:
-        cross_analysis = gate_analysis['cross_layer_analysis']
-        most_important = cross_analysis['most_important_layer']
-        least_important = cross_analysis['least_important_layer']
-        
-        print(f"[Phase 4 FIXED] Most important layer: {most_important}")
-        print(f"[Phase 4 FIXED] Least important layer: {least_important}")
-        
-        # Create priority ordering
-        layer_importances = []
-        for layer_idx in range(start_id, end_id):
-            if layer_idx in gate_analysis['layer_importance_scores']:
-                importance = gate_analysis['layer_importance_scores'][layer_idx]['total_importance']
-                layer_importances.append((layer_idx, importance))
-        
-        layer_importances.sort(key=lambda x: x[1], reverse=True)
-        transformations['layer_priorities'] = layer_importances
-        
-        print(f"[Phase 4 FIXED] Layer priority order: {[f'L{idx}({imp:.1f})' for idx, imp in layer_importances]}")
-    
-    # Compute aggregate gate importance weights
-    print(f"[Phase 4 FIXED] Computing gate-weighted transformation...")
-    
-    total_gate_weights = torch.zeros(hidden_size, dtype=torch.float64)
-    weight_count = 0
-    
-    for layer_idx in range(start_id, end_id):
-        if layer_idx in gate_analysis['information_flow_weights']:
-            layer_weights = gate_analysis['information_flow_weights'][layer_idx]['sigmoid_weights']
-            intermediate_size = layer_weights.shape[0]
-            
-            # Map intermediate weights to hidden dimension
-            if intermediate_size >= hidden_size:
-                if intermediate_size % hidden_size == 0:
-                    stride = intermediate_size // hidden_size
-                    mapped_weights = layer_weights.view(hidden_size, stride).mean(dim=1)
-                else:
-                    mapped_weights = torch.nn.functional.interpolate(
-                        layer_weights.unsqueeze(0).unsqueeze(0),
-                        size=hidden_size,
-                        mode='linear',
-                        align_corners=False
-                    ).squeeze().squeeze()
-            else:
-                if hidden_size % intermediate_size == 0:
-                    repeat_factor = hidden_size // intermediate_size
-                    mapped_weights = layer_weights.repeat_interleave(repeat_factor)[:hidden_size]
-                else:
-                    mapped_weights = torch.nn.functional.interpolate(
-                        layer_weights.unsqueeze(0).unsqueeze(0),
-                        size=hidden_size,
-                        mode='linear',
-                        align_corners=False
-                    ).squeeze().squeeze()
-            
-            # Ensure correct size
-            if mapped_weights.shape[0] != hidden_size:
-                if mapped_weights.shape[0] > hidden_size:
-                    mapped_weights = mapped_weights[:hidden_size]
-                else:
-                    pad_size = hidden_size - mapped_weights.shape[0]
-                    mapped_weights = torch.cat([mapped_weights, mapped_weights[-1:].repeat(pad_size)])
-            
-            total_gate_weights += mapped_weights.to(torch.float64)
-            weight_count += 1
-            
-            print(f"[Phase 4 FIXED] Layer {layer_idx} weights mapped: {intermediate_size} -> {mapped_weights.shape[0]}")
-        else:
-            print(f"[Phase 4 FIXED] WARNING: No flow weights for layer {layer_idx}")
-    
-    if weight_count > 0:
-        avg_gate_weights = total_gate_weights / weight_count
-        print(f"[Phase 4 FIXED] Average gate weights computed from {weight_count} layers")
-        print(f"[Phase 4 FIXED] Gate weight range: {avg_gate_weights.min():.4f} to {avg_gate_weights.max():.4f}")
-    else:
-        avg_gate_weights = torch.ones(hidden_size, dtype=torch.float64)
-        print(f"[Phase 4 FIXED] WARNING: No gate weights found, using uniform weights")
-    
-    # FIXED: Correct weighted least squares formulation
-    # We want to solve: X @ T = Y with sample weights W
-    # Weighted least squares: T = (X.T @ W @ X)^(-1) @ X.T @ W @ Y
-    
-    # Create diagonal weight matrix for samples (not features)
-    sample_weights = torch.ones(num_samples, dtype=torch.float64)  # Can be modified based on importance
-    W_samples = torch.diag(sample_weights)  # [num_samples, num_samples]
-    
-    # Also create feature weights
-    W_features = torch.diag(avg_gate_weights)  # [hidden_size, hidden_size]
-    
-    print(f"[Phase 4 FIXED] Matrix dimensions check:")
-    print(f"[Phase 4 FIXED] X shape: {X.shape}")  # [num_samples, hidden_size]
-    print(f"[Phase 4 FIXED] Y shape: {Y.shape}")  # [num_samples, hidden_size]
-    print(f"[Phase 4 FIXED] W_samples shape: {W_samples.shape}")  # [num_samples, num_samples]
-    print(f"[Phase 4 FIXED] W_features shape: {W_features.shape}")  # [hidden_size, hidden_size]
-    
-    try:
-        # Method 1: Sample-weighted least squares
-        # T = (X.T @ W_samples @ X)^(-1) @ X.T @ W_samples @ Y
-        XTW = X.T @ W_samples  # [hidden_size, num_samples] @ [num_samples, num_samples] = [hidden_size, num_samples]
-        XTWX = XTW @ X  # [hidden_size, num_samples] @ [num_samples, hidden_size] = [hidden_size, hidden_size]
-        XTWY = XTW @ Y  # [hidden_size, num_samples] @ [num_samples, hidden_size] = [hidden_size, hidden_size]
-        
-        print(f"[Phase 4 FIXED] Intermediate matrix shapes:")
-        print(f"[Phase 4 FIXED] XTW shape: {XTW.shape}")
-        print(f"[Phase 4 FIXED] XTWX shape: {XTWX.shape}")
-        print(f"[Phase 4 FIXED] XTWY shape: {XTWY.shape}")
-        
-        # Add regularization for numerical stability
-        reg_strength = 1e-4
-        regularizer = reg_strength * torch.eye(hidden_size, dtype=torch.float64)
-        XTWX_reg = XTWX + regularizer
-        
-        # Solve the linear system: T = (X.T @ W @ X + reg)^(-1) @ (X.T @ W @ Y)
-        T_coupled = torch.linalg.solve(XTWX_reg, XTWY)
-        
-        print(f"[Phase 4 FIXED] Coupled transformation computed successfully")
-        print(f"[Phase 4 FIXED] Transformation matrix shape: {T_coupled.shape}")
-        print(f"[Phase 4 FIXED] Transformation matrix norm: {torch.norm(T_coupled, 'fro').item():.4f}")
-        
-    except Exception as e:
-        print(f"[Phase 4 FIXED] WARNING: Numerical instability in solve: {str(e)}")
-        print(f"[Phase 4 FIXED] Using pseudo-inverse fallback...")
-        try:
-            T_coupled = torch.linalg.pinv(XTWX) @ XTWY
-        except Exception as e2:
-            print(f"[Phase 4 FIXED] ERROR: Pseudo-inverse also failed: {str(e2)}")
-            print(f"[Phase 4 FIXED] Using simple least squares without weights...")
-            # Fallback to simple least squares: T = (X.T @ X)^(-1) @ X.T @ Y
-            XTX = X.T @ X
-            XTY = X.T @ Y
-            XTX_reg = XTX + reg_strength * torch.eye(hidden_size, dtype=torch.float64)
-            T_coupled = torch.linalg.solve(XTX_reg, XTY)
-    
-    # Apply feature weighting to the result
-    T_coupled = W_features @ T_coupled
-    print(f"[Phase 4 FIXED] Applied feature weighting to transformation")
-    
-    # Decompose coupled transformation using SVD
-    print(f"[Phase 4 FIXED] Decomposing coupled transformation...")
-    
-    U, S, Vt = torch.linalg.svd(T_coupled, full_matrices=False)
-    
-    # Ensure proper dimensions
-    min_dim = min(U.shape[1], S.shape[0], Vt.shape[0])
-    U_sq = U[:, :min_dim]
-    S_diag = torch.diag(S[:min_dim])
-    Vt_sq = Vt[:min_dim, :]
-    
-    # Pad to full size if necessary
-    if min_dim < hidden_size:
-        U_full = torch.eye(hidden_size, dtype=torch.float64)
-        U_full[:, :min_dim] = U_sq
-        
-        S_full = torch.eye(hidden_size, dtype=torch.float64)
-        S_full[:min_dim, :min_dim] = S_diag
-        
-        Vt_full = torch.eye(hidden_size, dtype=torch.float64)
-        Vt_full[:min_dim, :] = Vt_sq
-        
-        transformations['T_up'] = U_full
-        transformations['T_gate'] = S_full
-        transformations['T_down'] = Vt_full
-    else:
-        transformations['T_up'] = U_sq
-        transformations['T_gate'] = S_diag
-        transformations['T_down'] = Vt_sq
-    
-    print(f"[Phase 4 FIXED] SVD decomposition complete:")
-    print(f"[Phase 4 FIXED] T_up shape: {transformations['T_up'].shape}")
-    print(f"[Phase 4 FIXED] T_gate shape: {transformations['T_gate'].shape}")
-    print(f"[Phase 4 FIXED] T_down shape: {transformations['T_down'].shape}")
-    
-    # Consistency check
-    print(f"[Phase 4 FIXED] Applying consistency regularization...")
-    reconstructed = transformations['T_up'] @ transformations['T_gate'] @ transformations['T_down']
-    consistency_error = torch.norm(reconstructed - T_coupled, 'fro').item()
-    
-    print(f"[Phase 4 FIXED] Reconstruction error: {consistency_error:.6f}")
-    
-    if consistency_error > 0.1:
-        print(f"[Phase 4 FIXED] High reconstruction error, applying correction...")
-        correction_factor = 0.9
-        
-        identity = torch.eye(hidden_size, dtype=torch.float64)
-        transformations['T_up'] = correction_factor * transformations['T_up'] + (1-correction_factor) * identity
-        transformations['T_gate'] = correction_factor * transformations['T_gate'] + (1-correction_factor) * identity
-        transformations['T_down'] = correction_factor * transformations['T_down'] + (1-correction_factor) * identity
-        
-        reconstructed_corrected = transformations['T_up'] @ transformations['T_gate'] @ transformations['T_down']
-        corrected_error = torch.norm(reconstructed_corrected - T_coupled, 'fro').item()
-        print(f"[Phase 4 FIXED] Corrected reconstruction error: {corrected_error:.6f}")
-    
-    # Per-layer gate compensation
-    print(f"[Phase 4 FIXED] Computing per-layer gate compensation...")
-    
-    for layer_idx in range(start_id, end_id):
-        if layer_idx in gate_analysis['gate_activation_patterns']:
-            patterns = gate_analysis['gate_activation_patterns'][layer_idx]
-            
-            num_critical = len(patterns['critical_neurons'])
-            num_pruning = len(patterns['pruning_candidate_neurons'])
-            
-            if num_critical + num_pruning > 0:
-                critical_ratio = num_critical / (num_critical + num_pruning)
-                compensation_factor = 0.5 + 0.5 * critical_ratio
-            else:
-                compensation_factor = 1.0
-            
-            transformations['gate_compensation'][layer_idx] = compensation_factor
-            print(f"[Phase 4 FIXED] Layer {layer_idx} compensation: {compensation_factor:.3f}")
-    
-    # Final validation
-    print(f"[Phase 4 FIXED] Transformation validation...")
-    
-    if num_samples > 0:
-        sample_input = X[:min(100, num_samples)]
-        sample_expected = Y[:min(100, num_samples)]
-        
-        # Apply full transformation
-        transformed = sample_input @ transformations['T_up'] @ transformations['T_gate'] @ transformations['T_down']
-        
-        # Compute approximation error
-        approx_error = torch.norm(transformed - sample_expected, 'fro') / torch.norm(sample_expected, 'fro')
-        print(f"[Phase 4 FIXED] Relative approximation error: {approx_error.item():.6f}")
-        
-        if approx_error.item() < 0.1:
-            print(f"[Phase 4 FIXED] SUCCESS: Good approximation quality")
-        elif approx_error.item() < 0.5:
-            print(f"[Phase 4 FIXED] WARNING: Moderate approximation quality")
-        else:
-            print(f"[Phase 4 FIXED] WARNING: Poor approximation quality")
-    
-    print(f"[Phase 4 FIXED] Coupled Transformation Estimation complete!")
-    return transformations
-
-
 def estimate_coupled_transformations_residual_aware(
     activation_stats: Dict, 
     gate_analysis: Dict, 
@@ -1371,7 +1083,6 @@ def estimate_coupled_transformations_residual_aware(
     
     print(f"[Phase 4 PRACTICAL] Practical Fisher-based Gate-weighted Transformation complete!")
     return transformations
-
 
 
 def estimate_coupled_transformations_fisher_comprehensive(
@@ -1834,264 +1545,6 @@ def estimate_coupled_transformations_fisher_comprehensive(
     
     print(f"[Phase 4 COMPREHENSIVE] Comprehensive Fisher-based Transformation complete!")
     return transformations
-
-
-# def gate_aware_coupled_method(
-#     model_path: str,
-#     dataset: str,
-#     dataset_column: str,
-#     batch_size: int,
-#     max_length: int,
-#     layers_to_skip: int,
-#     dataset_size: Optional[int] = None,
-#     dataset_subset: Optional[str] = "eval",
-#     use_4bit: bool = False,
-#     save_path: Optional[str] = None,
-#     token: Optional[str] = None,
-#     distances_path: str = "./distances.pth",
-#     num_A: int = 1,
-#     merge_consecutive: bool = True,
-#     **kwargs
-# ) -> str:
-#     """
-#     Gate-aware coupled optimization method - Phases 2-4 implementation
-    
-#     Args:
-#         model_path: Path to pretrained model
-#         dataset: Dataset name
-#         dataset_column: Column containing text data
-#         batch_size: Batch size for processing
-#         max_length: Maximum sequence length
-#         layers_to_skip: Number of layers to skip between compared blocks
-#         dataset_size: Size of calibration dataset
-#         dataset_subset: Dataset subset to use
-#         use_4bit: Whether to use 4-bit quantization
-#         save_path: Path to save the processed model
-#         token: HuggingFace token for private models
-#         distances_path: Path to pre-computed distance metrics
-#         num_A: Number of blocks to process
-#         merge_consecutive: Whether to merge consecutive blocks
-#         **kwargs: Additional arguments
-        
-#     Returns:
-#         Path to the processed model
-#     """
-#     print(f"[GACO] Starting Gate-Aware Coupled Optimization method...")
-#     print(f"[GACO] Model: {model_path}")
-#     print(f"[GACO] Dataset: {dataset}, Size: {dataset_size}")
-#     print(f"[GACO] Layers to skip: {layers_to_skip}")
-    
-#     # Import required modules (same as original ReplaceMe)
-#     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-#     from .utils import get_calib_dataloader, select_non_overlapping_blocks, truncate_model
-    
-#     device_map = "auto" if torch.cuda.is_available() else "cpu"
-#     quantization_config = None
-    
-#     if use_4bit:
-#         quantization_config = BitsAndBytesConfig(
-#             load_in_4bit=True,
-#             bnb_4bit_use_double_quant=True,
-#             bnb_4bit_quant_type="nf4",
-#             bnb_4bit_compute_dtype=torch.bfloat16
-#         )
-    
-#     print(f"[GACO] Loading model...")
-#     model = AutoModelForCausalLM.from_pretrained(
-#         model_path,
-#         device_map=device_map,
-#         quantization_config=quantization_config,
-#         output_hidden_states=True,
-#         token=token
-#     )
-    
-#     tokenizer = AutoTokenizer.from_pretrained(model_path, token=token)
-#     if not tokenizer.pad_token:
-#         tokenizer.pad_token = tokenizer.eos_token
-    
-#     print(f"[GACO] Model loaded. Hidden size: {model.config.hidden_size}")
-#     print(f"[GACO] Number of layers: {model.config.num_hidden_layers}")
-    
-#     model.eval()
-#     dataloader = get_calib_dataloader(
-#         dataset,
-#         dataset_subset,
-#         dataset_column,
-#         dataset_size,
-#         batch_size,
-#         tokenizer
-#     )
-    
-#     print(f"[GACO] Data loader created")
-    
-#     # Load pre-computed distances and select blocks
-#     print(f"[GACO] Loading distances from: {distances_path}")
-#     average_distances = torch.load(distances_path, weights_only=False)
-#     selected_blocks = select_non_overlapping_blocks(
-#         average_distances,
-#         layers_to_skip,
-#         num_blocks=num_A,
-#         merge_consecutive=merge_consecutive
-#     )
-    
-#     start_ids = sorted([x[0] for x in selected_blocks])
-#     end_ids = sorted([x[1] for x in selected_blocks])
-#     num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
-#     num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
-    
-#     print(f"[GACO] Selected blocks: {selected_blocks}")
-#     print(f"[GACO] Start IDs: {start_ids}")
-#     print(f"[GACO] End IDs: {end_ids}")
-    
-#     # Process each selected block
-#     for i in range(len(selected_blocks)):
-#         start_id = start_ids[i]
-#         end_id = end_ids[i]
-#         num_layer = num_layers[i]
-        
-#         print(f"[GACO] Processing block {i+1}/{len(selected_blocks)}: layers {start_id} to {end_id}")
-        
-#         # Phase 2: Collect enhanced activations using streaming approach
-#         activations = collect_enhanced_activations_streaming(
-#             model=model,
-#             start_id=start_id - num_layer,
-#             end_id=end_id - num_layer,
-#             dataset_size=dataset_size,
-#             max_length=max_length,
-#             dataloader=dataloader,
-#             device=next(model.parameters()).device,
-#             tokenizer=tokenizer
-#         )
-        
-#         print(f"[GACO] Enhanced activations collected for block {i+1}")
-#         print(f"[GACO] Phase 2 streaming complete for block {i+1}")
-        
-#         # Validate that we collected the statistics properly
-#         if len(activations['gate_importance']) > 0:
-#             total_importance = sum(activations['gate_importance'][k].sum().item() for k in activations['gate_importance'])
-#             print(f"[GACO] SUCCESS: Gate importance computed - total importance: {total_importance:.4f}")
-#         else:
-#             print(f"[GACO] WARNING: No gate importance computed")
-            
-#         if activations['input_activations'].shape[0] > 0:
-#             print(f"[GACO] SUCCESS: Input/output samples collected - {activations['input_activations'].shape[0]} samples")
-#         else:
-#             print(f"[GACO] WARNING: No input/output samples collected")
-        
-#         print(f"[GACO] Total tokens processed: {activations['total_tokens']}")
-#         print(f"[GACO] Total batches processed: {activations['total_batches']}")
-        
-#         # Phase 3: Gate Importance Analysis
-#         print(f"[GACO] Starting Phase 3 for block {i+1}...")
-#         try:
-#             gate_analysis = analyze_gate_patterns(
-#                 activation_stats=activations,
-#                 start_id=start_id - num_layer,
-#                 end_id=end_id - num_layer
-#             )
-#             print(f"[GACO] Phase 3 function returned: {type(gate_analysis)}")
-#         except Exception as e:
-#             print(f"[GACO] ERROR in Phase 3: {str(e)}")
-#             gate_analysis = None
-        
-#         print(f"[GACO] Phase 3 complete for block {i+1}")
-        
-#         # Validate Phase 3 results
-#         if gate_analysis is not None and 'layer_importance_scores' in gate_analysis and gate_analysis['layer_importance_scores']:
-#             analyzed_layers = len(gate_analysis['layer_importance_scores'])
-#             print(f"[GACO] SUCCESS: Gate analysis completed for {analyzed_layers} layers")
-            
-#             # Show some key insights
-#             if 'cross_layer_analysis' in gate_analysis:
-#                 cross_analysis = gate_analysis['cross_layer_analysis']
-#                 print(f"[GACO] Most important layer: {cross_analysis['most_important_layer']}")
-#                 print(f"[GACO] Least important layer: {cross_analysis['least_important_layer']}")
-#                 print(f"[GACO] Mean layer importance: {cross_analysis['mean_layer_importance']:.4f}")
-            
-#             # Show neuron analysis for first layer as example
-#             first_layer = start_id - num_layer
-#             if first_layer in gate_analysis['gate_activation_patterns']:
-#                 patterns = gate_analysis['gate_activation_patterns'][first_layer]
-#                 print(f"[GACO] Layer {first_layer} neuron analysis:")
-#                 print(f"[GACO]   Critical neurons: {len(patterns['critical_neurons'])}")
-#                 print(f"[GACO]   Pruning candidates: {len(patterns['pruning_candidate_neurons'])}")
-#         else:
-#             print(f"[GACO] WARNING: Gate analysis failed or incomplete")
-#             print(f"[GACO] Gate analysis result: {gate_analysis}")
-            
-#             # Skip Phase 4 if Phase 3 failed
-#             print(f"[GACO] Skipping Phase 4 due to Phase 3 failure")
-            
-#             # Memory cleanup
-#             del activations
-#             if gate_analysis is not None:
-#                 del gate_analysis
-#             gc.collect()
-#             torch.cuda.empty_cache()
-            
-#             print(f"[GACO] Block {i+1} processing complete (Phases 2-3, Phase 4 skipped)")
-#             continue
-        
-#         # Phase 4: Coupled Transformation Estimation
-#         print(f"[GACO] Starting Phase 4 for block {i+1}...")
-#         try:
-#             transformations = estimate_coupled_transformations_residual_aware(
-#                 activation_stats=activations,
-#                 gate_analysis=gate_analysis,
-#                 start_id=start_id - num_layer,
-#                 end_id=end_id - num_layer,
-#                 hidden_size=model.config.hidden_size
-#             )
-            
-#             print(f"[GACO] Phase 4 complete for block {i+1}")
-            
-#             # Validate Phase 4 results
-#             if transformations is not None and 'T_gate' in transformations and 'T_up' in transformations and 'T_down' in transformations:
-#                 print(f"[GACO] SUCCESS: Coupled transformations estimated")
-#                 print(f"[GACO] T_gate norm: {torch.norm(transformations['T_gate'], 'fro').item():.4f}")
-#                 print(f"[GACO] T_up norm: {torch.norm(transformations['T_up'], 'fro').item():.4f}")  
-#                 print(f"[GACO] T_down norm: {torch.norm(transformations['T_down'], 'fro').item():.4f}")
-                
-#                 if 'layer_priorities' in transformations:
-#                     priorities = transformations['layer_priorities']
-#                     print(f"[GACO] Layer priorities: {[f'L{idx}' for idx, _ in priorities[:2]]}")
-#             else:
-#                 print(f"[GACO] WARNING: Transformation estimation failed")
-#                 print(f"[GACO] Transformations result: {transformations}")
-            
-#             print(f"[GACO] Phase 4 analysis complete for block {i+1}")
-            
-#             # Memory cleanup
-#             del transformations
-            
-#         except Exception as e:
-#             print(f"[GACO] ERROR in Phase 4: {str(e)}")
-#             print(f"[GACO] Phase 4 failed, continuing with next block...")
-        
-#         # Memory cleanup
-#         del activations
-#         del gate_analysis
-#         gc.collect()
-#         torch.cuda.empty_cache()
-        
-#         print(f"[GACO] Block {i+1} processing complete (Phases 2-4)")
-    
-#     # Cleanup
-#     del model
-#     gc.collect()
-#     torch.cuda.empty_cache()
-    
-#     # Generate output path
-#     if save_path is None:
-#         import os
-#         if not os.path.exists('output_models'):
-#             os.makedirs('output_models')
-#         save_path = "output_models/" + (
-#             f"{model_path}_{layers_to_skip}_layers_GACO"
-#         ).replace("/", "_")
-    
-#     print(f"[GACO] Method execution complete (Phases 2-4)")
-#     return f"{save_path}_GACO_phase2_phase3_phase4"
 
 
 def apply_residual_transformation_to_model(
@@ -2637,368 +2090,398 @@ def gate_aware_coupled_method(
 
 
 
-
-
-def collect_layer_wise_activations(
-    model,
-    start_id: int,
+def create_linear_layer_replacements(
+    activation_stats: Dict, 
+    gate_analysis: Dict, 
+    start_id: int, 
     end_id: int,
-    dataset_size: int,
-    max_length: int,
-    dataloader,
-    device: str = "cuda",
-    tokenizer = None
-) -> Dict[str, torch.Tensor]:
+    hidden_size: int = 4096
+) -> List[Dict]:
     """
-    수집: 각 레이어별 hidden states와 residual contributions
+    Create individual linear layer replacements for each transformer block.
+    Uses residual learning approach with layer-specific optimization.
+    
+    Args:
+        activation_stats: Statistics from Phase 2
+        gate_analysis: Gate analysis from Phase 3
+        start_id: Starting layer index
+        end_id: Ending layer index
+        hidden_size: Hidden dimension (unified to 4096)
+        
+    Returns:
+        List of linear layer specifications for each replaced block
     """
-    print(f"[MULTI-MATRIX] Starting layer-wise activation collection...")
-    print(f"[MULTI-MATRIX] Target blocks: {start_id} to {end_id-1}")
+    print(f"[LINEAR REPLACEMENT] Creating linear layer replacements...")
+    print(f"[LINEAR REPLACEMENT] Target layers: {start_id} to {end_id-1}")
+    print(f"[LINEAR REPLACEMENT] Hidden size: {hidden_size}")
     
-    hidden_size = model.config.hidden_size
-    max_samples = min(dataset_size * max_length // 4, 50000)
+    # Get input/output data
+    input_activations = activation_stats['input_activations']
+    output_activations = activation_stats['output_activations']
     
-    # 각 레이어별 hidden states 저장
-    layer_activations = {}
-    for layer_idx in range(start_id - 1, end_id + 1):  # 23, 24, 25, 26, 27, 28
-        layer_activations[f'layer_{layer_idx}'] = torch.zeros(0, hidden_size, dtype=torch.float32, device='cpu')
+    num_samples = input_activations.shape[0]
+    print(f"[LINEAR REPLACEMENT] Using {num_samples} samples for optimization")
     
-    # Hook 설정 - hidden states 수집
-    hook_activations = {}
-    hooks = []
+    if num_samples == 0:
+        raise ValueError("[LINEAR REPLACEMENT] ERROR: No input/output samples available")
     
-    def save_hidden_state(layer_idx):
-        def hook(module, input, output):
-            hook_activations[f'layer_{layer_idx}'] = output[0].detach()  # [batch, seq, hidden]
-        return hook
+    # Convert to float64 for numerical stability
+    X = input_activations.to(torch.float64)
+    Y = output_activations.to(torch.float64)
     
-    # 필요한 레이어들에 hook 등록
-    for layer_idx in range(start_id - 1, end_id + 1):
-        if layer_idx < len(model.model.layers):
-            layer = model.model.layers[layer_idx]
-            hooks.append(layer.register_forward_hook(save_hidden_state(layer_idx)))
+    print(f"[LINEAR REPLACEMENT] Input shape: {X.shape}, Output shape: {Y.shape}")
     
-    print(f"[MULTI-MATRIX] Registered {len(hooks)} hooks for layers {start_id-1} to {end_id}")
+    # Compute global residual
+    global_residual = Y - X
+    print(f"[LINEAR REPLACEMENT] Global residual norm: {torch.norm(global_residual, 'fro').item():.4f}")
     
-    # 데이터 수집
-    total_samples_collected = 0
-    
-    for batch in tqdm(
-        dataloader,
-        desc=f"{Fore.BLUE}Collecting Layer-wise Activations{Fore.RESET}",
-        dynamic_ncols=True,
-        colour="blue"
-    ):
-        # Tokenization handling
-        if isinstance(batch, (list, tuple)):
-            inputs = tokenizer(
-                batch,
-                return_tensors="pt",
-                padding="longest",
-                max_length=max_length,
-                truncation=True
-            )
-        else:
-            inputs = batch
-        
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-        
-        with torch.no_grad():
-            outputs = model(**inputs)
-        
-        # 각 레이어의 hidden states 수집
-        batch_size, seq_len, hidden_size = hook_activations[f'layer_{start_id-1}'].shape
-        batch_samples = batch_size * seq_len
-        
-        for layer_idx in range(start_id - 1, end_id + 1):
-            if f'layer_{layer_idx}' in hook_activations:
-                layer_hidden = hook_activations[f'layer_{layer_idx}'].view(-1, hidden_size).cpu()
-                
-                # 메모리 제한으로 샘플 수 제한
-                samples_to_add = min(
-                    layer_hidden.shape[0],
-                    max_samples - layer_activations[f'layer_{layer_idx}'].shape[0]
-                )
-                
-                if samples_to_add > 0:
-                    layer_activations[f'layer_{layer_idx}'] = torch.cat([
-                        layer_activations[f'layer_{layer_idx}'],
-                        layer_hidden[:samples_to_add]
-                    ], dim=0)
-        
-        total_samples_collected += batch_samples
-        
-        # 클리어
-        hook_activations.clear()
-        torch.cuda.empty_cache()
-        
-        if total_samples_collected >= 100000:
-            break
-    
-    # Hook 제거
-    for hook in hooks:
-        hook.remove()
-    
-    print(f"[MULTI-MATRIX] Collected activations for {len(layer_activations)} layers")
-    for layer_name, activations in layer_activations.items():
-        print(f"[MULTI-MATRIX]   {layer_name}: {activations.shape}")
-    
-    return layer_activations
-
-
-def estimate_multi_matrix_residual_transformations(
-    layer_activations: Dict[str, torch.Tensor],
-    start_id: int,
-    end_id: int,
-    hidden_size: int
-) -> Dict[str, torch.Tensor]:
-    """
-    각 레이어별 residual transformation 개별 학습
-    """
-    print(f"[MULTI-MATRIX] Starting multi-matrix residual transformation estimation...")
-    print(f"[MULTI-MATRIX] Processing layers {start_id} to {end_id-1}")
-    
-    # 개별 변환 행렬들
-    individual_transforms = {}
-    layer_residuals = {}
-    
-    # 각 레이어별로 residual 계산 및 transformation 학습
+    # Collect layer importance scores from gate analysis
+    layer_importances = {}
     for layer_idx in range(start_id, end_id):
-        prev_layer_key = f'layer_{layer_idx-1}'
-        curr_layer_key = f'layer_{layer_idx}'
+        if layer_idx in gate_analysis['layer_importance_scores']:
+            importance = gate_analysis['layer_importance_scores'][layer_idx]['total_importance']
+            layer_importances[layer_idx] = importance
+            print(f"[LINEAR REPLACEMENT] Layer {layer_idx} importance: {importance:.4f}")
+        else:
+            print(f"[LINEAR REPLACEMENT] WARNING: No importance data for layer {layer_idx}")
+            layer_importances[layer_idx] = 1.0
+    
+    total_importance = sum(layer_importances.values())
+    print(f"[LINEAR REPLACEMENT] Total importance across all layers: {total_importance:.4f}")
+    
+    # Create linear layer specifications
+    linear_layers = []
+    
+    for i, layer_idx in enumerate(range(start_id, end_id)):
+        print(f"[LINEAR REPLACEMENT] Processing layer {layer_idx} ({i+1}/{end_id-start_id})...")
         
-        if prev_layer_key not in layer_activations or curr_layer_key not in layer_activations:
-            print(f"[MULTI-MATRIX] WARNING: Missing activations for layer {layer_idx}")
-            continue
+        # Calculate layer's contribution to total residual based on importance
+        layer_importance = layer_importances[layer_idx]
+        importance_ratio = layer_importance / total_importance
         
-        print(f"[MULTI-MATRIX] Processing layer {layer_idx}...")
+        print(f"[LINEAR REPLACEMENT] Layer {layer_idx} importance ratio: {importance_ratio:.4f}")
         
-        # 해당 레이어의 입력과 출력
-        layer_input = layer_activations[prev_layer_key].to(torch.float64)  # [samples, hidden_size]
-        layer_output = layer_activations[curr_layer_key].to(torch.float64)  # [samples, hidden_size]
+        # Estimate this layer's target residual contribution
+        layer_target_residual = global_residual * importance_ratio
         
-        # 해당 레이어의 residual contribution 계산
-        layer_residual = layer_output - layer_input
-        layer_residuals[layer_idx] = layer_residual
+        print(f"[LINEAR REPLACEMENT] Layer {layer_idx} target residual norm: {torch.norm(layer_target_residual, 'fro').item():.4f}")
         
-        print(f"[MULTI-MATRIX] Layer {layer_idx} residual statistics:")
-        print(f"[MULTI-MATRIX]   Input shape: {layer_input.shape}")
-        print(f"[MULTI-MATRIX]   Output shape: {layer_output.shape}")
-        print(f"[MULTI-MATRIX]   Residual norm: {torch.norm(layer_residual, 'fro').item():.4f}")
-        print(f"[MULTI-MATRIX]   Residual/Input ratio: {(torch.norm(layer_residual, 'fro') / torch.norm(layer_input, 'fro')).item():.4f}")
-        
-        # 개별 linear transformation 학습: layer_input @ T_i ≈ layer_residual
-        print(f"[MULTI-MATRIX] Learning transformation for layer {layer_idx}...")
+        # Optimize linear transformation for this layer using residual learning
+        # We want to find T such that X @ T ≈ layer_target_residual
+        print(f"[LINEAR REPLACEMENT] Optimizing transformation matrix for layer {layer_idx}...")
         
         try:
-            # Regularized least squares
-            XTX = layer_input.T @ layer_input
-            XTY = layer_input.T @ layer_residual
+            # Residual learning: X @ T = target_residual
+            XTX = X.T @ X
+            XTy = X.T @ layer_target_residual
             
-            # 적응적 정규화
+            # Check condition number for stability
             cond_num = torch.linalg.cond(XTX).item()
-            print(f"[MULTI-MATRIX] Layer {layer_idx} condition number: {cond_num:.2e}")
+            print(f"[LINEAR REPLACEMENT] Layer {layer_idx} condition number: {cond_num:.2e}")
             
+            # Adaptive regularization based on condition number
             if cond_num > 1e6:
                 reg_strength = 1e-3
+                print(f"[LINEAR REPLACEMENT] Layer {layer_idx} using strong regularization")
             elif cond_num > 1e5:
-                reg_strength = 5e-4
-            else:
                 reg_strength = 1e-4
+                print(f"[LINEAR REPLACEMENT] Layer {layer_idx} using moderate regularization")
+            else:
+                reg_strength = 1e-5
+                print(f"[LINEAR REPLACEMENT] Layer {layer_idx} using light regularization")
             
             regularizer = reg_strength * torch.eye(hidden_size, dtype=torch.float64)
             XTX_reg = XTX + regularizer
             
-            # 개별 변환 행렬 계산
-            T_individual = torch.linalg.solve(XTX_reg, XTY)
-            individual_transforms[layer_idx] = T_individual
+            # Solve for transformation matrix
+            T_layer = torch.linalg.solve(XTX_reg, XTy)
             
-            # 품질 확인
-            predicted_residual = layer_input @ T_individual
-            residual_error = torch.norm(predicted_residual - layer_residual, 'fro') / torch.norm(layer_residual, 'fro')
+            # Quality assessment
+            predicted_residual = X @ T_layer
+            layer_error = torch.norm(predicted_residual - layer_target_residual, 'fro') / torch.norm(layer_target_residual, 'fro')
             
-            print(f"[MULTI-MATRIX] Layer {layer_idx} transformation:")
-            print(f"[MULTI-MATRIX]   T_{layer_idx} norm: {torch.norm(T_individual, 'fro').item():.4f}")
-            print(f"[MULTI-MATRIX]   Residual approximation error: {residual_error.item():.1%}")
-            print(f"[MULTI-MATRIX]   Regularization: {reg_strength}")
+            print(f"[LINEAR REPLACEMENT] Layer {layer_idx} approximation error: {layer_error.item():.6f}")
+            
+            if layer_error.item() < 0.15:
+                quality = "EXCELLENT"
+            elif layer_error.item() < 0.25:
+                quality = "GOOD"
+            elif layer_error.item() < 0.4:
+                quality = "MODERATE"
+            else:
+                quality = "POOR"
+            
+            print(f"[LINEAR REPLACEMENT] Layer {layer_idx} quality: {quality}")
             
         except Exception as e:
-            print(f"[MULTI-MATRIX] ERROR learning transformation for layer {layer_idx}: {str(e)}")
-            individual_transforms[layer_idx] = torch.eye(hidden_size, dtype=torch.float64)
+            print(f"[LINEAR REPLACEMENT] ERROR in layer {layer_idx} optimization: {str(e)}")
+            print(f"[LINEAR REPLACEMENT] Using identity transformation for layer {layer_idx}")
+            T_layer = torch.eye(hidden_size, dtype=torch.float64)
+            layer_error = torch.tensor(1.0)
+            quality = "FALLBACK"
+        
+        # Create layer specification
+        layer_spec = {
+            'layer_index': layer_idx,
+            'original_position': i,
+            'transformation_matrix': T_layer,
+            'importance_score': layer_importance,
+            'importance_ratio': importance_ratio,
+            'approximation_error': layer_error.item(),
+            'quality_assessment': quality,
+            'input_dim': hidden_size,
+            'output_dim': hidden_size,
+            'regularization_strength': reg_strength if 'reg_strength' in locals() else 1e-5,
+            'condition_number': cond_num if 'cond_num' in locals() else 1.0
+        }
+        
+        linear_layers.append(layer_spec)
+        print(f"[LINEAR REPLACEMENT] Layer {layer_idx} specification created")
     
-    print(f"[MULTI-MATRIX] Individual transformations learned: {len(individual_transforms)}")
-    return individual_transforms, layer_residuals
+    # Overall quality assessment
+    total_error = sum([spec['approximation_error'] for spec in linear_layers])
+    avg_error = total_error / len(linear_layers)
+    
+    print(f"[LINEAR REPLACEMENT] Overall results:")
+    print(f"[LINEAR REPLACEMENT] Average approximation error: {avg_error:.6f}")
+    print(f"[LINEAR REPLACEMENT] Total layers processed: {len(linear_layers)}")
+    
+    for spec in linear_layers:
+        print(f"[LINEAR REPLACEMENT] Layer {spec['layer_index']}: {spec['quality_assessment']} ({spec['approximation_error']:.4f})")
+    
+    if avg_error < 0.2:
+        overall_quality = "EXCELLENT"
+    elif avg_error < 0.3:
+        overall_quality = "GOOD"
+    elif avg_error < 0.4:
+        overall_quality = "MODERATE"
+    else:
+        overall_quality = "POOR"
+    
+    print(f"[LINEAR REPLACEMENT] Overall quality assessment: {overall_quality}")
+    print(f"[LINEAR REPLACEMENT] Linear layer replacements created successfully")
+    
+    return linear_layers
 
 
-def compose_multi_matrix_transformation(
-    individual_transforms: Dict[int, torch.Tensor],
-    layer_residuals: Dict[int, torch.Tensor],
+def apply_linear_layer_replacements_to_model(
+    model,
+    linear_layers: List[Dict],
     start_id: int,
     end_id: int,
-    composition_method: str = "weighted_sum"
-) -> torch.Tensor:
+    num_layer: int,
+    save_path: str,
+    tokenizer=None,
+    model_path: str = None,
+    token: str = None
+) -> str:
     """
-    개별 변환들을 합성하여 최종 변환 행렬 생성
+    Replace transformer blocks with optimized linear layers
+    
+    Args:
+        model: The transformer model
+        linear_layers: List of linear layer specifications
+        start_id: Starting layer index
+        end_id: Ending layer index
+        num_layer: Number of layers already removed
+        save_path: Path to save modified model
+        tokenizer: Tokenizer for saving
+        model_path: Original model path
+        token: HuggingFace token
+        
+    Returns:
+        Path where modified model was saved
     """
-    print(f"[MULTI-MATRIX] Composing multi-matrix transformation...")
-    print(f"[MULTI-MATRIX] Method: {composition_method}")
-    print(f"[MULTI-MATRIX] Individual transforms: {list(individual_transforms.keys())}")
+    print(f"[LINEAR MODEL REPLACEMENT] Starting model reconstruction with linear layers...")
+    print(f"[LINEAR MODEL REPLACEMENT] Target layers: {start_id} to {end_id-1}")
+    print(f"[LINEAR MODEL REPLACEMENT] Number of linear replacements: {len(linear_layers)}")
+    print(f"[LINEAR MODEL REPLACEMENT] Save path: {save_path}")
     
-    if len(individual_transforms) == 0:
-        raise ValueError("[MULTI-MATRIX] No individual transformations available")
+    import torch.nn as nn
+    import os
     
-    hidden_size = list(individual_transforms.values())[0].shape[0]
+    # Validate linear layer specifications
+    if len(linear_layers) != (end_id - start_id):
+        raise ValueError(f"[LINEAR MODEL REPLACEMENT] ERROR: Expected {end_id - start_id} linear layers, got {len(linear_layers)}")
     
-    if composition_method == "simple_sum":
-        # 방법 1: 단순 합
-        print(f"[MULTI-MATRIX] Using simple sum composition")
-        final_T = torch.zeros(hidden_size, hidden_size, dtype=torch.float64)
-        
-        for layer_idx in sorted(individual_transforms.keys()):
-            T_i = individual_transforms[layer_idx]
-            final_T += T_i
-            print(f"[MULTI-MATRIX]   Added T_{layer_idx} (norm: {torch.norm(T_i, 'fro').item():.4f})")
+    print(f"[LINEAR MODEL REPLACEMENT] Linear layer validation passed")
     
-    elif composition_method == "weighted_sum":
-        # 방법 2: 가중 합 (residual 크기 기준)
-        print(f"[MULTI-MATRIX] Using weighted sum composition")
+    # Get original model structure info
+    total_layers_before = model.config.num_hidden_layers
+    layers_to_remove = end_id - start_id
+    
+    print(f"[LINEAR MODEL REPLACEMENT] Original model layers: {total_layers_before}")
+    print(f"[LINEAR MODEL REPLACEMENT] Layers to remove: {layers_to_remove}")
+    print(f"[LINEAR MODEL REPLACEMENT] Layers already removed: {num_layer}")
+    
+    # Create new linear layers based on specifications
+    new_linear_layers = nn.ModuleList()
+    
+    for i, spec in enumerate(linear_layers):
+        layer_idx = spec['layer_index']
+        T_matrix = spec['transformation_matrix']
         
-        # 각 레이어의 residual 크기 계산
-        layer_weights = {}
-        total_residual_norm = 0.0
+        print(f"[LINEAR MODEL REPLACEMENT] Creating linear layer {i+1} (original layer {layer_idx})...")
+        print(f"[LINEAR MODEL REPLACEMENT] Transformation matrix shape: {T_matrix.shape}")
+        print(f"[LINEAR MODEL REPLACEMENT] Quality: {spec['quality_assessment']}")
         
-        for layer_idx in individual_transforms.keys():
-            if layer_idx in layer_residuals:
-                residual_norm = torch.norm(layer_residuals[layer_idx], 'fro').item()
-                layer_weights[layer_idx] = residual_norm
-                total_residual_norm += residual_norm
-        
-        # 정규화
-        for layer_idx in layer_weights:
-            layer_weights[layer_idx] /= total_residual_norm
-        
-        # 가중 합
-        final_T = torch.zeros(hidden_size, hidden_size, dtype=torch.float64)
-        for layer_idx in sorted(individual_transforms.keys()):
-            T_i = individual_transforms[layer_idx]
-            weight = layer_weights.get(layer_idx, 1.0 / len(individual_transforms))
-            final_T += weight * T_i
+        # Create simple linear layer with residual connection
+        class ResidualLinearLayer(nn.Module):
+            def __init__(self, transformation_matrix, hidden_size):
+                super().__init__()
+                self.hidden_size = hidden_size
+                # Store transformation as parameter
+                self.linear = nn.Linear(hidden_size, hidden_size, bias=False)
+                # Initialize with our optimized transformation
+                self.linear.weight.data = transformation_matrix.T.to(torch.float32)  # Transpose for nn.Linear convention
+                
+                print(f"[LINEAR MODEL REPLACEMENT] ResidualLinearLayer initialized with weight shape: {self.linear.weight.shape}")
             
-            print(f"[MULTI-MATRIX]   Added T_{layer_idx} × {weight:.4f} (norm: {torch.norm(T_i, 'fro').item():.4f})")
+            def forward(self, hidden_states):
+                # Apply linear transformation to compute residual
+                residual_output = self.linear(hidden_states)
+                # Apply residual connection: output = input + residual
+                output = hidden_states + residual_output
+                return output
+        
+        # Create the residual linear layer
+        linear_layer = ResidualLinearLayer(T_matrix, spec['input_dim'])
+        new_linear_layers.append(linear_layer)
+        
+        print(f"[LINEAR MODEL REPLACEMENT] Linear layer {i+1} created successfully")
     
-    elif composition_method == "importance_weighted":
-        # 방법 3: 중요도 기반 가중 합 (변환 행렬의 norm 기준)
-        print(f"[MULTI-MATRIX] Using importance-weighted composition")
-        
-        # 각 변환의 중요도 (Frobenius norm)
-        transform_norms = {}
-        total_norm = 0.0
-        
-        for layer_idx, T_i in individual_transforms.items():
-            norm = torch.norm(T_i, 'fro').item()
-            transform_norms[layer_idx] = norm
-            total_norm += norm
-        
-        # 중요도 기반 가중치
-        final_T = torch.zeros(hidden_size, hidden_size, dtype=torch.float64)
-        for layer_idx in sorted(individual_transforms.keys()):
-            T_i = individual_transforms[layer_idx]
-            importance_weight = transform_norms[layer_idx] / total_norm
-            final_T += importance_weight * T_i
+    print(f"[LINEAR MODEL REPLACEMENT] All {len(new_linear_layers)} linear layers created")
+    
+    # Handle quantized model - load float version if needed
+    if hasattr(model.model.layers[0].mlp.down_proj.weight, 'data'):
+        sample_weight = model.model.layers[0].mlp.down_proj.weight.data
+        if sample_weight.dtype == torch.uint8:
+            print(f"[LINEAR MODEL REPLACEMENT] Detected quantized model, loading float version...")
             
-            print(f"[MULTI-MATRIX]   Added T_{layer_idx} × {importance_weight:.4f} (importance: {transform_norms[layer_idx]:.4f})")
+            from transformers import AutoModelForCausalLM
+            model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                device_map="cpu",
+                torch_dtype=torch.float32,
+                token=token
+            )
+            print(f"[LINEAR MODEL REPLACEMENT] Float model loaded")
     
-    else:
-        raise ValueError(f"[MULTI-MATRIX] Unknown composition method: {composition_method}")
+    # Remove target transformer layers and insert linear layers
+    print(f"[LINEAR MODEL REPLACEMENT] Modifying model architecture...")
     
-    print(f"[MULTI-MATRIX] Final composed transformation:")
-    print(f"[MULTI-MATRIX]   Shape: {final_T.shape}")
-    print(f"[MULTI-MATRIX]   Norm: {torch.norm(final_T, 'fro').item():.4f}")
+    # Get current layers as list
+    current_layers = list(model.model.layers)
     
-    return final_T
+    # Calculate indices after accounting for already removed layers
+    actual_start_idx = start_id - num_layer
+    actual_end_idx = end_id - num_layer
+    
+    print(f"[LINEAR MODEL REPLACEMENT] Removing layers {actual_start_idx} to {actual_end_idx-1}")
+    print(f"[LINEAR MODEL REPLACEMENT] Current total layers: {len(current_layers)}")
+    
+    # Validate indices
+    if actual_start_idx < 0 or actual_end_idx > len(current_layers):
+        raise ValueError(f"[LINEAR MODEL REPLACEMENT] ERROR: Invalid layer indices after adjustment")
+    
+    # Replace transformer layers with linear layers
+    new_layer_list = (
+        current_layers[:actual_start_idx] +  # Layers before replacement
+        list(new_linear_layers) +            # Our linear replacements
+        current_layers[actual_end_idx:]      # Layers after replacement
+    )
+    
+    print(f"[LINEAR MODEL REPLACEMENT] New layer structure:")
+    print(f"[LINEAR MODEL REPLACEMENT] Before replacement: {len(current_layers[:actual_start_idx])} layers")
+    print(f"[LINEAR MODEL REPLACEMENT] Linear replacements: {len(new_linear_layers)} layers")
+    print(f"[LINEAR MODEL REPLACEMENT] After replacement: {len(current_layers[actual_end_idx:])} layers")
+    print(f"[LINEAR MODEL REPLACEMENT] Total new layers: {len(new_layer_list)}")
+    
+    # Update model configuration
+    original_num_layers = model.config.num_hidden_layers
+    new_num_layers = len(new_layer_list)
+    
+    model.config.num_hidden_layers = new_num_layers
+    model.model.layers = nn.ModuleList(new_layer_list)
+    
+    print(f"[LINEAR MODEL REPLACEMENT] Model configuration updated:")
+    print(f"[LINEAR MODEL REPLACEMENT] Original layers: {original_num_layers}")
+    print(f"[LINEAR MODEL REPLACEMENT] New layers: {new_num_layers}")
+    print(f"[LINEAR MODEL REPLACEMENT] Effective compression: {(original_num_layers - new_num_layers) / original_num_layers * 100:.1f}%")
+    
+    # Validate the new model structure
+    try:
+        print(f"[LINEAR MODEL REPLACEMENT] Validating new model structure...")
+        
+        # Test forward pass with dummy input
+        dummy_input = torch.randn(1, 10, model.config.hidden_size)
+        with torch.no_grad():
+            _ = model.model(dummy_input)
+        
+        print(f"[LINEAR MODEL REPLACEMENT] Model validation successful")
+        
+    except Exception as e:
+        print(f"[LINEAR MODEL REPLACEMENT] ERROR in model validation: {str(e)}")
+        raise
+    
+    # Save the modified model
+    print(f"[LINEAR MODEL REPLACEMENT] Saving modified model...")
+    
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    
+    try:
+        # Save model
+        model.save_pretrained(save_path)
+        print(f"[LINEAR MODEL REPLACEMENT] Model saved to: {save_path}")
+        
+        # Save tokenizer if provided
+        if tokenizer is not None:
+            tokenizer.save_pretrained(save_path)
+            print(f"[LINEAR MODEL REPLACEMENT] Tokenizer saved to: {save_path}")
+        
+        # Save linear layer metadata
+        metadata = {
+            'method': 'Linear Layer Replacement',
+            'original_layers': original_num_layers,
+            'final_layers': new_num_layers,
+            'compression_ratio': (original_num_layers - new_num_layers) / original_num_layers,
+            'replaced_layer_range': [start_id, end_id],
+            'linear_layer_specs': [
+                {
+                    'layer_index': spec['layer_index'],
+                    'importance_score': spec['importance_score'],
+                    'approximation_error': spec['approximation_error'],
+                    'quality_assessment': spec['quality_assessment']
+                }
+                for spec in linear_layers
+            ]
+        }
+        
+        import json
+        metadata_path = os.path.join(save_path, 'linear_replacement_metadata.json')
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        print(f"[LINEAR MODEL REPLACEMENT] Metadata saved to: {metadata_path}")
+        
+    except Exception as e:
+        print(f"[LINEAR MODEL REPLACEMENT] ERROR in saving: {str(e)}")
+        raise
+    
+    # Summary
+    avg_error = sum([spec['approximation_error'] for spec in linear_layers]) / len(linear_layers)
+    print(f"[LINEAR MODEL REPLACEMENT] Linear Layer Replacement complete!")
+    print(f"[LINEAR MODEL REPLACEMENT] Summary:")
+    print(f"[LINEAR MODEL REPLACEMENT] Original layers: {original_num_layers}")
+    print(f"[LINEAR MODEL REPLACEMENT] Final layers: {new_num_layers}")
+    print(f"[LINEAR MODEL REPLACEMENT] Effective compression: {(original_num_layers - new_num_layers) / original_num_layers * 100:.1f}%")
+    print(f"[LINEAR MODEL REPLACEMENT] Average approximation error: {avg_error:.4f}")
+    print(f"[LINEAR MODEL REPLACEMENT] Model saved to: {save_path}")
+    
+    return save_path
 
 
-def validate_multi_matrix_approximation(
-    layer_activations: Dict[str, torch.Tensor],
-    final_T: torch.Tensor,
-    start_id: int,
-    end_id: int
-) -> Dict[str, float]:
-    """
-    Multi-matrix 근사의 품질 검증
-    """
-    print(f"[MULTI-MATRIX] Validating multi-matrix approximation...")
-    
-    # 전체 변환 검증: Layer 23 → Layer 28
-    input_key = f'layer_{start_id-1}'
-    output_key = f'layer_{end_id}'
-    
-    if input_key not in layer_activations or output_key not in layer_activations:
-        print(f"[MULTI-MATRIX] WARNING: Cannot validate - missing boundary layers")
-        return {}
-    
-    # 실제 전체 변환 (Layer 23 → Layer 28)
-    actual_input = layer_activations[input_key].to(torch.float64)
-    actual_output = layer_activations[output_key].to(torch.float64)
-    actual_total_residual = actual_output - actual_input
-    
-    # Multi-matrix 근사 결과
-    predicted_total_residual = actual_input @ final_T
-    predicted_output = actual_input + predicted_total_residual
-    
-    # 검증 메트릭들
-    validation_size = min(2000, actual_input.shape[0])
-    val_input = actual_input[:validation_size]
-    val_actual_output = actual_output[:validation_size]
-    val_predicted_output = predicted_output[:validation_size]
-    val_actual_residual = actual_total_residual[:validation_size]
-    val_predicted_residual = predicted_total_residual[:validation_size]
-    
-    # 오차 계산
-    residual_error = torch.norm(val_predicted_residual - val_actual_residual, 'fro') / torch.norm(val_actual_residual, 'fro')
-    output_error = torch.norm(val_predicted_output - val_actual_output, 'fro') / torch.norm(val_actual_output, 'fro')
-    
-    # Feature-wise 분석
-    feature_errors = torch.norm(val_predicted_residual - val_actual_residual, dim=0)
-    mean_feature_error = feature_errors.mean().item()
-    max_feature_error = feature_errors.max().item()
-    min_feature_error = feature_errors.min().item()
-    
-    validation_metrics = {
-        'residual_error': residual_error.item(),
-        'output_error': output_error.item(),
-        'mean_feature_error': mean_feature_error,
-        'max_feature_error': max_feature_error,
-        'min_feature_error': min_feature_error,
-        'validation_samples': validation_size
-    }
-    
-    print(f"[MULTI-MATRIX] Validation results:")
-    print(f"[MULTI-MATRIX]   Validation samples: {validation_size}")
-    print(f"[MULTI-MATRIX]   Residual approximation error: {residual_error.item():.1%}")
-    print(f"[MULTI-MATRIX]   Full output error: {output_error.item():.1%}")
-    print(f"[MULTI-MATRIX]   Feature error range: {min_feature_error:.6f} to {max_feature_error:.6f}")
-    print(f"[MULTI-MATRIX]   Mean feature error: {mean_feature_error:.6f}")
-    
-    # 품질 평가
-    if output_error.item() < 0.10:
-        quality = "EXCELLENT"
-    elif output_error.item() < 0.15:
-        quality = "VERY GOOD"
-    elif output_error.item() < 0.25:
-        quality = "GOOD"
-    elif output_error.item() < 0.35:
-        quality = "MODERATE"
-    else:
-        quality = "POOR"
-    
-    print(f"[MULTI-MATRIX] {quality}: Multi-matrix residual approximation")
-    validation_metrics['quality_assessment'] = quality
-    
-    return validation_metrics
-
-
-def multi_matrix_residual_method(
+def linear_layer_replacement_method(
     model_path: str,
     dataset: str,
     dataset_column: str,
@@ -3013,21 +2496,45 @@ def multi_matrix_residual_method(
     distances_path: str = "./distances.pth",
     num_A: int = 1,
     merge_consecutive: bool = True,
-    composition_method: str = "weighted_sum",
     **kwargs
 ) -> str:
     """
-    Multi-Matrix Residual 메소드 전체 파이프라인
+    Main function for Linear Layer Replacement method
+    
+    This method:
+    1. Uses existing Phase 2 and Phase 3 analysis
+    2. Creates optimized linear layer replacements for each transformer block
+    3. Replaces transformer blocks with lightweight linear layers
+    4. Maintains residual connections and model structure
+    
+    Args:
+        model_path: Path to pretrained model
+        dataset: Dataset name  
+        dataset_column: Column containing text data
+        batch_size: Batch size for processing
+        max_length: Maximum sequence length
+        layers_to_skip: Number of layers to skip between compared blocks
+        dataset_size: Size of calibration dataset
+        dataset_subset: Dataset subset to use
+        use_4bit: Whether to use 4-bit quantization
+        save_path: Path to save the processed model
+        token: HuggingFace token
+        distances_path: Path to pre-computed distance metrics
+        num_A: Number of blocks to process
+        merge_consecutive: Whether to merge consecutive blocks
+        **kwargs: Additional arguments
+        
+    Returns:
+        Path to the final processed model
     """
-    print(f"[MULTI-MATRIX] Starting Multi-Matrix Residual method...")
-    print(f"[MULTI-MATRIX] Model: {model_path}")
-    print(f"[MULTI-MATRIX] Composition method: {composition_method}")
+    print(f"[LINEAR REPLACEMENT METHOD] Starting Linear Layer Replacement pipeline...")
+    print(f"[LINEAR REPLACEMENT METHOD] Model: {model_path}")
+    print(f"[LINEAR REPLACEMENT METHOD] Dataset: {dataset}, Size: {dataset_size}")
+    print(f"[LINEAR REPLACEMENT METHOD] Layers to skip: {layers_to_skip}")
     
     # Import required modules
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
     from .utils import get_calib_dataloader, select_non_overlapping_blocks
-    import torch
-    import os
     
     device_map = "auto" if torch.cuda.is_available() else "cpu"
     quantization_config = None
@@ -3040,8 +2547,7 @@ def multi_matrix_residual_method(
             bnb_4bit_compute_dtype=torch.bfloat16
         )
     
-    # Load model
-    print(f"[MULTI-MATRIX] Loading model...")
+    print(f"[LINEAR REPLACEMENT METHOD] Loading model...")
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         device_map=device_map,
@@ -3054,7 +2560,8 @@ def multi_matrix_residual_method(
     if not tokenizer.pad_token:
         tokenizer.pad_token = tokenizer.eos_token
     
-    print(f"[MULTI-MATRIX] Model loaded. Hidden size: {model.config.hidden_size}")
+    print(f"[LINEAR REPLACEMENT METHOD] Model loaded. Hidden size: {model.config.hidden_size}")
+    print(f"[LINEAR REPLACEMENT METHOD] Number of layers: {model.config.num_hidden_layers}")
     
     model.eval()
     dataloader = get_calib_dataloader(
@@ -3066,8 +2573,10 @@ def multi_matrix_residual_method(
         tokenizer
     )
     
-    # Load distances and select blocks
-    print(f"[MULTI-MATRIX] Loading distances and selecting blocks...")
+    print(f"[LINEAR REPLACEMENT METHOD] Data loader created")
+    
+    # Load pre-computed distances and select blocks
+    print(f"[LINEAR REPLACEMENT METHOD] Loading distances from: {distances_path}")
     average_distances = torch.load(distances_path, weights_only=False)
     selected_blocks = select_non_overlapping_blocks(
         average_distances,
@@ -3081,18 +2590,20 @@ def multi_matrix_residual_method(
     num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
     num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
     
-    print(f"[MULTI-MATRIX] Selected blocks: {selected_blocks}")
+    print(f"[LINEAR REPLACEMENT METHOD] Selected blocks: {selected_blocks}")
     
-    # Process each block
+    # Process each selected block
+    final_save_path = None
+    
     for i in range(len(selected_blocks)):
         start_id = start_ids[i]
         end_id = end_ids[i]
         num_layer = num_layers[i]
         
-        print(f"[MULTI-MATRIX] Processing block {i+1}/{len(selected_blocks)}: layers {start_id} to {end_id}")
+        print(f"[LINEAR REPLACEMENT METHOD] Processing block {i+1}/{len(selected_blocks)}: layers {start_id} to {end_id}")
         
-        # Step 1: Collect layer-wise activations
-        layer_activations = collect_layer_wise_activations(
+        # Run Phase 2 and Phase 3 analysis
+        activations = collect_enhanced_activations_streaming(
             model=model,
             start_id=start_id - num_layer,
             end_id=end_id - num_layer,
@@ -3103,92 +2614,66 @@ def multi_matrix_residual_method(
             tokenizer=tokenizer
         )
         
-        # Step 2: Estimate individual transformations
-        individual_transforms, layer_residuals = estimate_multi_matrix_residual_transformations(
-            layer_activations=layer_activations,
+        gate_analysis = analyze_gate_patterns_improved(
+            activation_stats=activations,
+            start_id=start_id - num_layer,
+            end_id=end_id - num_layer
+        )
+        
+        print(f"[LINEAR REPLACEMENT METHOD] Phase 2-3 complete for block {i+1}")
+        
+        # Create linear layer replacements
+        linear_layers = create_linear_layer_replacements(
+            activation_stats=activations,
+            gate_analysis=gate_analysis,
             start_id=start_id - num_layer,
             end_id=end_id - num_layer,
             hidden_size=model.config.hidden_size
         )
         
-        # Step 3: Compose final transformation
-        final_T = compose_multi_matrix_transformation(
-            individual_transforms=individual_transforms,
-            layer_residuals=layer_residuals,
-            start_id=start_id - num_layer,
-            end_id=end_id - num_layer,
-            composition_method=composition_method
-        )
+        print(f"[LINEAR REPLACEMENT METHOD] Linear layer creation complete for block {i+1}")
         
-        # Step 4: Validate approximation
-        validation_metrics = validate_multi_matrix_approximation(
-            layer_activations=layer_activations,
-            final_T=final_T,
-            start_id=start_id - num_layer,
-            end_id=end_id - num_layer
-        )
+        # Apply linear layer replacements to model
+        if save_path is None:
+            import os
+            if not os.path.exists('output_models'):
+                os.makedirs('output_models')
+            base_save_path = "output_models/" + (
+                f"{model_path}_{layers_to_skip}_layers_LINEAR_block_{i+1}"
+            ).replace("/", "_")
+        else:
+            base_save_path = f"{save_path}_block_{i+1}"
         
-        # Step 5: Apply transformation to model
-        print(f"[MULTI-MATRIX] Applying multi-matrix transformation to model...")
-        
-        # Cleanup quantized model and load fresh CPU model
-        del model
-        torch.cuda.empty_cache()
-        
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            device_map="cpu",
-            torch_dtype=torch.float32,
+        final_save_path = apply_linear_layer_replacements_to_model(
+            model=model,
+            linear_layers=linear_layers,
+            start_id=start_id,
+            end_id=end_id,
+            num_layer=num_layer,
+            save_path=base_save_path,
+            tokenizer=tokenizer,
+            model_path=model_path,
             token=token
         )
         
-        # Truncate model
-        from .utils import truncate_model
-        model = truncate_model(model, start_id - num_layer, end_id - num_layer)
-        
-        # Apply transformation
-        target_layer_idx = start_id - num_layer - 1
-        if target_layer_idx >= 0 and target_layer_idx < len(model.model.layers):
-            original_weight = model.model.layers[target_layer_idx].mlp.down_proj.weight.data.clone()
-            new_weight = final_T.T.float() @ original_weight.to(torch.float64)
-            model.model.layers[target_layer_idx].mlp.down_proj.weight.data.copy_(new_weight.to(original_weight.dtype))
-            
-            print(f"[MULTI-MATRIX] Applied transformation to layer {target_layer_idx}")
-            print(f"[MULTI-MATRIX]   Original weight norm: {torch.norm(original_weight.float(), 'fro').item():.4f}")
-            print(f"[MULTI-MATRIX]   New weight norm: {torch.norm(new_weight.float(), 'fro').item():.4f}")
-        
-        # Save model
-        if save_path is None:
-            os.makedirs('output_models', exist_ok=True)
-            save_path = f"output_models/{model_path}_{layers_to_skip}_layers_MultiMatrix_{composition_method}".replace("/", "_")
-        
-        final_save_path = f"{save_path}_block_{i+1}"
-        
-        model.save_pretrained(final_save_path)
-        tokenizer.save_pretrained(final_save_path)
-        
-        # Save metadata
-        metadata = {
-            'method': 'Multi-Matrix Residual',
-            'composition_method': composition_method,
-            'original_layers': model.config.num_hidden_layers + (end_id - start_id),
-            'final_layers': model.config.num_hidden_layers,
-            'layers_removed': end_id - start_id,
-            'individual_transforms': len(individual_transforms),
-            'final_transformation_norm': torch.norm(final_T, 'fro').item(),
-            'validation_metrics': validation_metrics
-        }
-        
-        import json
-        metadata_path = os.path.join(final_save_path, 'multi_matrix_metadata.json')
-        with open(metadata_path, 'w') as f:
-            json.dump(metadata, f, indent=2)
-        
-        print(f"[MULTI-MATRIX] Block {i+1} complete. Model saved to: {final_save_path}")
+        print(f"[LINEAR REPLACEMENT METHOD] Model replacement complete for block {i+1}")
         
         # Memory cleanup
-        del layer_activations, individual_transforms, layer_residuals, final_T
+        del activations
+        del gate_analysis
+        del linear_layers
         torch.cuda.empty_cache()
+        
+        print(f"[LINEAR REPLACEMENT METHOD] Memory cleanup completed for block {i+1}")
     
-    print(f"[MULTI-MATRIX] Multi-Matrix Residual method complete!")
+    # Cleanup
+    del model
+    torch.cuda.empty_cache()
+    
+    print(f"[LINEAR REPLACEMENT METHOD] Linear Layer Replacement pipeline complete!")
+    print(f"[LINEAR REPLACEMENT METHOD] Final model saved to: {final_save_path}")
+    
     return final_save_path
+
+    
+

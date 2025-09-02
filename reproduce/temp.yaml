@@ -1,6 +1,6 @@
 # Gate-Aware Coupled Optimization (GACO) Configuration
 
-method: "multi_matrix"  # Use our new gate-aware coupled optimization method
+method: "linear"  # Use our new gate-aware coupled optimization method
 model_path: "meta-llama/Meta-Llama-3-8B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
@@ -34,5 +34,3 @@ tasks:
 # Debug settings
 verbose: True
 save_intermediate_results: False
-
-composition_method: "weighted_sum"  
