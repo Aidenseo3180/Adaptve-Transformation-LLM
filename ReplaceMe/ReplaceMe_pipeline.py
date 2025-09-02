@@ -77,6 +77,16 @@ def ReplaceMe_pipeline(config):
         path = gate_aware_coupled_method(**filtered_config)
         print(f"[Pipeline] GACO method complete, output path: {path}")
 
+    elif config["method"] == "multi_matrix":
+        from gate_aware_coupled import multi_matrix_residual_method
+        signature = inspect.signature(gate_aware_coupled_method)
+        filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
+        
+        print(f"[Pipeline] GACO config parameters: {list(filtered_config.keys())}")
+        print(f"[Pipeline] Model path: {filtered_config.get('model_path', 'not specified')}")
+        print(f"[Pipeline] Dataset: {filtered_config.get('dataset', 'not specified')}")
+        print(f"[Pipeline] Layers to skip: {filtered_config.get('layers_to_skip', 'not specified')}")
+        path = multi_matrix_residual_method(**filtered_config)
 
     else:  # Original cosine/adam methods
         signature = inspect.signature(cosine_dist)
