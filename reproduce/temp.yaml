@@ -25,7 +25,11 @@ coupling_strength: 0.5       # Strength of coupling between up/down projections
 consistency_regularization: 0.1  # Regularization for transformation consistency
 
 # Evaluation parameters (optional)
-tasks: "default"
+tasks:
+  boolq:
+    fewshots: 0
+  lambada_openai:
+    fewshots: 0
 
 # Debug settings
 verbose: True

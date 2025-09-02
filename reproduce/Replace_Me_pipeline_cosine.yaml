@@ -5,9 +5,9 @@ dataset_column: "text"
 batch_size: 4 # 8
 max_length: 512 # 1024
 layers_to_skip: 4
-dataset_size: 2000 # 8000
+dataset_size: 1000 # 8000
 dataset_subset: "train"
-use_4bit: False
+use_4bit: True
 save_path: null
 min_distance_layer: 20
 save_transform_only: True
@@ -20,3 +20,8 @@ distances_path: null
 num_A: 1
 merge_consecutive: False 
 accurate: False # False will run cosine(xA, y - z) where z is the residual attention info, True to run cosine(xA + z, y)
+tasks:
+  boolq:
+    fewshots: 0
+  lambada_openai:
+    fewshots: 0

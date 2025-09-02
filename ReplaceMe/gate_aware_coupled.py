@@ -744,6 +744,7 @@ def estimate_coupled_transformations(
     return transformations
 
 
+
 def estimate_coupled_transformations_residual_aware(
     activation_stats: Dict, 
     gate_analysis: Dict, 
@@ -752,274 +753,294 @@ def estimate_coupled_transformations_residual_aware(
     hidden_size: int
 ) -> Dict[str, torch.Tensor]:
     """
-    Phase 4: Residual-Aware Gate-weighted Transformation Estimation
+    Phase 4: Residual-Aware Gate-weighted Transformation Estimation (IMPROVED)
     
-    This is a simplified, stable approach that:
-    1. Learns residual transformation: X @ T ≈ (Y - X) instead of X @ T ≈ Y
-    2. Uses gate importance for weighted least squares
-    3. Focuses on single stable transformation rather than complex multi-component
-    
-    Args:
-        activation_stats: Statistics from Phase 2
-        gate_analysis: Analysis results from Phase 3
-        start_id: Starting layer index
-        end_id: Ending layer index
-        hidden_size: Model hidden dimension
-        
-    Returns:
-        Dictionary containing residual-aware transformation
+    개선사항:
+    1. Top-k gate importance 보존
+    2. 강화된 차별화 팩터
+    3. 정보 손실 최소화
     """
-    print(f"[Phase 4 RESIDUAL] Starting Residual-Aware Gate-weighted Transformation...")
-    print(f"[Phase 4 RESIDUAL] Target layers: {start_id} to {end_id-1}")
-    print(f"[Phase 4 RESIDUAL] Hidden size: {hidden_size}")
+    print(f"[Phase 4 RESIDUAL IMPROVED] Starting Enhanced Gate-weighted Transformation...")
+    print(f"[Phase 4 RESIDUAL IMPROVED] Target layers: {start_id} to {end_id-1}")
+    print(f"[Phase 4 RESIDUAL IMPROVED] Hidden size: {hidden_size}")
     
     # Get input/output data for transformation estimation
     input_activations = activation_stats['input_activations']  # X: [samples, hidden_size]
     output_activations = activation_stats['output_activations']  # Y: [samples, hidden_size]
     
     num_samples = input_activations.shape[0]
-    print(f"[Phase 4 RESIDUAL] Using {num_samples} samples for transformation estimation")
+    print(f"[Phase 4 RESIDUAL IMPROVED] Using {num_samples} samples for transformation estimation")
     
     if num_samples == 0:
-        raise ValueError("[Phase 4 RESIDUAL] ERROR: No input/output samples available")
+        raise ValueError("[Phase 4 RESIDUAL IMPROVED] ERROR: No input/output samples available")
     
     # Convert to float64 for numerical stability
     X = input_activations.to(torch.float64)  # [num_samples, hidden_size]
     Y = output_activations.to(torch.float64)  # [num_samples, hidden_size]
     
-    print(f"[Phase 4 RESIDUAL] Input shape: {X.shape}, Output shape: {Y.shape}")
+    print(f"[Phase 4 RESIDUAL IMPROVED] Input shape: {X.shape}, Output shape: {Y.shape}")
     
-    # Step 1: Compute residual (the key innovation)
-    # Instead of learning X @ T = Y, we learn X @ T = (Y - X)
-    # This focuses on the transformation that the blocks actually perform
+    # Step 1: Compute residual
     residual = Y - X  # [num_samples, hidden_size]
     
-    print(f"[Phase 4 RESIDUAL] Residual computation:")
-    print(f"[Phase 4 RESIDUAL]   Residual norm: {torch.norm(residual, 'fro').item():.4f}")
-    print(f"[Phase 4 RESIDUAL]   Residual mean: {residual.mean().item():.6f}")
-    print(f"[Phase 4 RESIDUAL]   Residual std: {residual.std().item():.6f}")
-    print(f"[Phase 4 RESIDUAL]   Residual/Input ratio: {(torch.norm(residual, 'fro') / torch.norm(X, 'fro')).item():.4f}")
+    print(f"[Phase 4 RESIDUAL IMPROVED] Residual computation:")
+    print(f"[Phase 4 RESIDUAL IMPROVED]   Residual norm: {torch.norm(residual, 'fro').item():.4f}")
+    print(f"[Phase 4 RESIDUAL IMPROVED]   Residual mean: {residual.mean().item():.6f}")
+    print(f"[Phase 4 RESIDUAL IMPROVED]   Residual std: {residual.std().item():.6f}")
+    print(f"[Phase 4 RESIDUAL IMPROVED]   Residual/Input ratio: {(torch.norm(residual, 'fro') / torch.norm(X, 'fro')).item():.4f}")
     
-    # Step 2: Create gate-importance based feature weights
-    print(f"[Phase 4 RESIDUAL] Creating gate-importance feature weights...")
+    # Step 2: Enhanced Gate-importance based feature weights with TOP-K preservation
+    print(f"[Phase 4 RESIDUAL IMPROVED] Creating enhanced gate-importance feature weights...")
     
     # Initialize feature importance weights
-    feature_importance = torch.ones(hidden_size, dtype=torch.float64)
+    feature_importance = torch.zeros(hidden_size, dtype=torch.float64)
+    total_contribution = torch.zeros(hidden_size, dtype=torch.float64)
     
-    # Aggregate gate importance across layers with neuron category weighting
-    total_importance = 0.0
+    # Enhanced differentiation factors (much stronger)
+    CRITICAL_FACTOR = 10.0      # Critical neurons get 10x weight
+    CONTEXT_FACTOR = 5.0        # Context-dependent get 5x weight  
+    STABLE_FACTOR = 2.0         # Stable active get 2x weight
+    PRUNING_FACTOR = 0.1        # Pruning candidates get 0.1x weight
+    
+    print(f"[Phase 4 RESIDUAL IMPROVED] Enhanced weighting factors:")
+    print(f"[Phase 4 RESIDUAL IMPROVED]   Critical: {CRITICAL_FACTOR}x")
+    print(f"[Phase 4 RESIDUAL IMPROVED]   Context-dependent: {CONTEXT_FACTOR}x")
+    print(f"[Phase 4 RESIDUAL IMPROVED]   Stable: {STABLE_FACTOR}x")
+    print(f"[Phase 4 RESIDUAL IMPROVED]   Pruning: {PRUNING_FACTOR}x")
+    
     processed_layers = 0
+    layer_contributions = {}
     
     for layer_idx in range(start_id, end_id):
         if layer_idx not in gate_analysis['gate_activation_patterns']:
-            print(f"[Phase 4 RESIDUAL] WARNING: No patterns for layer {layer_idx}")
+            print(f"[Phase 4 RESIDUAL IMPROVED] WARNING: No patterns for layer {layer_idx}")
             continue
         if layer_idx not in gate_analysis['information_flow_weights']:
-            print(f"[Phase 4 RESIDUAL] WARNING: No flow weights for layer {layer_idx}")
+            print(f"[Phase 4 RESIDUAL IMPROVED] WARNING: No flow weights for layer {layer_idx}")
             continue
             
         patterns = gate_analysis['gate_activation_patterns'][layer_idx]
         layer_weights = gate_analysis['information_flow_weights'][layer_idx]['sigmoid_weights']
         intermediate_size = layer_weights.shape[0]
         
-        print(f"[Phase 4 RESIDUAL] Processing layer {layer_idx}:")
-        print(f"[Phase 4 RESIDUAL]   Intermediate size: {intermediate_size}")
-        print(f"[Phase 4 RESIDUAL]   Critical neurons: {len(patterns['critical_neurons'])}")
-        print(f"[Phase 4 RESIDUAL]   Context neurons: {len(patterns['context_dependent_neurons'])}")
-        print(f"[Phase 4 RESIDUAL]   Stable neurons: {len(patterns['stable_active_neurons'])}")
-        print(f"[Phase 4 RESIDUAL]   Pruning neurons: {len(patterns['pruning_candidate_neurons'])}")
+        print(f"[Phase 4 RESIDUAL IMPROVED] Processing layer {layer_idx}:")
+        print(f"[Phase 4 RESIDUAL IMPROVED]   Intermediate size: {intermediate_size}")
+        print(f"[Phase 4 RESIDUAL IMPROVED]   Critical neurons: {len(patterns['critical_neurons'])}")
+        print(f"[Phase 4 RESIDUAL IMPROVED]   Context neurons: {len(patterns['context_dependent_neurons'])}")
+        print(f"[Phase 4 RESIDUAL IMPROVED]   Stable neurons: {len(patterns['stable_active_neurons'])}")
+        print(f"[Phase 4 RESIDUAL IMPROVED]   Pruning neurons: {len(patterns['pruning_candidate_neurons'])}")
         
-        # Create enhanced weights based on neuron categories
+        # Create category-enhanced weights
         enhanced_layer_weights = layer_weights.clone()
         
-        # Apply category-specific multipliers
+        # Apply much stronger category-specific multipliers
         for neuron_idx in patterns['critical_neurons']:
             if neuron_idx < intermediate_size:
-                enhanced_layer_weights[neuron_idx] *= 2.0  # High importance
+                enhanced_layer_weights[neuron_idx] *= CRITICAL_FACTOR
         
         for neuron_idx in patterns['context_dependent_neurons']:
             if neuron_idx < intermediate_size:
-                enhanced_layer_weights[neuron_idx] *= 1.5  # Medium-high importance
+                enhanced_layer_weights[neuron_idx] *= CONTEXT_FACTOR
         
         for neuron_idx in patterns['stable_active_neurons']:
             if neuron_idx < intermediate_size:
-                enhanced_layer_weights[neuron_idx] *= 1.2  # Slightly higher importance
+                enhanced_layer_weights[neuron_idx] *= STABLE_FACTOR
         
         for neuron_idx in patterns['pruning_candidate_neurons']:
             if neuron_idx < intermediate_size:
-                enhanced_layer_weights[neuron_idx] *= 0.5  # Lower importance
+                enhanced_layer_weights[neuron_idx] *= PRUNING_FACTOR
         
-        # Map intermediate dimension to hidden dimension
+        print(f"[Phase 4 RESIDUAL IMPROVED]   Enhanced weights range: {enhanced_layer_weights.min():.4f} to {enhanced_layer_weights.max():.4f}")
+        
+        # TOP-K preservation mapping instead of averaging
         if intermediate_size >= hidden_size:
-            if intermediate_size % hidden_size == 0:
-                stride = intermediate_size // hidden_size
-                mapped_weights = enhanced_layer_weights.view(hidden_size, stride).mean(dim=1)
-            else:
-                # Use average pooling for non-divisible sizes
-                chunk_size = intermediate_size / hidden_size
-                mapped_weights = torch.zeros(hidden_size, dtype=enhanced_layer_weights.dtype)
-                for i in range(hidden_size):
-                    start_idx = int(i * chunk_size)
-                    end_idx = int((i + 1) * chunk_size)
-                    if start_idx < intermediate_size:
-                        end_idx = min(end_idx, intermediate_size)
-                        mapped_weights[i] = enhanced_layer_weights[start_idx:end_idx].mean()
+            print(f"[Phase 4 RESIDUAL IMPROVED]   Using TOP-K selection for downsampling...")
+            
+            # Method 1: Select top-k most important neurons
+            top_k_values, top_k_indices = torch.topk(enhanced_layer_weights, k=hidden_size)
+            mapped_weights = top_k_values
+            
+            print(f"[Phase 4 RESIDUAL IMPROVED]   Selected top {hidden_size} neurons")
+            print(f"[Phase 4 RESIDUAL IMPROVED]   Top-k range: {mapped_weights.min():.4f} to {mapped_weights.max():.4f}")
+            
         else:
-            # Upsample for smaller intermediate sizes
+            print(f"[Phase 4 RESIDUAL IMPROVED]   Using intelligent upsampling...")
+            
+            # For smaller intermediate sizes, use strategic repetition
             if hidden_size % intermediate_size == 0:
                 repeat_factor = hidden_size // intermediate_size
                 mapped_weights = enhanced_layer_weights.repeat_interleave(repeat_factor)[:hidden_size]
             else:
-                # Use interpolation
+                # Use weighted interpolation that preserves importance structure
                 scale_factor = hidden_size / intermediate_size
                 mapped_weights = torch.zeros(hidden_size, dtype=enhanced_layer_weights.dtype)
+                
                 for i in range(hidden_size):
-                    src_idx = min(int(i / scale_factor), intermediate_size - 1)
-                    mapped_weights[i] = enhanced_layer_weights[src_idx]
+                    # Find the nearest source indices and their weights
+                    src_float = i / scale_factor
+                    src_low = int(src_float)
+                    src_high = min(src_low + 1, intermediate_size - 1)
+                    
+                    if src_low == src_high:
+                        mapped_weights[i] = enhanced_layer_weights[src_low]
+                    else:
+                        # Weighted interpolation
+                        weight_high = src_float - src_low
+                        weight_low = 1.0 - weight_high
+                        mapped_weights[i] = (weight_low * enhanced_layer_weights[src_low] + 
+                                           weight_high * enhanced_layer_weights[src_high])
         
-        # Accumulate importance across layers
-        feature_importance += mapped_weights.to(torch.float64)
-        total_importance += mapped_weights.sum().item()
+        # Store layer contribution for analysis
+        layer_contributions[layer_idx] = {
+            'original_range': (layer_weights.min().item(), layer_weights.max().item()),
+            'enhanced_range': (enhanced_layer_weights.min().item(), enhanced_layer_weights.max().item()),
+            'mapped_range': (mapped_weights.min().item(), mapped_weights.max().item()),
+            'critical_ratio': len(patterns['critical_neurons']) / intermediate_size,
+            'pruning_ratio': len(patterns['pruning_candidate_neurons']) / intermediate_size
+        }
+        
+        # Accumulate importance with layer-specific weighting
+        layer_importance = gate_analysis['layer_importance_scores'][layer_idx]['total_importance']
+        layer_weight_factor = layer_importance / 1000.0  # Normalize roughly to 1.0 for typical layers
+        
+        weighted_contribution = mapped_weights.to(torch.float64) * layer_weight_factor
+        feature_importance += weighted_contribution
+        total_contribution += layer_weight_factor
+        
         processed_layers += 1
         
-        print(f"[Phase 4 RESIDUAL]   Mapped weights shape: {mapped_weights.shape}")
-        print(f"[Phase 4 RESIDUAL]   Mapped weights range: {mapped_weights.min():.4f} to {mapped_weights.max():.4f}")
+        print(f"[Phase 4 RESIDUAL IMPROVED]   Mapped weights shape: {mapped_weights.shape}")
+        print(f"[Phase 4 RESIDUAL IMPROVED]   Final mapped range: {mapped_weights.min():.4f} to {mapped_weights.max():.4f}")
+        print(f"[Phase 4 RESIDUAL IMPROVED]   Layer weight factor: {layer_weight_factor:.4f}")
     
     if processed_layers > 0:
-        # Normalize by number of layers
-        feature_importance = feature_importance / processed_layers
-        average_importance = total_importance / processed_layers
+        # Normalize by total contribution instead of simple averaging
+        feature_importance = feature_importance / (total_contribution + 1e-8)
         
-        # Ensure positive weights and reasonable range
-        feature_importance = torch.clamp(feature_importance, min=0.1, max=5.0)
+        # Ensure reasonable range and positive weights
+        feature_importance = torch.clamp(feature_importance, min=0.01, max=50.0)
         
-        print(f"[Phase 4 RESIDUAL] Feature importance statistics:")
-        print(f"[Phase 4 RESIDUAL]   Processed layers: {processed_layers}")
-        print(f"[Phase 4 RESIDUAL]   Average importance: {average_importance:.4f}")
-        print(f"[Phase 4 RESIDUAL]   Feature importance range: {feature_importance.min():.4f} to {feature_importance.max():.4f}")
-        print(f"[Phase 4 RESIDUAL]   High importance features (>2.0): {(feature_importance > 2.0).sum().item()}")
-        print(f"[Phase 4 RESIDUAL]   Low importance features (<1.0): {(feature_importance < 1.0).sum().item()}")
+        print(f"[Phase 4 RESIDUAL IMPROVED] Enhanced feature importance statistics:")
+        print(f"[Phase 4 RESIDUAL IMPROVED]   Processed layers: {processed_layers}")
+        print(f"[Phase 4 RESIDUAL IMPROVED]   Feature importance range: {feature_importance.min():.4f} to {feature_importance.max():.4f}")
+        print(f"[Phase 4 RESIDUAL IMPROVED]   High importance features (>5.0): {(feature_importance > 5.0).sum().item()}")
+        print(f"[Phase 4 RESIDUAL IMPROVED]   Medium importance features (2.0-5.0): {((feature_importance >= 2.0) & (feature_importance <= 5.0)).sum().item()}")
+        print(f"[Phase 4 RESIDUAL IMPROVED]   Low importance features (0.5-2.0): {((feature_importance >= 0.5) & (feature_importance < 2.0)).sum().item()}")
+        print(f"[Phase 4 RESIDUAL IMPROVED]   Very low importance features (<0.5): {(feature_importance < 0.5).sum().item()}")
+        
+        # Show layer contribution analysis
+        print(f"[Phase 4 RESIDUAL IMPROVED] Layer contribution analysis:")
+        for layer_idx, contrib in layer_contributions.items():
+            print(f"[Phase 4 RESIDUAL IMPROVED]   Layer {layer_idx}: "
+                  f"critical={contrib['critical_ratio']:.2%}, "
+                  f"pruning={contrib['pruning_ratio']:.2%}, "
+                  f"enhanced_boost={(contrib['enhanced_range'][1] / contrib['original_range'][1]):.1f}x")
     else:
-        print(f"[Phase 4 RESIDUAL] WARNING: No layers processed, using uniform weights")
+        print(f"[Phase 4 RESIDUAL IMPROVED] WARNING: No layers processed, using uniform weights")
         feature_importance = torch.ones(hidden_size, dtype=torch.float64)
     
-    # Step 3: Gate-weighted Residual Least Squares
-    # Goal: X @ T ≈ residual, with feature importance weighting
-    # Formulation: min ||sqrt(W) * (X @ T - residual)||²
-    # where W = diag(feature_importance)
-    
-    print(f"[Phase 4 RESIDUAL] Solving gate-weighted residual least squares...")
+    # Rest of the function remains the same...
+    # Step 3: Gate-weighted Residual Least Squares (unchanged)
+    print(f"[Phase 4 RESIDUAL IMPROVED] Solving enhanced gate-weighted residual least squares...")
     
     # Create feature weight matrix
     W_features = torch.diag(feature_importance)  # [hidden_size, hidden_size]
-    
-    # Apply weighting to both sides of the equation: X @ T ≈ residual
-    # Weighted formulation: sqrt(W) @ X @ T ≈ sqrt(W) @ residual
     sqrt_W = torch.diag(torch.sqrt(feature_importance))  # [hidden_size, hidden_size]
     
     X_weighted = X @ sqrt_W  # [num_samples, hidden_size]
     residual_weighted = residual @ sqrt_W  # [num_samples, hidden_size]
     
-    print(f"[Phase 4 RESIDUAL] Weighted matrix shapes:")
-    print(f"[Phase 4 RESIDUAL]   X_weighted: {X_weighted.shape}")
-    print(f"[Phase 4 RESIDUAL]   residual_weighted: {residual_weighted.shape}")
+    print(f"[Phase 4 RESIDUAL IMPROVED] Weighted matrix shapes:")
+    print(f"[Phase 4 RESIDUAL IMPROVED]   X_weighted: {X_weighted.shape}")
+    print(f"[Phase 4 RESIDUAL IMPROVED]   residual_weighted: {residual_weighted.shape}")
     
-    # Solve weighted least squares: X_weighted @ T = residual_weighted
-    # Solution: T = (X_weighted.T @ X_weighted)^(-1) @ X_weighted.T @ residual_weighted
-    
+    # Solve weighted least squares
     try:
         XTX_weighted = X_weighted.T @ X_weighted  # [hidden_size, hidden_size]
         XTR_weighted = X_weighted.T @ residual_weighted  # [hidden_size, hidden_size]
         
-        print(f"[Phase 4 RESIDUAL] Normal equation matrices:")
-        print(f"[Phase 4 RESIDUAL]   XTX_weighted shape: {XTX_weighted.shape}")
-        print(f"[Phase 4 RESIDUAL]   XTR_weighted shape: {XTR_weighted.shape}")
+        print(f"[Phase 4 RESIDUAL IMPROVED] Normal equation matrices:")
+        print(f"[Phase 4 RESIDUAL IMPROVED]   XTX_weighted shape: {XTX_weighted.shape}")
+        print(f"[Phase 4 RESIDUAL IMPROVED]   XTR_weighted shape: {XTR_weighted.shape}")
         
-        # Add regularization for numerical stability
+        # Add regularization
         reg_strength = 1e-4
         regularizer = reg_strength * torch.eye(hidden_size, dtype=torch.float64)
         XTX_reg = XTX_weighted + regularizer
         
-        print(f"[Phase 4 RESIDUAL] Added regularization: {reg_strength}")
+        print(f"[Phase 4 RESIDUAL IMPROVED] Added regularization: {reg_strength}")
         
         # Solve the linear system
         T_residual = torch.linalg.solve(XTX_reg, XTR_weighted)
         
-        print(f"[Phase 4 RESIDUAL] Transformation computed successfully")
-        print(f"[Phase 4 RESIDUAL] T_residual shape: {T_residual.shape}")
-        print(f"[Phase 4 RESIDUAL] T_residual norm: {torch.norm(T_residual, 'fro').item():.4f}")
+        print(f"[Phase 4 RESIDUAL IMPROVED] Transformation computed successfully")
+        print(f"[Phase 4 RESIDUAL IMPROVED] T_residual shape: {T_residual.shape}")
+        print(f"[Phase 4 RESIDUAL IMPROVED] T_residual norm: {torch.norm(T_residual, 'fro').item():.4f}")
         
-        # Check condition number for numerical stability
+        # Check condition number
         try:
             cond_num = torch.linalg.cond(XTX_reg).item()
-            print(f"[Phase 4 RESIDUAL] Condition number: {cond_num:.2e}")
-            if cond_num > 1e12:
-                print(f"[Phase 4 RESIDUAL] WARNING: High condition number indicates numerical instability")
+            print(f"[Phase 4 RESIDUAL IMPROVED] Condition number: {cond_num:.2e}")
         except:
-            print(f"[Phase 4 RESIDUAL] Could not compute condition number")
+            print(f"[Phase 4 RESIDUAL IMPROVED] Could not compute condition number")
         
     except Exception as e:
-        print(f"[Phase 4 RESIDUAL] ERROR in solve: {str(e)}")
-        print(f"[Phase 4 RESIDUAL] Using pseudo-inverse fallback...")
+        print(f"[Phase 4 RESIDUAL IMPROVED] ERROR in solve: {str(e)}")
+        print(f"[Phase 4 RESIDUAL IMPROVED] Using pseudo-inverse fallback...")
         
         try:
             T_residual = torch.linalg.pinv(XTX_weighted) @ XTR_weighted
-            print(f"[Phase 4 RESIDUAL] Pseudo-inverse solution computed")
+            print(f"[Phase 4 RESIDUAL IMPROVED] Pseudo-inverse solution computed")
         except Exception as e2:
-            print(f"[Phase 4 RESIDUAL] ERROR in pseudo-inverse: {str(e2)}")
-            print(f"[Phase 4 RESIDUAL] Using identity transformation fallback")
+            print(f"[Phase 4 RESIDUAL IMPROVED] ERROR in pseudo-inverse: {str(e2)}")
+            print(f"[Phase 4 RESIDUAL IMPROVED] Using identity transformation fallback")
             T_residual = torch.eye(hidden_size, dtype=torch.float64)
     
-    # Step 4: Quality Assessment
-    print(f"[Phase 4 RESIDUAL] Evaluating transformation quality...")
+    # Step 4: Quality Assessment (unchanged but with improved logging)
+    print(f"[Phase 4 RESIDUAL IMPROVED] Evaluating enhanced transformation quality...")
     
-    # Test on sample data
     sample_size = min(1000, num_samples)
     sample_X = X[:sample_size]
     sample_residual = residual[:sample_size]
     
     # Apply transformation
-    predicted_residual = sample_X @ T_residual  # [sample_size, hidden_size]
+    predicted_residual = sample_X @ T_residual
     
     # Compute errors
     absolute_error = torch.norm(predicted_residual - sample_residual, 'fro').item()
     relative_error = absolute_error / torch.norm(sample_residual, 'fro').item()
     
-    # Compute weighted error (more important for our gate-aware approach)
+    # Compute weighted error
     weighted_predicted = predicted_residual @ sqrt_W
     weighted_actual = sample_residual @ sqrt_W
     weighted_error = torch.norm(weighted_predicted - weighted_actual, 'fro') / torch.norm(weighted_actual, 'fro')
     
-    print(f"[Phase 4 RESIDUAL] Quality metrics:")
-    print(f"[Phase 4 RESIDUAL]   Absolute error: {absolute_error:.4f}")
-    print(f"[Phase 4 RESIDUAL]   Relative error: {relative_error:.6f}")
-    print(f"[Phase 4 RESIDUAL]   Weighted relative error: {weighted_error.item():.6f}")
-    
-    # Test full transformation: X + X @ T vs Y
-    predicted_output = sample_X + predicted_residual  # X + residual
-    actual_output = sample_X + sample_residual  # Should equal Y
+    # Test full transformation
+    predicted_output = sample_X + predicted_residual
+    actual_output = sample_X + sample_residual
     output_error = torch.norm(predicted_output - actual_output, 'fro') / torch.norm(actual_output, 'fro')
     
-    print(f"[Phase 4 RESIDUAL]   Full output error: {output_error.item():.6f}")
+    print(f"[Phase 4 RESIDUAL IMPROVED] Enhanced quality metrics:")
+    print(f"[Phase 4 RESIDUAL IMPROVED]   Absolute error: {absolute_error:.4f}")
+    print(f"[Phase 4 RESIDUAL IMPROVED]   Relative error: {relative_error:.6f}")
+    print(f"[Phase 4 RESIDUAL IMPROVED]   Weighted relative error: {weighted_error.item():.6f}")
+    print(f"[Phase 4 RESIDUAL IMPROVED]   Full output error: {output_error.item():.6f}")
     
     # Quality assessment
-    if output_error.item() < 0.2:
+    if output_error.item() < 0.15:
         quality = "EXCELLENT"
-        print(f"[Phase 4 RESIDUAL] {quality}: High-quality residual approximation achieved!")
-    elif output_error.item() < 0.4:
+    elif output_error.item() < 0.25:
+        quality = "VERY GOOD"
+    elif output_error.item() < 0.35:
         quality = "GOOD"
-        print(f"[Phase 4 RESIDUAL] {quality}: Acceptable residual approximation")
-    elif output_error.item() < 0.6:
+    elif output_error.item() < 0.5:
         quality = "MODERATE"
-        print(f"[Phase 4 RESIDUAL] {quality}: Moderate residual approximation")
     else:
         quality = "POOR"
-        print(f"[Phase 4 RESIDUAL] {quality}: Poor residual approximation - may need adjustment")
     
-    # Step 5: Prepare results
-    print(f"[Phase 4 RESIDUAL] Preparing transformation results...")
+    print(f"[Phase 4 RESIDUAL IMPROVED] {quality}: Enhanced gate-aware approximation")
     
-    # Store layer priorities for reference
+    # Step 5: Prepare enhanced results
     layer_priorities = []
     if 'cross_layer_analysis' in gate_analysis:
         for layer_idx in range(start_id, end_id):
@@ -1028,36 +1049,38 @@ def estimate_coupled_transformations_residual_aware(
                 layer_priorities.append((layer_idx, importance))
         layer_priorities.sort(key=lambda x: x[1], reverse=True)
     
-    # Gate compensation factors (for potential use in model application)
+    # Enhanced gate compensation factors
     gate_compensation = {}
     for layer_idx in range(start_id, end_id):
-        if layer_idx in gate_analysis['gate_activation_patterns']:
-            patterns = gate_analysis['gate_activation_patterns'][layer_idx]
-            num_critical = len(patterns['critical_neurons'])
-            num_total = len(patterns['critical_neurons']) + len(patterns['pruning_candidate_neurons'])
-            if num_total > 0:
-                critical_ratio = num_critical / num_total
-                gate_compensation[layer_idx] = 0.5 + 0.5 * critical_ratio
-            else:
-                gate_compensation[layer_idx] = 1.0
+        if layer_idx in gate_analysis['gate_activation_patterns'] and layer_idx in layer_contributions:
+            contrib = layer_contributions[layer_idx]
+            critical_ratio = contrib['critical_ratio']
+            pruning_ratio = contrib['pruning_ratio']
+            
+            # More sophisticated compensation based on neuron distribution
+            base_compensation = 0.3 + 0.7 * critical_ratio  # 0.3 to 1.0 based on critical ratio
+            pruning_penalty = 0.8 + 0.2 * (1.0 - pruning_ratio)  # Reduce if too many pruning candidates
+            
+            gate_compensation[layer_idx] = base_compensation * pruning_penalty
         else:
             gate_compensation[layer_idx] = 1.0
     
     transformations = {
-        # Main transformation (this is what gets applied to the model)
+        # Main transformation
         'T_residual': T_residual,
         
-        # For compatibility with existing code structure
+        # For compatibility
         'T_gate': torch.eye(hidden_size, dtype=torch.float64),
         'T_up': torch.eye(hidden_size, dtype=torch.float64), 
-        'T_down': T_residual,  # The actual transformation goes in T_down
+        'T_down': T_residual,
         
-        # Analysis and metadata
+        # Enhanced analysis and metadata
         'layer_priorities': layer_priorities,
         'gate_compensation': gate_compensation,
         'feature_importance': feature_importance,
+        'layer_contributions': layer_contributions,
         
-        # Quality metrics
+        # Enhanced quality metrics
         'approximation_quality': {
             'absolute_error': absolute_error,
             'relative_error': relative_error,
@@ -1065,21 +1088,23 @@ def estimate_coupled_transformations_residual_aware(
             'output_error': output_error.item(),
             'quality_assessment': quality,
             'num_samples_used': sample_size,
-            'num_layers_processed': processed_layers
+            'num_layers_processed': processed_layers,
+            'enhancement_factors': {
+                'critical': CRITICAL_FACTOR,
+                'context': CONTEXT_FACTOR,
+                'stable': STABLE_FACTOR,
+                'pruning': PRUNING_FACTOR
+            }
         }
     }
     
-    print(f"[Phase 4 RESIDUAL] Results summary:")
-    print(f"[Phase 4 RESIDUAL]   Quality: {quality}")
-    print(f"[Phase 4 RESIDUAL]   Output approximation error: {output_error.item():.1%}")
-    print(f"[Phase 4 RESIDUAL]   Processed {processed_layers} layers")
-    print(f"[Phase 4 RESIDUAL]   Used {sample_size} samples for validation")
+    print(f"[Phase 4 RESIDUAL IMPROVED] Enhanced results summary:")
+    print(f"[Phase 4 RESIDUAL IMPROVED]   Quality: {quality}")
+    print(f"[Phase 4 RESIDUAL IMPROVED]   Output approximation error: {output_error.item():.1%}")
+    print(f"[Phase 4 RESIDUAL IMPROVED]   Feature differentiation achieved: {(feature_importance.max() / feature_importance.min()).item():.1f}x")
+    print(f"[Phase 4 RESIDUAL IMPROVED]   High-importance features: {(feature_importance > 5.0).sum().item()}")
     
-    if layer_priorities:
-        print(f"[Phase 4 RESIDUAL]   Most important layer: {layer_priorities[0][0]} ({layer_priorities[0][1]:.1f})")
-        print(f"[Phase 4 RESIDUAL]   Least important layer: {layer_priorities[-1][0]} ({layer_priorities[-1][1]:.1f})")
-    
-    print(f"[Phase 4 RESIDUAL] Residual-Aware Gate-weighted Transformation complete!")
+    print(f"[Phase 4 RESIDUAL IMPROVED] Enhanced Residual-Aware Gate-weighted Transformation complete!")
     return transformations
 
 
@@ -1834,6 +1859,7 @@ def gate_aware_coupled_method(
             end_id=end_id - num_layer,
             hidden_size=model.config.hidden_size
         )
+        return
         
         print(f"[GACO COMPLETE] Phases 2-4 complete for block {i+1}")
         
