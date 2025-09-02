@@ -15,6 +15,7 @@ from .low_rank_replace import low_rank_replace  # New import
 from .utils import seed_all, select_non_overlapping_blocks
 
 from .gate_aware_coupled import gate_aware_coupled_method
+from .multi_linear_replacement import multi_linear_block_replacement  # New MLBR method
 
 # Initialize colorama for Windows compatibility
 init(autoreset=True)
@@ -77,19 +78,21 @@ def ReplaceMe_pipeline(config):
         path = gate_aware_coupled_method(**filtered_config)
         print(f"[Pipeline] GACO method complete, output path: {path}")
 
-    elif config["method"] == "linear":  # Gate-Aware Coupled Optimization
-        from .gate_aware_coupled import linear_layer_replacement_method        
-        signature = inspect.signature(linear_layer_replacement_method)
+
+    elif config["method"] == "mlbr":  # New Multi-Linear Block Replacement
+        print(f"[Pipeline] Using Multi-Linear Block Replacement (MLBR) method")
+        signature = inspect.signature(multi_linear_block_replacement)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
-        print(f"[Pipeline] GACO config parameters: {list(filtered_config.keys())}")
+        print(f"[Pipeline] MLBR config parameters: {list(filtered_config.keys())}")
         print(f"[Pipeline] Model path: {filtered_config.get('model_path', 'not specified')}")
         print(f"[Pipeline] Dataset: {filtered_config.get('dataset', 'not specified')}")
         print(f"[Pipeline] Layers to skip: {filtered_config.get('layers_to_skip', 'not specified')}")
+        print(f"[Pipeline] Regularization: {filtered_config.get('regularization', 1e-6)}")
         
-        # Execute GACO method
-        path = linear_layer_replacement_method(**filtered_config)
-        print(f"[Pipeline] GACO method complete, output path: {path}")
+        # Execute MLBR method
+        path = multi_linear_block_replacement(**filtered_config)
+        print(f"[Pipeline] MLBR method complete, output path: {path}")
 
 
     else:  # Original cosine/adam methods
