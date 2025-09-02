@@ -120,10 +120,10 @@ def ReplaceMe_pipeline(config):
             filtered_config["model_path"] = path
     
     # Evaluate using the updated configuration
-    # signature = inspect.signature(evaluator)
-    # filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-    # filtered_config["model_path"] = path
-    # evaluator(**filtered_config)
+    signature = inspect.signature(evaluator)
+    filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
+    filtered_config["model_path"] = path
+    evaluator(**filtered_config)
 
 def read_config(config_path: str):
     # Read and return the YAML configuration
