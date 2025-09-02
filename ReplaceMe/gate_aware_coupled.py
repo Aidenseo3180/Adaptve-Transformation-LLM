@@ -548,17 +548,50 @@ def estimate_coupled_transformations(
             # Map intermediate weights to hidden dimension
             if intermediate_size >= hidden_size:
                 # Downsample intermediate weights
-                stride = intermediate_size // hidden_size
-                mapped_weights = layer_weights.view(-1, stride).mean(dim=1)[:hidden_size]
+                if intermediate_size % hidden_size == 0:
+                    # Perfect division
+                    stride = intermediate_size // hidden_size
+                    mapped_weights = layer_weights.view(hidden_size, stride).mean(dim=1)
+                else:
+                    # Use interpolation for non-divisible sizes
+                    mapped_weights = torch.nn.functional.interpolate(
+                        layer_weights.unsqueeze(0).unsqueeze(0),
+                        size=hidden_size,
+                        mode='linear',
+                        align_corners=False
+                    ).squeeze().squeeze()
             else:
-                # Upsample intermediate weights  
-                repeat_factor = hidden_size // intermediate_size
-                mapped_weights = layer_weights.repeat(repeat_factor)[:hidden_size]
+                # Upsample intermediate weights
+                if hidden_size % intermediate_size == 0:
+                    # Perfect division  
+                    repeat_factor = hidden_size // intermediate_size
+                    mapped_weights = layer_weights.repeat_interleave(repeat_factor)[:hidden_size]
+                else:
+                    # Use interpolation for non-divisible sizes
+                    mapped_weights = torch.nn.functional.interpolate(
+                        layer_weights.unsqueeze(0).unsqueeze(0),
+                        size=hidden_size,
+                        mode='linear',
+                        align_corners=False
+                    ).squeeze().squeeze()
+            
+            # Ensure correct size
+            if mapped_weights.shape[0] != hidden_size:
+                # Fallback: simple truncate or pad
+                if mapped_weights.shape[0] > hidden_size:
+                    mapped_weights = mapped_weights[:hidden_size]
+                else:
+                    pad_size = hidden_size - mapped_weights.shape[0]
+                    mapped_weights = torch.cat([mapped_weights, mapped_weights[-1:].repeat(pad_size)])
             
             total_gate_weights += mapped_weights.to(torch.float64)
             weight_count += 1
             
             print(f"[Phase 4] Layer {layer_idx} weights mapped: {intermediate_size} -> {mapped_weights.shape[0]}")
+            print(f"[Phase 4] Mapping successful: {mapped_weights.shape}")
+            
+        else:
+            print(f"[Phase 4] WARNING: No flow weights for layer {layer_idx}")
     
     if weight_count > 0:
         # Average weights across layers
