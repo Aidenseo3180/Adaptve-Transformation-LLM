@@ -304,7 +304,7 @@ def healme(
 
     # Load distances and select blocks
     print(f"[healme] Loading distances from {distances_path}")
-    average_distances = torch.load(distances_path)
+    average_distances = torch.load(distances_path, weights_only=False)
     selected_blocks = select_non_overlapping_blocks(
         average_distances,
         layers_to_skip,

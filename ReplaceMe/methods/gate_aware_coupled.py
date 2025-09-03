@@ -1583,7 +1583,7 @@ def apply_residual_transformation_to_model(
     print(f"[Phase 5 RECONSTRUCTION] Layers already removed: {num_layer}")
     print(f"[Phase 5 RECONSTRUCTION] Save path: {save_path}")
     
-    from .utils import truncate_model
+    from ..utils import truncate_model
     import torch
     import os
     
@@ -1778,7 +1778,7 @@ def apply_residual_transformation_to_model(
         print(f"[Phase 5 RECONSTRUCTION] Float model loaded successfully")
         
         # Apply the same truncation to the float model
-        from .utils import truncate_model
+        from ..utils import truncate_model
         float_model = truncate_model(float_model, start_id - num_layer, end_id - num_layer)
         
         print(f"[Phase 5 RECONSTRUCTION] Float model truncated: {len(float_model.model.layers)} layers")
@@ -1947,7 +1947,7 @@ def gate_aware_coupled_method(
     
     # Import required modules
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-    from .utils import get_calib_dataloader, select_non_overlapping_blocks
+    from ..utils import get_calib_dataloader, select_non_overlapping_blocks
     
     device_map = "auto" if torch.cuda.is_available() else "cpu"
     quantization_config = None

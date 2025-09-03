@@ -25,7 +25,7 @@ loss: "cosine" # cosine, mse, elasticnet are supported
 accurate: False # False will run cosine(xA, y - z) where z is the residual attention info, True to run cosine(xA + z, y)
 
 # Block selection parameters
-distances_path: null
+distances_path: 'distances.pth'
 num_A: 1
 merge_consecutive: False 
 

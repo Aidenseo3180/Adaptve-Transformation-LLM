@@ -133,20 +133,3 @@ def ReplaceMe_pipeline(config):
     filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
     filtered_config["model_path"] = path
     evaluator(**filtered_config)
-
-def read_config(config_path: str):
-    # Read and return the YAML configuration
-    with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
-
-def run_from_config():
-    # Parse command-line arguments for configuration file path
-    parser = argparse.ArgumentParser(
-        description="Run compression methods for linear transform estimation based on a configuration file."
-    )
-    parser.add_argument("--config", type=str, required=True, help="Path to the configuration file.")
-    
-    # Execute pipeline based on parsed configuration
-    args = parser.parse_args()
-    config = read_config(args.config)
-    ReplaceMe_pipeline(config)

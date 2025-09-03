@@ -647,7 +647,7 @@ def multi_linear_block_replacement(
     
     # Import required modules
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-    from .utils import get_calib_dataloader, select_non_overlapping_blocks
+    from ..utils import get_calib_dataloader, select_non_overlapping_blocks
     
     device_map = "auto" if torch.cuda.is_available() else "cpu"
     quantization_config = None
