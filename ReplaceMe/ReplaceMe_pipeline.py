@@ -10,12 +10,14 @@ from colorama import Fore, Style, init
 from .cosine_dist import cosine_dist
 from .distance import profile_distances
 from .evaluator import evaluator
-from .low_rank_replace import low_rank_replace  # New import
 
 from .utils import seed_all, select_non_overlapping_blocks
 
-from .gate_aware_coupled import gate_aware_coupled_method
-from .multi_linear_replacement import multi_linear_block_replacement  # New MLBR method
+from .methods.low_rank_replace import low_rank_replace  # New import
+from .methods.gate_aware_coupled import gate_aware_coupled_method
+from .methods.multi_linear_replacement import multi_linear_block_replacement  # New MLBR method
+from .methods.healme import healme  # Import our new healme module
+
 
 # Initialize colorama for Windows compatibility
 init(autoreset=True)
@@ -93,6 +95,13 @@ def ReplaceMe_pipeline(config):
         # Execute MLBR method
         path = multi_linear_block_replacement(**filtered_config)
         print(f"[Pipeline] MLBR method complete, output path: {path}")
+
+
+    elif config["method"] == "healme":
+        print("[ReplaceMe_pipeline] Using HEALME method (self-healing)")
+        signature = inspect.signature(healme)
+        filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
+        path = healme(**filtered_config)
 
 
     else:  # Original cosine/adam methods
