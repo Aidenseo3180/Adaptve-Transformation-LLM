@@ -18,7 +18,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 import numpy as np
 
-from ..utils import (adam_method, get_calib_dataloader, optimizing_method,
+from .utils import (adam_method, get_calib_dataloader, optimizing_method,
                     select_non_overlapping_blocks, truncate_model, seed_all)
 
 # Initialize colorama for Windows compatibility

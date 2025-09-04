@@ -13,10 +13,10 @@ from .evaluator import evaluator
 
 from .utils import seed_all, select_non_overlapping_blocks
 
-from .methods.low_rank_replace import low_rank_replace  # New import
-from .methods.gate_aware_coupled import gate_aware_coupled_method
-from .methods.multi_linear_replacement import multi_linear_block_replacement  # New MLBR method
-from .methods.healme import healme  # Import our new healme module
+from .low_rank_replace import low_rank_replace  # New import
+from .gate_aware_coupled import gate_aware_coupled_method
+from .multi_linear_replacement import multi_linear_block_replacement  # New MLBR method
+from .healme import healme  # Import our new healme module
 
 
 # Initialize colorama for Windows compatibility
