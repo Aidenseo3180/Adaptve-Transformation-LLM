@@ -13,12 +13,6 @@ from .evaluator import evaluator
 
 from .utils import seed_all, select_non_overlapping_blocks
 
-from .low_rank_replace import low_rank_replace  # New import
-from .gate_aware_coupled import gate_aware_coupled_method
-from .multi_linear_replacement import multi_linear_block_replacement  # New MLBR method
-from .healme import healme  # Import our new healme module
-
-
 # Initialize colorama for Windows compatibility
 init(autoreset=True)
 
@@ -40,71 +34,8 @@ def ReplaceMe_pipeline(config):
         # Profile distances using filtered configuration
         profile_distances(**filtered_config)
         config['distances_path'] = "./distances.pth"
-    
-    if config["method"] == "low_rank":  # New method
-        signature = inspect.signature(low_rank_replace)
-        filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-        
-        # Load average distances and select non-overlapping blocks
-        average_distances = torch.load(filtered_config['distances_path'], weights_only=False)  
-        selected_blocks = select_non_overlapping_blocks(
-            average_distances, 
-            filtered_config['layers_to_skip'], 
-            num_blocks=filtered_config['num_A'], 
-            merge_consecutive=filtered_config['merge_consecutive']
-        )
-        
-        # Calculate start and end IDs, and number of layers
-        start_ids = sorted([x[0] for x in selected_blocks])
-        end_ids = sorted([x[1] for x in selected_blocks])
-        num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
-        num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
-        
-        # Iterate over each selected block
-        for i in range(len(selected_blocks)):
-            path = low_rank_replace(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
-            filtered_config["model_path"] = path
 
-
-    elif config["method"] == "gaco":  # Gate-Aware Coupled Optimization
-        print(f"[Pipeline] Using Gate-Aware Coupled Optimization (GACO) method")
-        signature = inspect.signature(gate_aware_coupled_method)
-        filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-        
-        print(f"[Pipeline] GACO config parameters: {list(filtered_config.keys())}")
-        print(f"[Pipeline] Model path: {filtered_config.get('model_path', 'not specified')}")
-        print(f"[Pipeline] Dataset: {filtered_config.get('dataset', 'not specified')}")
-        print(f"[Pipeline] Layers to skip: {filtered_config.get('layers_to_skip', 'not specified')}")
-        
-        # Execute GACO method
-        path = gate_aware_coupled_method(**filtered_config)
-        print(f"[Pipeline] GACO method complete, output path: {path}")
-
-
-    elif config["method"] == "mlbr":  # New Multi-Linear Block Replacement
-        print(f"[Pipeline] Using Multi-Linear Block Replacement (MLBR) method")
-        signature = inspect.signature(multi_linear_block_replacement)
-        filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-        
-        print(f"[Pipeline] MLBR config parameters: {list(filtered_config.keys())}")
-        print(f"[Pipeline] Model path: {filtered_config.get('model_path', 'not specified')}")
-        print(f"[Pipeline] Dataset: {filtered_config.get('dataset', 'not specified')}")
-        print(f"[Pipeline] Layers to skip: {filtered_config.get('layers_to_skip', 'not specified')}")
-        print(f"[Pipeline] Regularization: {filtered_config.get('regularization', 1e-6)}")
-        
-        # Execute MLBR method
-        path = multi_linear_block_replacement(**filtered_config)
-        print(f"[Pipeline] MLBR method complete, output path: {path}")
-
-
-    elif config["method"] == "healme":
-        print("[ReplaceMe_pipeline] Using HEALME method (self-healing)")
-        signature = inspect.signature(healme)
-        filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-        path = healme(**filtered_config)
-
-
-    else:  # Original cosine/adam methods
+    if config["method"] == "cosine":  # Original cosine/adam methods
         signature = inspect.signature(cosine_dist)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
