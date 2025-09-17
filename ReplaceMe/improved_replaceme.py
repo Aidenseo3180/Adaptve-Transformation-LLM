@@ -1,4 +1,4 @@
-# Add this new file: improved_replaceme.py
+# improved_replaceme.py
 import torch
 import torch.nn as nn
 import gc
@@ -24,6 +24,7 @@ def improved_replaceme(
     start_id: int = 0,
     end_id: int = 0,
     num_layer: int = 0,
+    distances_path: str = "./distances.pth",  # Added parameter
     **kwargs
 ) -> str:
     """
@@ -37,12 +38,13 @@ def improved_replaceme(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[DEBUG] Using device: {device}")
     
-    # Load model
+    # Load model with attention implementation specified
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         device_map="auto",
         torch_dtype=torch.bfloat16,
         output_hidden_states=True,
+        attn_implementation="eager",  # Added to avoid SDPA warning
         token=token
     )
     
@@ -69,13 +71,16 @@ def improved_replaceme(
     
     def save_ln_stats(name, stats_dict):
         def hook(module, input, output):
-            # Capture layer norm statistics
+            # Capture layer norm statistics (RMSNorm compatible)
             inp = input[0].detach()
             mean = inp.mean(dim=-1, keepdim=True)
             var = inp.var(dim=-1, keepdim=True, unbiased=False)
-            stats_dict[name] = {'mean': mean, 'var': var, 
-                               'weight': module.weight.detach(), 
-                               'bias': module.bias.detach() if module.bias is not None else None}
+            # RMSNorm only has weight, no bias
+            stats_dict[name] = {
+                'mean': mean, 
+                'var': var, 
+                'weight': module.weight.detach() if hasattr(module, 'weight') else None
+            }
         return hook
     
     mlp_activations = {}
@@ -117,8 +122,8 @@ def improved_replaceme(
     all_ln_vars = []
     
     for batch_idx, batch in enumerate(tqdm(dataloader, desc="Gathering Enhanced Activations")):
-        if batch_idx >= 10:  # Limit for testing
-            break
+        # if batch_idx >= 10:  # Limit for testing
+        #     break
             
         inputs = tokenizer(
             batch, return_tensors="pt", padding="longest",
@@ -218,7 +223,8 @@ def improved_replaceme(
         alpha = float(residual_weights[0].item())
         beta = float(residual_weights[1].item())
         gamma = float(residual_weights[2].item())
-    except:
+    except Exception as e:
+        print(f"[WARNING] Failed to compute residual weights: {e}")
         alpha, beta, gamma = 1.0, 1.0, 0.0
     
     print(f"[DEBUG] Residual weights - α: {alpha:.4f}, β: {beta:.4f}, γ: {gamma:.4f}")
@@ -267,13 +273,10 @@ def improved_replaceme(
     # Apply transformation to down_proj
     print("[DEBUG] Applying transformation to model")
     original_weight = model.model.layers[start_id - num_layer - 1].mlp.down_proj.weight
-    new_weight = (T_final.T.to(torch.bfloat16) @ original_weight.to(torch.float64)).to(torch.bfloat16)
+    new_weight = (T_final.T @ original_weight.to(torch.float64)).to(torch.bfloat16)
     
-    model.model.layers[start_id - num_layer - 1].mlp.down_proj.weight.data = new_weight
-    
-    # Optionally adjust bias if it exists
-    if model.model.layers[start_id - num_layer - 1].mlp.down_proj.bias is not None:
-        model.model.layers[start_id - num_layer - 1].mlp.down_proj.bias.data += bias_adjustment
+    model.model.layers[start_id - num_layer - 1].mlp.down_proj.weight.data = new_weight    
+    # Note: Llama models don't have bias in down_proj, so we skip bias adjustment
     
     # Save model
     import os
