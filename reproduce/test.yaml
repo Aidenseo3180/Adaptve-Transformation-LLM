@@ -1,19 +1,25 @@
-method: "improved"  # Changed from "cosine" to "improved"
-model_path: "meta-llama/Llama-3.2-3B-Instruct"
+method: "improved"
+model_path: "meta-llama/Meta-Llama-3-8B-Instruct" # meta-llama/Llama-3.2-3B-Instruct
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
-batch_size: 4
-max_length: 512
+batch_size: 4 # 8
+max_length: 512 # 1024
 layers_to_skip: 4
-dataset_size: 1000
+dataset_size: 1000 # 8000
 dataset_subset: "train"
 use_4bit: True
 save_path: null
 min_distance_layer: 20
 save_transform_only: True
+diag: False # whether to force the LT to be a diagonal matrix
+two_vectors: False # whether to force the LT to be a multiplication of two vectors
+thri: False # whether to force the LT to be a lower triangular matrix
+solver: "adam" # adam, cg, l-bfgs, trust-ncg are supported
+loss: "cosine" # cosine, mse, elasticnet are supported
 distances_path: null
 num_A: 1
-merge_consecutive: False
+merge_consecutive: False 
+accurate: False # False will run cosine(xA, y - z) where z is the residual attention info, True to run cosine(xA + z, y)
 tasks:
   boolq:
     fewshots: 0

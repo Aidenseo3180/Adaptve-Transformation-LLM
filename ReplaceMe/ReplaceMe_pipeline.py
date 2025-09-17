@@ -31,17 +31,17 @@ def ReplaceMe_pipeline(config):
     # Extract the relevant parameters based on function signatures
     signature = inspect.signature(profile_distances)
     filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-    if config['distances_path'] is None:
+    # if config['distances_path'] is None:
         # Profile distances using filtered configuration
-        profile_distances(**filtered_config)
-        config['distances_path'] = "./distances.pth"
+    profile_distances(**filtered_config)
+    config['distances_path'] = "./distances.pth"
 
     if config["method"] == "cosine":  # Original cosine/adam methods
         signature = inspect.signature(cosine_dist)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
         # Load average distances and select non-overlapping blocks
-        average_distances = torch.load(filtered_config['distances_path'], weights_only=False)  
+        average_distances = torch.load(filtered_config['distances_path'], weights_only=True)  
         selected_blocks = select_non_overlapping_blocks(
             average_distances, 
             filtered_config['layers_to_skip'], 
@@ -67,7 +67,7 @@ def ReplaceMe_pipeline(config):
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
         # Load distances and select blocks
-        average_distances = torch.load(filtered_config['distances_path'], weights_only=True)
+        average_distances = torch.load(filtered_config['distances_path'], weights_only=True)  
         selected_blocks = select_non_overlapping_blocks(
             average_distances,
             filtered_config['layers_to_skip'],
