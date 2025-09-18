@@ -15,6 +15,8 @@ from .utils import seed_all, select_non_overlapping_blocks
 
 from .improved_replaceme import improved_replaceme
 from .residual_scaled import regularized_cosine
+from .mixture_transforms import mixture_transforms
+
 
 # Initialize colorama for Windows compatibility
 init(autoreset=True)
@@ -62,44 +64,10 @@ def ReplaceMe_pipeline(config):
             path = cosine_dist(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
 
-    elif config["method"] == "improved":  # New improved method
-        print("[DEBUG] Using Improved ReplaceMe method")
+    elif config["method"] == "mixture_transforms":
+        print("[DEBUG] Using Mixture of Transforms method")
         
-        signature = inspect.signature(improved_replaceme)
-        filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-        
-        # Load distances and select blocks
-        average_distances = torch.load(filtered_config['distances_path'], weights_only=False)  
-        selected_blocks = select_non_overlapping_blocks(
-            average_distances,
-            filtered_config['layers_to_skip'],
-            num_blocks=filtered_config.get('num_A', 1),
-            merge_consecutive=filtered_config.get('merge_consecutive', False)
-        )
-        
-        print(f"[DEBUG] Selected blocks: {selected_blocks}")
-        
-        # Process each block
-        start_ids = sorted([x[0] for x in selected_blocks])
-        end_ids = sorted([x[1] for x in selected_blocks])
-        num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
-        num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
-        
-        for i in range(len(selected_blocks)):
-            print(f"[DEBUG] Processing block {i+1}/{len(selected_blocks)}")
-            path = improved_replaceme(
-                **filtered_config,
-                start_id=start_ids[i],
-                end_id=end_ids[i],
-                num_layer=num_layers[i]
-            )
-            filtered_config["model_path"] = path
-
-    # ReplaceMe_pipeline 함수에 추가
-    elif config["method"] == "regularized_cosine":  # 새로운 method
-        print("[DEBUG] Using Regularized Cosine method")
-        
-        signature = inspect.signature(regularized_cosine)
+        signature = inspect.signature(mixture_transforms)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
         average_distances = torch.load(filtered_config['distances_path'], weights_only=False)
@@ -116,10 +84,9 @@ def ReplaceMe_pipeline(config):
         num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
         
         for i in range(len(selected_blocks)):
-            path = regularized_cosine(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
+            path = mixture_transforms(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
 
-    
     # Evaluate using the updated configuration
     signature = inspect.signature(evaluator)
     filtered_config = {k: v for k, v in config.items() if k in signature.parameters}

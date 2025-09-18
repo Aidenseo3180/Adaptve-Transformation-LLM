@@ -1,4 +1,4 @@
-method: "regularized_cosine"
+method: "mixture_transforms"
 model_path: "meta-llama/Llama-3.2-3B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
@@ -20,7 +20,7 @@ distances_path: "distances.pth"
 num_A: 1
 merge_consecutive: False
 accurate: False
-regularization: 0.0001  # 1e-4로 설정
+num_mixtures: 4  # 4개의 transform 학습 후 결합
 tasks:
   boolq:
     fewshots: 0
