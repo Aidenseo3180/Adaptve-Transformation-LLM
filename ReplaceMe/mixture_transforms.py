@@ -196,12 +196,14 @@ def mixture_transforms(
                 a3=a3_subset,
                 solver=solver
             )
-        
+
+        # Ensure T_k is on CPU
+        T_k = T_k.cpu() if hasattr(T_k, 'cpu') else T_k
         transforms.append(T_k)
-        
+
         # Calculate importance weight based on how well this transform works
         with torch.no_grad():
-            pred = a1 @ T_k
+            pred = a1 @ T_k  # Both on CPU now
             if accurate and a3 is not None:
                 pred = pred + a3
                 
