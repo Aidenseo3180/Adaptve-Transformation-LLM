@@ -1,4 +1,4 @@
-method: "amatr"
+method: "plds"  # Progressive Layer Distillation with Shortcuts
 model_path: "meta-llama/Llama-3.2-3B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
@@ -7,14 +7,26 @@ max_length: 512
 layers_to_skip: 4
 dataset_size: 1000
 dataset_subset: "train"
-use_4bit: True
+use_4bit: False
 save_path: null
-distances_path: "distances.pth"
+min_distance_layer: 20
+
+# Standard parameters (same as ReplaceMe)
+distances_path: null
 num_A: 1
 merge_consecutive: False
-top_k_tokens: 32  # AMATR specific
-apply_compensation: True  # AMATR specific
-insert_replacement: False  # Experimental feature
+
+# PLDS specific parameters
+use_attention_in_meta: True  # Use attention in compressed block
+num_compressed_heads: 8      # Number of attention heads (original/4)
+distillation_epochs: 10      # Training epochs
+learning_rate: 0.0001        # Learning rate
+temperature: 4.0             # Distillation temperature
+alpha_mse: 0.5              # MSE loss weight
+alpha_cos: 0.3              # Cosine similarity loss weight  
+alpha_attn: 0.2             # Attention transfer loss weight
+
+# Evaluation tasks
 tasks:
   boolq:
     fewshots: 0
