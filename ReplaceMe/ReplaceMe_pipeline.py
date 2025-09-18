@@ -13,8 +13,7 @@ from .evaluator import evaluator
 
 from .utils import seed_all, select_non_overlapping_blocks
 
-from .block_diagonal_transform import block_diagonal_transform
-
+from .two_stage_optimization import two_stage_optimization
 
 
 # Initialize colorama for Windows compatibility
@@ -63,10 +62,11 @@ def ReplaceMe_pipeline(config):
             path = cosine_dist(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
 
-    elif config["method"] == "block_diagonal":
-        print("[DEBUG] Using Block Diagonal Transform method")
+    # ReplaceMe_pipeline 함수에 추가
+    elif config["method"] == "two_stage":
+        print("[DEBUG] Using Two-Stage Optimization method")
         
-        signature = inspect.signature(block_diagonal_transform)
+        signature = inspect.signature(two_stage_optimization)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
         average_distances = torch.load(filtered_config['distances_path'], weights_only=False)
@@ -83,7 +83,7 @@ def ReplaceMe_pipeline(config):
         num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
         
         for i in range(len(selected_blocks)):
-            path = block_diagonal_transform(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
+            path = two_stage_optimization(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
 
 
