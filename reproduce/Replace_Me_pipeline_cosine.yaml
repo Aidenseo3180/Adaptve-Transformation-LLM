@@ -1,5 +1,5 @@
 method: "cosine"
-model_path: "meta-llama/Meta-Llama-3-8B-Instruct" # meta-llama/Llama-3.2-3B-Instruct
+model_path: "meta-llama/Llama-3.2-3B-Instruct" # meta-llama/Llama-3.2-3B-Instruct
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
 batch_size: 4 # 8
