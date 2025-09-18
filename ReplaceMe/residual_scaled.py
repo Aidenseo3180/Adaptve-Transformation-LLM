@@ -1,4 +1,4 @@
-# residual_scaled.py
+# regularized_cosine.py
 import argparse
 import gc
 import logging
@@ -26,7 +26,7 @@ logging.basicConfig(
 
 seed_all()
 
-def residual_scaled(
+def regularized_cosine(
     model_path: str,
     dataset: str,
     dataset_column: str,
@@ -53,13 +53,13 @@ def residual_scaled(
     num_A: int = 1,
     merge_consecutive: bool = True,
     accurate: bool = False,
-    residual_alpha: float = 1.05,  # New parameter for residual scaling
+    regularization: float = 1e-4,  # Increased regularization parameter
     **kwargs
 ) -> str:
     """
-    Cosine distance with residual scaling: Mi*T*α + Yi → Li+n
+    Cosine distance with stronger regularization for more stable transformation
     """
-    print(f"[DEBUG] Using Residual Scaled method with α={residual_alpha}")
+    print(f"[DEBUG] Using Regularized Cosine method with reg={regularization}")
     
     device_map = "auto" if torch.cuda.is_available() else "cpu"
     quantization_config = None
@@ -110,25 +110,12 @@ def residual_scaled(
             hooks.append(layer.mlp.register_forward_hook(save_mlp_activation(f'layer_{i}_mlp')))
 
     mlp_activations = {}
-    a1 = torch.empty(
-        (dataset_size * max_length, model.config.hidden_size),
-        dtype=torch.bfloat16,
-        device='cpu'
-    )
-    a2 = torch.empty(
-        (dataset_size * max_length, model.config.hidden_size),
-        dtype=torch.bfloat16,
-        device='cpu'
-    )
-    if accurate:
-        print("ACCURATE MODE IS ON (MORE MEMORY IS NEEDED)")
-        a3 = torch.empty(
-            (dataset_size * max_length, model.config.hidden_size),
-            dtype=torch.bfloat16,
-            device='cpu'
-        )
     
-    cnt = 0
+    # Collect all activations first
+    all_a1 = []
+    all_a2 = []
+    all_a3 = [] if accurate else None
+    
     for batch in tqdm(
         dataloader,
         desc=Fore.RED + "Gathering Activations" + Fore.RESET,
@@ -159,32 +146,44 @@ def residual_scaled(
         hidden_states_n = hidden_states[end_id - num_layer - 1].view(-1, hidden_size).to(torch.float64)
         
         a1_batch = hidden_states_mlp
-        a2_batch = hidden_states_n + hidden_states_mlp - hidden_states_i
         if accurate:
             a2_batch = hidden_states_n 
-            a3_batch = hidden_states_i - hidden_states_mlp 
-            a3[cnt:cnt+a3_batch.shape[0]] = a3_batch
-        a1[cnt:cnt+a1_batch.shape[0]] = a1_batch
-        a2[cnt:cnt+a2_batch.shape[0]] = a2_batch
-        
-        cnt += a2_batch.shape[0]
-        
-        del hidden_states_mlp, hidden_states_i, hidden_states_n
+            a3_batch = hidden_states_i - hidden_states_mlp
+            all_a3.append(a3_batch.cpu())
+        else:
+            a2_batch = hidden_states_n + hidden_states_mlp - hidden_states_i
+            
+        all_a1.append(a1_batch.cpu())
+        all_a2.append(a2_batch.cpu())
     
-    a1 = a1[:cnt]
-    a2 = a2[:cnt]
+    # Concatenate all batches
+    a1 = torch.cat(all_a1, dim=0)
+    a2 = torch.cat(all_a2, dim=0)
     if accurate:
-        a3 = a3[:cnt]
-    
-    # Compute transformation
-    if solver == "adam":
-        transform = adam_method(a1, a2, a3=a3 if accurate else None, loss=loss, diag=diag, two_vectors=two_vectors, thri=thri)
+        a3 = torch.cat(all_a3, dim=0)
     else:
-        transform = optimizing_method(a1, a2, a3=a3 if accurate else None, solver=solver)
+        a3 = None
     
-    # Apply residual scaling
-    print(f"[DEBUG] Applying residual scaling: T = T * {residual_alpha}")
-    transform = transform * residual_alpha
+    print(f"[DEBUG] Collected activations shape: {a1.shape}")
+    
+    # Compute transformation with increased regularization
+    if solver == "adam":
+        print("[DEBUG] Using Adam optimizer for transformation")
+        transform = adam_method(a1, a2, a3=a3, loss=loss, diag=diag, two_vectors=two_vectors, thri=thri)
+    else:
+        print("[DEBUG] Using analytical solution with regularization")
+        # For analytical solution, apply stronger regularization
+        MtM = a1.T @ a1
+        MtM_reg = MtM + regularization * torch.eye(MtM.shape[0])  # Using the stronger regularization
+        
+        if accurate and a3 is not None:
+            target = a2 - a3
+        else:
+            target = a2 - a1  # Since a2 = Li+n - Yi + Mi
+            
+        transform = torch.linalg.solve(MtM_reg, a1.T @ target)
+        
+    print(f"[DEBUG] Transform computed. Max value: {transform.max():.4f}, Min value: {transform.min():.4f}")
     
     # Clean up
     del model
@@ -204,7 +203,7 @@ def residual_scaled(
             os.mkdir('output_models')
         save_path = "output_models/" + (
             f"{model_path}_{layers_to_skip}_layers_{start_id}_"
-            f"{end_id}_{dataset}_{dataset_size}_alpha{residual_alpha}"
+            f"{end_id}_{dataset}_{dataset_size}_reg{regularization}"
         ).replace("/", "_")
     
     # Apply transformation
@@ -212,14 +211,14 @@ def residual_scaled(
         "weight": (transform.T.cpu() @ model.model.layers[start_id - num_layer - 1].mlp.down_proj.weight.to(torch.float64)).to(torch.bfloat16)
     })
     
-    model.save_pretrained(f"{save_path}_ResidualScaled_{loss}_{solver}")
-    tokenizer.save_pretrained(f"{save_path}_ResidualScaled_{loss}_{solver}")
+    model.save_pretrained(f"{save_path}_RegularizedCosine_{loss}_{solver}")
+    tokenizer.save_pretrained(f"{save_path}_RegularizedCosine_{loss}_{solver}")
     
     if save_transform_only:
         torch.save({
             'transform': transform,
-            'residual_alpha': residual_alpha
-        }, f"{save_path}_ResidualScaled_{loss}_{solver}_transform")
+            'regularization': regularization
+        }, f"{save_path}_RegularizedCosine_{loss}_{solver}_transform")
     
     # Final cleanup
     del model, a1, a2
@@ -228,4 +227,4 @@ def residual_scaled(
     gc.collect()
     torch.cuda.empty_cache()
     
-    return f"{save_path}_ResidualScaled_{loss}_{solver}"
+    return f"{save_path}_RegularizedCosine_{loss}_{solver}"
