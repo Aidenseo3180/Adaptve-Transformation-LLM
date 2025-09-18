@@ -13,9 +13,8 @@ from .evaluator import evaluator
 
 from .utils import seed_all, select_non_overlapping_blocks
 
-from .improved_replaceme import improved_replaceme
-from .residual_scaled import regularized_cosine
-from .mixture_transforms import mixture_transforms
+from .block_diagonal_transform import block_diagonal_transform
+
 
 
 # Initialize colorama for Windows compatibility
@@ -64,10 +63,10 @@ def ReplaceMe_pipeline(config):
             path = cosine_dist(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
 
-    elif config["method"] == "mixture_transforms":
-        print("[DEBUG] Using Mixture of Transforms method")
+    elif config["method"] == "block_diagonal":
+        print("[DEBUG] Using Block Diagonal Transform method")
         
-        signature = inspect.signature(mixture_transforms)
+        signature = inspect.signature(block_diagonal_transform)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
         average_distances = torch.load(filtered_config['distances_path'], weights_only=False)
@@ -84,8 +83,9 @@ def ReplaceMe_pipeline(config):
         num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
         
         for i in range(len(selected_blocks)):
-            path = mixture_transforms(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
+            path = block_diagonal_transform(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
+
 
     # Evaluate using the updated configuration
     signature = inspect.signature(evaluator)

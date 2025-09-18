@@ -1,4 +1,4 @@
-method: "mixture_transforms"
+method: "block_diagonal"
 model_path: "meta-llama/Llama-3.2-3B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
@@ -11,16 +11,10 @@ use_4bit: True
 save_path: null
 min_distance_layer: 20
 save_transform_only: True
-diag: False
-two_vectors: False
-thri: False
-solver: "adam"
-loss: "cosine"
 distances_path: "distances.pth"
 num_A: 1
 merge_consecutive: False
-accurate: False
-num_mixtures: 4  # 4개의 transform 학습 후 결합
+block_size: 128  # 4096/32 = 128차원 블록
 tasks:
   boolq:
     fewshots: 0
