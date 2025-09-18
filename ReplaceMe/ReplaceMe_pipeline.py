@@ -13,7 +13,7 @@ from .evaluator import evaluator
 
 from .utils import seed_all, select_non_overlapping_blocks
 
-from .two_stage_optimization import two_stage_optimization
+from .conditional_linear_transform import conditional_linear_transform
 
 
 # Initialize colorama for Windows compatibility
@@ -63,10 +63,10 @@ def ReplaceMe_pipeline(config):
             filtered_config["model_path"] = path
 
     # ReplaceMe_pipeline 함수에 추가
-    elif config["method"] == "two_stage":
-        print("[DEBUG] Using Two-Stage Optimization method")
+    elif config["method"] == "conditional_linear":
+        print("[DEBUG] Using Conditional Linear Transform method")
         
-        signature = inspect.signature(two_stage_optimization)
+        signature = inspect.signature(conditional_linear_transform)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
         average_distances = torch.load(filtered_config['distances_path'], weights_only=False)
@@ -83,9 +83,8 @@ def ReplaceMe_pipeline(config):
         num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
         
         for i in range(len(selected_blocks)):
-            path = two_stage_optimization(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
+            path = conditional_linear_transform(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
-
 
     # Evaluate using the updated configuration
     signature = inspect.signature(evaluator)
