@@ -111,87 +111,48 @@ class HyperNetwork(nn.Module):
         # Small initial values for U and V generators
         nn.init.normal_(self.u_generator.weight, std=0.01)
         nn.init.normal_(self.v_generator.weight, std=0.01)
-    
+
     def extract_features(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Extract statistical features from hidden states.
+        """Extract statistical features from hidden states."""
+        # print(f"[DEBUG] Extracting features from hidden_states shape: {hidden_states.shape}")
         
-        Args:
-            hidden_states: [batch_size, seq_len, hidden_size]
-        
-        Returns:
-            features: [batch_size, hidden_size * feature_dim]
-        """
-        print(f"[DEBUG] Extracting features from hidden_states shape: {hidden_states.shape}")
-        
-        # Compute various statistics
-        batch_mean = hidden_states.mean(dim=1)  # [batch, hidden]
-        batch_std = hidden_states.std(dim=1)    # [batch, hidden]
+        # Use only 3 basic statistics to reduce memory
+        batch_mean = hidden_states.mean(dim=1)
+        batch_std = hidden_states.std(dim=1)
         batch_norm = hidden_states.norm(dim=2).mean(dim=1, keepdim=True).expand(-1, self.hidden_size)
-        batch_max = hidden_states.max(dim=1)[0]  # [batch, hidden]
-        batch_min = hidden_states.min(dim=1)[0]  # [batch, hidden]
         
-        # Higher-order statistics
-        centered = hidden_states - batch_mean.unsqueeze(1)
-        batch_skewness = (centered ** 3).mean(dim=1) / (batch_std ** 3 + 1e-8)
-        batch_kurtosis = (centered ** 4).mean(dim=1) / (batch_std ** 4 + 1e-8) - 3
+        features = torch.cat([batch_mean, batch_std, batch_norm], dim=-1)
         
-        # Concatenate all features
-        features = torch.cat([
-            batch_mean, batch_std, batch_norm, 
-            batch_max, batch_min, batch_skewness, batch_kurtosis
-        ], dim=-1)
-        
-        print(f"[DEBUG] Extracted features shape: {features.shape}")
+        # print(f"[DEBUG] Extracted features shape: {features.shape}")
         return features
-    
-    def forward(self, hidden_states: torch.Tensor, 
-                return_components: bool = False) -> torch.Tensor:
-        """Generate and apply adaptive transformation.
-        
-        Args:
-            hidden_states: [batch_size, seq_len, hidden_size]
-            return_components: Whether to return U and V separately
-        
-        Returns:
-            transformed: [batch_size, seq_len, hidden_size]
-            or (transformed, U, V) if return_components=True
-        """
+
+    def forward(self, hidden_states: torch.Tensor, return_components: bool = False):
         batch_size, seq_len, hidden_size = hidden_states.shape
         
-        # Extract features
-        features = self.extract_features(hidden_states)
-        
         # Generate transformation parameters
-        feat_encoded = self.feature_extractor(features)  # [batch, 256]
+        features = self.extract_features(hidden_states)
+        feat_encoded = self.feature_extractor(features)
         
-        # Generate U and V matrices
-        u_params = self.u_generator(feat_encoded)  # [batch, hidden_size * rank]
-        v_params = self.v_generator(feat_encoded)  # [batch, hidden_size * rank]
+        u_params = self.u_generator(feat_encoded)
+        v_params = self.v_generator(feat_encoded)
         
-        # Reshape to matrices
         U = u_params.view(batch_size, hidden_size, self.rank) * self.scale_u
         V = v_params.view(batch_size, self.rank, hidden_size) * self.scale_v
         
-        # Compute low-rank transformation: U @ V
-        # [batch, hidden, rank] @ [batch, rank, hidden] = [batch, hidden, hidden]
+        # Low-rank transformation
         adaptive_transform = torch.bmm(U, V)
         
-        # Combine with base transformation using residual
-        # This helps maintain stability
+        # Combine with base transformation
         transform = (self.residual_weight * self.base_transform.unsqueeze(0) + 
                     (1 - self.residual_weight) * adaptive_transform)
         
-        # Apply transformation to each sequence position
-        # Reshape for batch matrix multiplication
-        hidden_reshaped = hidden_states.reshape(batch_size * seq_len, hidden_size)
-        transform_expanded = transform.repeat_interleave(seq_len, dim=0)
+        # Efficient application: Use einsum or bmm directly
+        # hidden_states: [batch, seq, hidden]
+        # transform: [batch, hidden, hidden]
+        # Result: [batch, seq, hidden]
         
-        transformed = torch.bmm(
-            hidden_reshaped.unsqueeze(1), 
-            transform_expanded
-        ).squeeze(1)
-        
-        transformed = transformed.reshape(batch_size, seq_len, hidden_size)
+        transformed = torch.einsum('bsh,bhd->bsd', hidden_states, transform)
+        # OR: transformed = torch.bmm(hidden_states, transform.transpose(1, 2))
         
         if return_components:
             return transformed, U, V
@@ -360,6 +321,7 @@ def train_hypernet(
 # Main HyperReplace Function
 # ============================
 
+
 def hyper_replace(
     model_path: str,
     dataset: str,
@@ -385,38 +347,10 @@ def hyper_replace(
     start_id: int = 0,
     end_id: int = 0,
     num_layer: int = 0,
-    **kwargs  # Catch any extra arguments
+    **kwargs
 ) -> str:
-    """Main HyperReplace function for adaptive layer replacement.
+    """Main HyperReplace function for adaptive layer replacement."""
     
-    Args:
-        model_path: Path to pretrained model
-        dataset: Name of dataset to use
-        dataset_column: Column in dataset containing text
-        batch_size: Batch size for processing
-        max_length: Maximum sequence length
-        layers_to_skip: Number of layers to skip/replace
-        dataset_size: Optional size limit for dataset
-        dataset_subset: Subset of dataset to use
-        use_4bit: Whether to use 4-bit quantization
-        save_path: Path to save transformed model
-        token: Authentication token
-        hyper_rank: Rank for low-rank decomposition in HyperNetwork
-        hyper_lr: Learning rate for HyperNetwork training
-        hyper_epochs: Number of training epochs
-        adaptive_selection: Whether to use adaptive block selection
-        complexity_threshold: Thresholds for complexity-based selection
-        progressive_stages: Whether to use progressive training
-        distances_path: Path to layer distance metrics
-        num_A: Number of transformation blocks
-        merge_consecutive: Whether to merge consecutive blocks
-        start_id: Starting layer ID
-        end_id: Ending layer ID
-        num_layer: Number of layers processed
-    
-    Returns:
-        Path where transformed model is saved
-    """
     print(f"\n{Fore.MAGENTA}{'='*60}")
     print(f"Starting HyperReplace Pipeline")
     print(f"{'='*60}{Fore.RESET}\n")
@@ -464,7 +398,6 @@ def hyper_replace(
     
     print(f"[DEBUG] Model loaded: {model.config.num_hidden_layers} layers, hidden_size={hidden_size}")
     
-    # Prepare dataloader
     dataloader = get_calib_dataloader(
         dataset,
         dataset_subset,
@@ -482,9 +415,7 @@ def hyper_replace(
     
     print(f"\n{Fore.CYAN}Step 2: Collecting activations from target layers...{Fore.RESET}")
     
-    # Determine which blocks to replace
     if start_id == 0 or end_id == 0:
-        # Load distances and select blocks
         average_distances = torch.load(distances_path)
         selected_blocks = select_non_overlapping_blocks(
             average_distances,
@@ -495,100 +426,69 @@ def hyper_replace(
         start_id, end_id = selected_blocks[0]
         print(f"[DEBUG] Selected block: layers {start_id} to {end_id}")
     
-    # Hooks for capturing activations
-    def save_activation(name, storage_dict):
-        def hook(module, input, output):
-            storage_dict[name] = output.detach()
-        return hook
+    collected_inputs = []
+    collected_outputs = []
     
-    # Storage for activations
-    input_activations = []
-    output_activations = []
-    mlp_activations = {}
+    print(f"[DEBUG] Collecting activations for layers {start_id-1} to {end_id-1}")
     
-    # Register hooks
-    hooks = []
-    for i, layer in enumerate(model.model.layers):
-        if i == start_id - 1:
-            # Capture input to the block
-            hooks.append(layer.register_forward_hook(
-                save_activation(f'layer_{i}_output', mlp_activations)
-            ))
-        elif i == end_id - 1:
-            # Capture output from the block
-            hooks.append(layer.register_forward_hook(
-                save_activation(f'layer_{i}_output', mlp_activations)
-            ))
-    
-    print(f"[DEBUG] Registered {len(hooks)} hooks for activation capture")
-    
-    # Collect activations
     with torch.no_grad():
         for batch_idx, batch in enumerate(tqdm(dataloader, desc="Collecting Activations")):
             inputs = tokenizer(
                 batch,
                 return_tensors="pt",
-                padding="longest",
+                padding="max_length",  # Force max_length padding
                 max_length=max_length,
                 truncation=True
             )
             inputs = {k: v.to(model.device) for k, v in inputs.items()}
             
-            # Forward pass
             outputs = model(**inputs)
+            hidden_states = outputs.hidden_states
             
-            # Collect activations
-            if f'layer_{start_id-1}_output' in mlp_activations:
-                input_act = mlp_activations[f'layer_{start_id-1}_output']
-                input_activations.append(input_act.cpu())
+            if start_id > 0:
+                input_act = hidden_states[start_id]
+            else:
+                input_act = hidden_states[1]
             
-            if f'layer_{end_id-1}_output' in mlp_activations:
-                output_act = mlp_activations[f'layer_{end_id-1}_output']
-                output_activations.append(output_act.cpu())
+            output_act = hidden_states[end_id]
             
-            # Clear for next batch
-            mlp_activations.clear()
+            if batch_idx == 0:
+                print(f"[DEBUG] First batch shape: input={input_act.shape}, output={output_act.shape}")
             
-            print(f"[DEBUG] Batch {batch_idx+1}: collected activation shapes: "
-                  f"input={input_activations[-1].shape if input_activations else None}, "
-                  f"output={output_activations[-1].shape if output_activations else None}")
+            collected_inputs.append(input_act.cpu())
+            collected_outputs.append(output_act.cpu())
     
-    # Remove hooks
-    for hook in hooks:
-        hook.remove()
+    print(f"[DEBUG] Collected {len(collected_inputs)} batches")
     
     # Concatenate all activations
-    input_activations = torch.cat(input_activations, dim=0)
-    output_activations = torch.cat(output_activations, dim=0)
+    input_activations = torch.cat(collected_inputs, dim=0)
+    output_activations = torch.cat(collected_outputs, dim=0)
     
-    print(f"[DEBUG] Total activations collected: input={input_activations.shape}, output={output_activations.shape}")
+    print(f"[DEBUG] Total activations shape: input={input_activations.shape}, output={output_activations.shape}")
     
     # ============================
     # Step 3: Estimate Complexity
     # ============================
     
     if adaptive_selection:
-        print(f"\n{Fore.CYAN}Step 3: Estimating input complexity for adaptive selection...{Fore.RESET}")
+        print(f"\n{Fore.CYAN}Step 3: Estimating input complexity...{Fore.RESET}")
         
-        # Create temporary HyperNetwork for complexity estimation
         temp_hypernet = HyperNetwork(hidden_size, rank=hyper_rank)
         
-        # Sample complexity scores
         sample_complexities = []
-        for i in range(min(10, len(input_activations))):
+        num_samples = min(10, input_activations.shape[0])
+        
+        for i in range(num_samples):
             complexity = temp_hypernet.get_complexity_score(input_activations[i:i+1])
             sample_complexities.append(complexity)
         
         avg_complexity = sum(sample_complexities) / len(sample_complexities)
         print(f"[DEBUG] Average complexity score: {avg_complexity:.4f}")
         
-        # Adjust number of layers to replace based on complexity
         if avg_complexity < complexity_threshold[0]:
-            print(f"[INFO] Low complexity detected - can be more aggressive with replacement")
-            # Could adjust layers_to_skip here
+            print(f"[INFO] Low complexity detected")
         elif avg_complexity > complexity_threshold[1]:
-            print(f"[INFO] High complexity detected - being conservative with replacement")
-            # Could reduce layers_to_skip here
+            print(f"[INFO] High complexity detected")
         
         del temp_hypernet
     
@@ -598,34 +498,88 @@ def hyper_replace(
     
     print(f"\n{Fore.CYAN}Step 4: Training HyperNetwork...{Fore.RESET}")
     
-    # Initialize HyperNetwork
     hypernet = HyperNetwork(
         hidden_size=hidden_size,
         rank=hyper_rank,
-        feature_dim=7
+        feature_dim=3
     )
     
-    # Create training dataloader (just for batching, actual data comes from stored activations)
-    train_dataloader = get_calib_dataloader(
-        dataset,
-        dataset_subset,
-        dataset_column,
-        dataset_size,
-        batch_size,
-        tokenizer
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    hypernet = hypernet.to(device)
+    optimizer = torch.optim.AdamW(hypernet.parameters(), lr=hyper_lr, weight_decay=1e-5)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=hyper_epochs)
+    
+    def cosine_similarity_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        pred_norm = F.normalize(pred.reshape(-1, pred.shape[-1]), p=2, dim=-1)
+        target_norm = F.normalize(target.reshape(-1, target.shape[-1]), p=2, dim=-1)
+        return 1 - (pred_norm * target_norm).sum(dim=-1).mean()
+    
+    # Create index dataloader for training
+    num_samples = input_activations.shape[0]
+    indices = torch.arange(num_samples)
+    index_dataloader = torch.utils.data.DataLoader(
+        indices,
+        batch_size=batch_size,
+        shuffle=True,
+        drop_last=True
     )
     
-    # Train HyperNetwork
-    hypernet = train_hypernet(
-        hypernet=hypernet,
-        dataloader=train_dataloader,
-        target_activations=output_activations,
-        input_activations=input_activations,
-        epochs=hyper_epochs,
-        lr=hyper_lr,
-        progressive=progressive_stages,
-        device="cuda" if torch.cuda.is_available() else "cpu"
-    )
+    for epoch in range(hyper_epochs):
+        print(f"\n{Fore.GREEN}=== Epoch {epoch+1}/{hyper_epochs} ==={Fore.RESET}")
+        
+        if progressive_stages:
+            stage = epoch // (hyper_epochs // 3) if hyper_epochs >= 3 else 2
+        else:
+            stage = 2
+        
+        total_loss = 0
+        num_batches = 0
+        
+        progress_bar = tqdm(index_dataloader, desc=f"Training Epoch {epoch+1}")
+        
+        for batch_indices in progress_bar:
+            batch_input = input_activations[batch_indices].to(device)
+            batch_target = output_activations[batch_indices].to(device)
+            
+            optimizer.zero_grad()
+            transformed, U, V = hypernet(batch_input, return_components=True)
+            
+            if stage == 0:
+                loss = F.mse_loss(transformed, batch_target)
+            elif stage == 1:
+                mse_loss = F.mse_loss(transformed, batch_target)
+                cos_loss = cosine_similarity_loss(transformed, batch_target)
+                loss = 0.7 * mse_loss + 0.3 * cos_loss
+            else:
+                mse_loss = F.mse_loss(transformed, batch_target)
+                cos_loss = cosine_similarity_loss(transformed, batch_target)
+                u_reg = torch.norm(U, p=1) * 1e-5
+                v_reg = torch.norm(V, p=1) * 1e-5
+                loss = 0.3 * mse_loss + 0.7 * cos_loss + u_reg + v_reg
+            
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(hypernet.parameters(), max_norm=1.0)
+            optimizer.step()
+            
+            total_loss += loss.item()
+            num_batches += 1
+            
+            progress_bar.set_postfix({
+                'loss': f'{loss.item():.6f}',
+                'avg_loss': f'{total_loss/num_batches:.6f}',
+                'lr': f'{scheduler.get_last_lr()[0]:.6f}'
+            })
+        
+        scheduler.step()
+        
+        avg_epoch_loss = total_loss / num_batches
+        print(f"{Fore.CYAN}Epoch {epoch+1} completed - Average Loss: {avg_epoch_loss:.6f}{Fore.RESET}")
+        
+        if avg_epoch_loss < 1e-5:
+            print(f"{Fore.YELLOW}Early stopping: Loss below threshold{Fore.RESET}")
+            break
+    
+    print(f"{Fore.GREEN}Training completed!{Fore.RESET}")
     
     # ============================
     # Step 5: Apply to Model
@@ -633,12 +587,10 @@ def hyper_replace(
     
     print(f"\n{Fore.CYAN}Step 5: Applying HyperNetwork to model...{Fore.RESET}")
     
-    # Clean up memory
     del model
     gc.collect()
     torch.cuda.empty_cache()
     
-    # Reload model for modification
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         device_map='cpu',
@@ -646,13 +598,8 @@ def hyper_replace(
         token=token
     )
     
-    # Truncate model (remove replaced layers)
     print(f"[DEBUG] Truncating model: removing layers {start_id} to {end_id}")
     model = truncate_model(model, start_id, end_id)
-    
-    # Integrate HyperNetwork into the model
-    # This is a simplified version - in practice, you'd want to properly integrate it
-    # For now, we'll save both the model and HyperNetwork separately
     
     # ============================
     # Step 6: Save Model
@@ -668,11 +615,9 @@ def hyper_replace(
             f"{end_id}_HyperReplace_{dataset}_{dataset_size}"
         ).replace("/", "_")
     
-    # Save the truncated model
     model.save_pretrained(f"{save_path}_model")
     tokenizer.save_pretrained(f"{save_path}_model")
     
-    # Save the HyperNetwork
     torch.save({
         'hypernet_state': hypernet.state_dict(),
         'hypernet_config': {
@@ -689,7 +634,6 @@ def hyper_replace(
     print(f"{Fore.GREEN}Model saved to: {save_path}_model")
     print(f"HyperNetwork saved to: {save_path}_hypernet.pth{Fore.RESET}")
     
-    # Clean up
     del model, hypernet, input_activations, output_activations
     gc.collect()
     torch.cuda.empty_cache()

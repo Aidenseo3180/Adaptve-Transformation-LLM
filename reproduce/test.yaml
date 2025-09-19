@@ -13,7 +13,7 @@ token: null  # Add your HuggingFace token if needed
 
 # HyperReplace specific parameters
 hyper_rank: 64  # Rank for low-rank decomposition
-hyper_lr: 1e-4  # Learning rate for HyperNetwork
+hyper_lr: 0.0001  # Learning rate for HyperNetwork
 hyper_epochs: 10  # Number of training epochs
 adaptive_selection: True  # Enable adaptive block selection
 complexity_threshold: [0.3, 0.7]  # Complexity thresholds
