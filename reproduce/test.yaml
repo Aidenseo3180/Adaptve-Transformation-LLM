@@ -1,4 +1,4 @@
-method: "laco"
+method: "hyper"
 model_path: "meta-llama/Llama-3.2-3B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
@@ -7,18 +7,24 @@ max_length: 512
 layers_to_skip: 4
 dataset_size: 1000
 dataset_subset: "train"
-use_4bit: False  # CPU에서 weight 추출
+use_4bit: False
 save_path: null
+token: null  # Add your HuggingFace token if needed
 
-distances_path: null
-num_A: 1
+# HyperReplace specific parameters
+hyper_rank: 64  # Rank for low-rank decomposition
+hyper_lr: 1e-4  # Learning rate for HyperNetwork
+hyper_epochs: 10  # Number of training epochs
+adaptive_selection: True  # Enable adaptive block selection
+complexity_threshold: [0.3, 0.7]  # Complexity thresholds
+progressive_stages: True  # Use progressive training
+
+# Block selection parameters
+distances_path: null  # Will be computed if not provided
+num_A: 1  # Number of blocks to replace
 merge_consecutive: False
 
-# Layer Collapse specific
-preserve_ratio: 0.1       # 차이의 10%만 보존
-fine_tune_epochs: 5       # Fine-tuning epochs
-learning_rate: 0.00001    # Fine-tuning LR
-
+# Evaluation tasks
 tasks:
   boolq:
     fewshots: 0

@@ -60,58 +60,45 @@ def ReplaceMe_pipeline(config):
             filtered_config["model_path"] = path
 
 
-    elif config["method"] == "plds":  # Progressive Layer Distillation with Shortcuts
-        from .plds_method import plds_compress
+    elif config["method"] == "hyper":
+        print(f"{Fore.MAGENTA}Using HyperReplace method{Fore.RESET}")
         
-        signature = inspect.signature(plds_compress)
+        from .hyper_replace import hyper_replace
+        
+        # Check if we need to compute distances first
+        if config.get('distances_path') is None:
+            print("[INFO] Computing layer distances first...")
+            signature = inspect.signature(profile_distances)
+            filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
+            profile_distances(**filtered_config)
+            config['distances_path'] = "./distances.pth"
+        
+        # Run HyperReplace
+        signature = inspect.signature(hyper_replace)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
-        # Load distances and select blocks (ReplaceMe와 동일)
-        average_distances = torch.load(filtered_config['distances_path'], weights_only=False)
-        selected_blocks = select_non_overlapping_blocks(
-            average_distances, 
-            filtered_config['layers_to_skip'], 
-            num_blocks=filtered_config['num_A'], 
-            merge_consecutive=filtered_config['merge_consecutive']
-        )
-        
-        start_ids = sorted([x[0] for x in selected_blocks])
-        end_ids = sorted([x[1] for x in selected_blocks])
-        num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
-        num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
-        
-        # Process each block with PLDS
-        for i in range(len(selected_blocks)):
-            path = plds_compress(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
-            filtered_config["model_path"] = path
-
-
-    elif config["method"] == "laco":  # Layer Collapse
-        from .layer_collapse import layer_collapse_compress
-        
-        signature = inspect.signature(layer_collapse_compress)
-        filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-        
-        average_distances = torch.load(filtered_config['distances_path'], weights_only=False)
-        selected_blocks = select_non_overlapping_blocks(
-            average_distances,
-            filtered_config['layers_to_skip'],
-            num_blocks=filtered_config['num_A'],
-            merge_consecutive=filtered_config['merge_consecutive']
-        )
-        
-        start_ids = sorted([x[0] for x in selected_blocks])
-        end_ids = sorted([x[1] for x in selected_blocks])
-        num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
-        num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
-        
-        for i in range(len(selected_blocks)):
-            path = layer_collapse_compress(
-                **filtered_config,
-                start_id=start_ids[i],
-                end_id=end_ids[i],
-                num_layer=num_layers[i]
+        # Handle block selection if using distances
+        if config.get('distances_path'):
+            average_distances = torch.load(config['distances_path'], weights_only=False)
+            selected_blocks = select_non_overlapping_blocks(
+                average_distances,
+                filtered_config.get('layers_to_skip', 4),
+                num_blocks=filtered_config.get('num_A', 1),
+                merge_consecutive=filtered_config.get('merge_consecutive', False)
             )
+            
+            # Process each selected block
+            for i, (start_id, end_id) in enumerate(selected_blocks):
+                print(f"\n[HyperReplace] Processing block {i+1}: layers {start_id}-{end_id}")
+                path = hyper_replace(
+                    **filtered_config,
+                    start_id=start_id,
+                    end_id=end_id,
+                    num_layer=i * (end_id - start_id)
+                )
+                filtered_config["model_path"] = path
+        else:
+            path = hyper_replace(**filtered_config)
             filtered_config["model_path"] = path
 
 

@@ -76,13 +76,15 @@ class CollapsedLayer(nn.Module):
         super().__init__()
         
         self.num_collapsed = len(attention_weights)
+        self.config = config  # Store config for later use
         print(f"[DEBUG] Creating CollapsedLayer from {self.num_collapsed} layers")
+        print(f"[DEBUG] Model config: hidden_size={config.hidden_size}, num_heads={config.num_attention_heads}")
         
         # Compute common components (average)
         self.init_common_weights(attention_weights, ffn_weights, dtype)
         
-        # Store differences (residuals) - this is the key innovation
-        self.init_difference_weights(attention_weights, ffn_weights, preserve_ratio, dtype)
+        # Store differences (residuals) - simplified version
+        self.init_difference_weights_simple(attention_weights, ffn_weights, preserve_ratio, dtype)
         
         # Layer norms (use first layer's)
         self.input_layernorm = nn.LayerNorm(config.hidden_size, dtype=dtype)
@@ -106,9 +108,12 @@ class CollapsedLayer(nn.Module):
         
         # Create attention projection layers
         hidden_size = avg_attn['q_proj'].shape[1]
+        num_heads = self.config.num_attention_heads
+        num_key_value_heads = getattr(self.config, 'num_key_value_heads', num_heads)
+        
         self.q_proj = nn.Linear(hidden_size, hidden_size, bias=False, dtype=dtype)
-        self.k_proj = nn.Linear(hidden_size, hidden_size, bias=False, dtype=dtype)
-        self.v_proj = nn.Linear(hidden_size, hidden_size, bias=False, dtype=dtype)
+        self.k_proj = nn.Linear(hidden_size, (hidden_size // num_heads) * num_key_value_heads, bias=False, dtype=dtype)
+        self.v_proj = nn.Linear(hidden_size, (hidden_size // num_heads) * num_key_value_heads, bias=False, dtype=dtype)
         self.o_proj = nn.Linear(hidden_size, hidden_size, bias=False, dtype=dtype)
         
         self.q_proj.weight.data = avg_attn['q_proj']
@@ -132,41 +137,29 @@ class CollapsedLayer(nn.Module):
         self.up_proj.weight.data = avg_ffn['up_proj']
         self.down_proj.weight.data = avg_ffn['down_proj']
     
-    def init_difference_weights(self, attention_weights, ffn_weights, preserve_ratio, dtype):
-        """Initialize difference (residual) weights"""
+    def init_difference_weights_simple(self, attention_weights, ffn_weights, preserve_ratio, dtype):
+        """Simplified difference weights without SVD"""
         
         if preserve_ratio <= 0:
             self.use_differences = False
             return
         
         self.use_differences = True
-        self.preserve_ratio = preserve_ratio
         
-        # Compute differences from average for each layer
-        self.attn_diffs = nn.ParameterList()
-        self.ffn_diffs = nn.ParameterList()
+        # Just store scaled differences directly
+        self.q_diffs = nn.ParameterList()
+        self.down_diffs = nn.ParameterList()
         
         for i in range(self.num_collapsed):
-            # Attention differences (compressed)
-            attn_diff = {}
-            q_diff = attention_weights[i]['q_proj'] - self.q_proj.weight.data
+            # Q projection difference
+            q_diff = (attention_weights[i]['q_proj'] - self.q_proj.weight.data) * preserve_ratio
+            self.q_diffs.append(nn.Parameter(q_diff.to(dtype)))
             
-            # Use low-rank approximation to compress differences
-            rank = max(1, int(q_diff.shape[0] * preserve_ratio))
-            U, S, V = torch.svd_lowrank(q_diff, q=rank)
-            
-            # Store low-rank factors
-            self.attn_diffs.append(nn.ParameterList([
-                nn.Parameter(U.to(dtype)),
-                nn.Parameter(S.to(dtype)),
-                nn.Parameter(V.t().to(dtype))
-            ]))
-            
-            # Similarly for FFN (simplified for now)
-            down_diff = ffn_weights[i]['down_proj'] - self.down_proj.weight.data
-            self.ffn_diffs.append(nn.Parameter(down_diff.to(dtype) * preserve_ratio))
+            # Down projection difference  
+            down_diff = (ffn_weights[i]['down_proj'] - self.down_proj.weight.data) * preserve_ratio
+            self.down_diffs.append(nn.Parameter(down_diff.to(dtype)))
         
-        print(f"[DEBUG] Initialized {len(self.attn_diffs)} difference components")
+        print(f"[DEBUG] Initialized {len(self.q_diffs)} simple difference components")
     
     def forward(self, hidden_states, layer_idx: Optional[int] = None):
         """Forward pass through collapsed layer"""
@@ -182,19 +175,34 @@ class CollapsedLayer(nn.Module):
         
         # Apply differences if specified
         if self.use_differences and layer_idx is not None and layer_idx < self.num_collapsed:
-            # Add low-rank correction
-            U, S, Vt = self.attn_diffs[layer_idx]
-            correction = hidden_states @ Vt.t() @ torch.diag(S) @ U.t()
-            q = q + correction * self.layer_weights[layer_idx]
+            # Add simple correction
+            correction = F.linear(hidden_states, self.q_diffs[layer_idx])
+            q = q + correction
         
-        # Simplified attention computation
-        batch_size, seq_len, hidden_dim = q.shape
-        q = q.view(batch_size, seq_len, -1, hidden_dim // 32).transpose(1, 2)
-        k = k.view(batch_size, seq_len, -1, hidden_dim // 32).transpose(1, 2)
-        v = v.view(batch_size, seq_len, -1, hidden_dim // 32).transpose(1, 2)
+        # Get correct dimensions from config
+        batch_size, seq_len, _ = q.shape
+        num_heads = self.config.num_attention_heads
+        num_key_value_heads = getattr(self.config, 'num_key_value_heads', num_heads)
+        head_dim = self.config.hidden_size // num_heads
         
-        attn_output = F.scaled_dot_product_attention(q, k, v)
-        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, hidden_dim)
+        # Reshape for attention computation
+        q = q.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
+        k = k.view(batch_size, seq_len, num_key_value_heads, head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_len, num_key_value_heads, head_dim).transpose(1, 2)
+        
+        # Handle GQA (grouped query attention) if needed
+        if num_key_value_heads != num_heads:
+            k = k.repeat_interleave(num_heads // num_key_value_heads, dim=1)
+            v = v.repeat_interleave(num_heads // num_key_value_heads, dim=1)
+        
+        # Compute attention
+        attn_output = F.scaled_dot_product_attention(
+            q, k, v,
+            dropout_p=0.0,
+            is_causal=True  # Causal mask for autoregressive models
+        )
+        
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
         
         hidden_states = self.o_proj(attn_output)
         hidden_states = residual + hidden_states
@@ -209,7 +217,7 @@ class CollapsedLayer(nn.Module):
         
         # Apply FFN differences
         if self.use_differences and layer_idx is not None and layer_idx < self.num_collapsed:
-            down = down + F.linear(gate * up, self.ffn_diffs[layer_idx])
+            down = down + F.linear(gate * up, self.down_diffs[layer_idx])
         
         hidden_states = residual + down
         
