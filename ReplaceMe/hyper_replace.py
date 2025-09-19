@@ -536,15 +536,64 @@ def hyper_replace(
     print(f"{Fore.GREEN}Training completed!{Fore.RESET}")
     
     # ============================
-    # Step 5: Apply to Model
+    # Step 5: Convert HyperNetwork to Static Transformation
     # ============================
     
-    print(f"\n{Fore.CYAN}Step 5: Applying HyperNetwork to model...{Fore.RESET}")
+    print(f"\n{Fore.CYAN}Step 5: Converting HyperNetwork to static transformation...{Fore.RESET}")
     
+    # Clean up the training model first
     del model
     gc.collect()
     torch.cuda.empty_cache()
     
+    # Compute average transformation from HyperNetwork
+    print("[DEBUG] Computing average transformation from HyperNetwork...")
+    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    hypernet = hypernet.to(device)
+    hypernet.eval()
+    
+    with torch.no_grad():
+        all_transforms = []
+        batch_size = 32
+        
+        # Process in batches to compute average transformation
+        for i in tqdm(range(0, len(input_activations), batch_size), 
+                     desc="Computing transformations"):
+            end_idx = min(i + batch_size, len(input_activations))
+            batch = input_activations[i:end_idx].to(device)
+            
+            # Extract features
+            features = hypernet.extract_features(batch)
+            
+            # Get transformation matrices
+            feat_encoded = hypernet.feature_extractor(features)
+            u_params = hypernet.u_generator(feat_encoded)
+            v_params = hypernet.v_generator(feat_encoded)
+            
+            U = u_params.view(batch.shape[0], hidden_size, hypernet.rank) * hypernet.scale_u
+            V = v_params.view(batch.shape[0], hypernet.rank, hidden_size) * hypernet.scale_v
+            
+            # Compute transformation
+            adaptive_transform = torch.bmm(U, V)
+            transform = (hypernet.residual_weight * hypernet.base_transform.unsqueeze(0) + 
+                        (1 - hypernet.residual_weight) * adaptive_transform)
+            
+            # Store mean of batch
+            all_transforms.append(transform.mean(dim=0).cpu())
+        
+        # Compute final average transformation
+        avg_transform = torch.stack(all_transforms).mean(dim=0)
+        print(f"[DEBUG] Average transformation shape: {avg_transform.shape}")
+        print(f"[DEBUG] Transformation norm: {avg_transform.norm():.4f}")
+        
+        # Check how different it is from identity
+        identity = torch.eye(hidden_size)
+        diff_from_identity = (avg_transform - identity).norm()
+        print(f"[DEBUG] Distance from identity: {diff_from_identity:.4f}")
+    
+    # Reload model for modification
+    print(f"\n[DEBUG] Loading model for transformation application...")
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         device_map='cpu',
@@ -552,28 +601,63 @@ def hyper_replace(
         token=token
     )
     
-    print(f"[DEBUG] Truncating model: removing layers {start_id} to {end_id}")
+    # Apply transformation to model weights (like ReplaceMe)
+    print(f"[DEBUG] Applying transformation to layer {start_id-1} MLP weights...")
+    
+    # Get the MLP layer that will receive the transformation
+    if start_id > 0:
+        target_layer = model.model.layers[start_id - 1]
+    else:
+        # If replacing from layer 0, we need to handle differently
+        print("[WARNING] Cannot apply transformation before layer 0, using layer 0 instead")
+        target_layer = model.model.layers[0]
+    
+    # Apply transformation to down_proj (output projection of MLP)
+    original_weight = target_layer.mlp.down_proj.weight.data
+    print(f"[DEBUG] Original weight shape: {original_weight.shape}")
+    print(f"[DEBUG] Original weight norm: {original_weight.norm():.4f}")
+    
+    # Convert to float64 for computation
+    original_weight_f64 = original_weight.to(torch.float64)
+    avg_transform_f64 = avg_transform.to(torch.float64)
+    
+    # Apply transformation: W_new = T^T @ W_old
+    new_weight = avg_transform_f64.T @ original_weight_f64
+    
+    print(f"[DEBUG] New weight norm: {new_weight.norm():.4f}")
+    print(f"[DEBUG] Weight change norm: {(new_weight - original_weight_f64).norm():.4f}")
+    
+    # Update the weight
+    target_layer.mlp.down_proj.weight.data = new_weight.to(torch.bfloat16)
+    
+    # Now truncate the model (remove replaced layers)
+    print(f"\n[DEBUG] Truncating model: removing layers {start_id} to {end_id}")
     model = truncate_model(model, start_id, end_id)
     
+    # Verify model structure
+    print(f"[DEBUG] Final model has {model.config.num_hidden_layers} layers")
+    
     # ============================
-    # Step 6: Save Model
+    # Step 6: Save Modified Model
     # ============================
     
-    print(f"\n{Fore.CYAN}Step 6: Saving transformed model...{Fore.RESET}")
+    print(f"\n{Fore.CYAN}Step 6: Saving model with static transformation...{Fore.RESET}")
     
     if save_path is None:
         if not os.path.exists('output_models'):
             os.makedirs('output_models')
         save_path = "output_models/" + (
             f"{model_path}_{layers_to_skip}_layers_{start_id}_"
-            f"{end_id}_HyperReplace_{dataset}_{dataset_size}"
+            f"{end_id}_HyperReplace_static_{dataset}_{dataset_size}"
         ).replace("/", "_")
     
+    # Save the modified model
     model.save_pretrained(f"{save_path}_model")
     tokenizer.save_pretrained(f"{save_path}_model")
     
+    # Also save the transformation matrix for reference
     torch.save({
-        'hypernet_state': hypernet.state_dict(),
+        'avg_transform': avg_transform,
         'hypernet_config': {
             'hidden_size': hidden_size,
             'rank': hyper_rank,
@@ -582,18 +666,24 @@ def hyper_replace(
         'replaced_layers': {
             'start': start_id,
             'end': end_id
+        },
+        'complexity_stats': {
+            'avg_complexity': avg_complexity if 'avg_complexity' in locals() else None,
+            'diff_from_identity': diff_from_identity.item()
         }
-    }, f"{save_path}_hypernet.pth")
+    }, f"{save_path}_transform.pth")
     
     print(f"{Fore.GREEN}Model saved to: {save_path}_model")
-    print(f"HyperNetwork saved to: {save_path}_hypernet.pth{Fore.RESET}")
+    print(f"Transformation saved to: {save_path}_transform.pth{Fore.RESET}")
     
-    del model, hypernet, input_activations, output_activations
+    # Clean up
+    del model, hypernet, avg_transform, input_activations, output_activations
     gc.collect()
     torch.cuda.empty_cache()
     
     print(f"\n{Fore.MAGENTA}{'='*60}")
-    print(f"HyperReplace Pipeline Completed Successfully!")
+    print(f"HyperReplace (Static) Pipeline Completed Successfully!")
+    print(f"Applied average transformation from HyperNetwork to model weights")
     print(f"{'='*60}{Fore.RESET}\n")
     
     return f"{save_path}_model"
