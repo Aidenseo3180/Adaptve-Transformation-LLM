@@ -163,7 +163,7 @@ def compute_initial_transform(
         hook = layer.mlp.register_forward_hook(save_mlp_activation(f'layer_{i}_mlp'))
         hooks.append(hook)
     
-    # Collect activations
+    # Collect activations - Handle variable sequence lengths
     all_mlp_acts = []
     all_layer_inputs = []
     all_layer_outputs = []
@@ -191,9 +191,19 @@ def compute_initial_transform(
         layer_input = hidden_states[start_id - num_layer]
         layer_output = hidden_states[end_id - num_layer]
         
-        all_mlp_acts.append(mlp_act.cpu())
-        all_layer_inputs.append(layer_input.cpu())
-        all_layer_outputs.append(layer_output.cpu())
+        # Flatten batch and sequence dimensions properly
+        batch_size, seq_len, hidden_dim = mlp_act.shape
+        
+        # Reshape to [batch*seq, hidden] for each tensor
+        mlp_act_flat = mlp_act.reshape(-1, hidden_dim).cpu()
+        layer_input_flat = layer_input.reshape(-1, hidden_dim).cpu()
+        layer_output_flat = layer_output.reshape(-1, hidden_dim).cpu()
+        
+        all_mlp_acts.append(mlp_act_flat)
+        all_layer_inputs.append(layer_input_flat)
+        all_layer_outputs.append(layer_output_flat)
+        
+        print(f"[DEBUG] Batch {batch_idx}: shape {mlp_act.shape} -> flattened {mlp_act_flat.shape}")
     
     # Remove hooks
     for hook in hooks:
@@ -201,14 +211,23 @@ def compute_initial_transform(
     
     # Concatenate all activations
     print(f"[DEBUG] Concatenating activations...")
-    a1 = torch.cat(all_mlp_acts, dim=0).reshape(-1, hidden_size)
-    a2_input = torch.cat(all_layer_inputs, dim=0).reshape(-1, hidden_size)
-    a2_output = torch.cat(all_layer_outputs, dim=0).reshape(-1, hidden_size)
+    a1 = torch.cat(all_mlp_acts, dim=0)
+    a2_input = torch.cat(all_layer_inputs, dim=0)
+    a2_output = torch.cat(all_layer_outputs, dim=0)
     
     # Compute target (output - input + mlp)
     a2 = a2_output - a2_input + a1
     
     print(f"[DEBUG] Activation shapes: a1={a1.shape}, a2={a2.shape}")
+    
+    # Subsample if too large
+    max_samples = 50000
+    if a1.shape[0] > max_samples:
+        print(f"[DEBUG] Subsampling from {a1.shape[0]} to {max_samples} samples")
+        indices = torch.randperm(a1.shape[0])[:max_samples]
+        a1 = a1[indices]
+        a2 = a2[indices]
+    
     print(f"[DEBUG] Computing optimal transform using adam method...")
     
     # Use ReplaceMe's adam method
@@ -320,7 +339,7 @@ def optimized_plds_compress(
         meta_block.initialize_from_linear(initial_transform)
         print(f"[DEBUG] Meta-block initialized with pre-computed transform")
     
-    # Setup optimizer with warmup
+    # Setup optimizer with different learning rates
     optimizer = torch.optim.AdamW([
         {'params': meta_block.core_transform.parameters(), 'lr': learning_rate},
         {'params': meta_block.residual_scales, 'lr': learning_rate * 2},
@@ -339,6 +358,7 @@ def optimized_plds_compress(
     model.eval()
     best_loss = float('inf')
     loss_history = []
+    best_state = meta_block.state_dict().copy()
     
     for epoch in range(distillation_epochs):
         epoch_losses = {
@@ -346,7 +366,7 @@ def optimized_plds_compress(
         }
         num_batches = 0
         
-        # Adjust learning rate for warmup
+        # Warmup
         if epoch < warmup_epochs:
             warmup_factor = (epoch + 1) / warmup_epochs
             for param_group in optimizer.param_groups:
@@ -354,8 +374,7 @@ def optimized_plds_compress(
         
         with tqdm(dataloader, desc=f"Epoch {epoch+1}/{distillation_epochs}", colour="blue") as pbar:
             for batch_idx, batch_text in enumerate(pbar):
-                # Sample batches for speed
-                if batch_idx >= 50:  # Limit batches per epoch
+                if batch_idx >= 50:  # Limit batches
                     break
                 
                 inputs = tokenizer(
@@ -367,6 +386,10 @@ def optimized_plds_compress(
                 )
                 inputs = {k: v.to(device) for k, v in inputs.items()}
                 
+                # Skip short batches
+                if inputs['input_ids'].shape[1] < 10:
+                    continue
+                
                 # Get teacher outputs
                 with torch.no_grad():
                     teacher_outputs = model(**inputs)
@@ -376,7 +399,11 @@ def optimized_plds_compress(
                 block_input = hidden_states[start_id - num_layer].detach().to(torch.bfloat16)
                 block_target = hidden_states[end_id - num_layer].detach().to(torch.bfloat16)
                 
-                # Get intermediate targets (linear interpolation)
+                # Check shapes
+                if block_input.shape != block_target.shape:
+                    continue
+                
+                # Get intermediate targets
                 intermediate_targets = []
                 for i in range(num_blocks_to_compress):
                     alpha = (i + 1) / num_blocks_to_compress
@@ -394,8 +421,9 @@ def optimized_plds_compress(
                 mse_loss = F.mse_loss(meta_output, block_target)
                 
                 # Cosine similarity loss
-                meta_norm = F.normalize(meta_output.reshape(-1, hidden_size), p=2, dim=-1)
-                target_norm = F.normalize(block_target.reshape(-1, hidden_size), p=2, dim=-1)
+                batch_size, seq_len, hidden_dim = meta_output.shape
+                meta_norm = F.normalize(meta_output.reshape(-1, hidden_dim), p=2, dim=-1)
+                target_norm = F.normalize(block_target.reshape(-1, hidden_dim), p=2, dim=-1)
                 cos_loss = 1 - (meta_norm * target_norm).sum(dim=-1).mean()
                 
                 # Intermediate supervision
@@ -407,6 +435,10 @@ def optimized_plds_compress(
                 
                 # Total loss
                 loss = alpha_mse * mse_loss + alpha_cos * cos_loss + alpha_intermediate * inter_loss
+                
+                # Check for NaN
+                if torch.isnan(loss):
+                    continue
                 
                 # Backward
                 loss.backward()
@@ -428,22 +460,23 @@ def optimized_plds_compress(
                 })
         
         # Epoch summary
-        avg_losses = {k: v/num_batches for k, v in epoch_losses.items()}
-        loss_history.append(avg_losses)
-        
-        logging.info(
-            f"{Fore.GREEN}Epoch {epoch+1} - "
-            f"Total: {avg_losses['total']:.4f}, "
-            f"MSE: {avg_losses['mse']:.4f}, "
-            f"Cos: {avg_losses['cos']:.4f}, "
-            f"Inter: {avg_losses['inter']:.4f}{Fore.RESET}"
-        )
-        
-        # Save best model
-        if avg_losses['total'] < best_loss:
-            best_loss = avg_losses['total']
-            best_state = meta_block.state_dict().copy()
-            print(f"[DEBUG] New best loss: {best_loss:.4f}")
+        if num_batches > 0:
+            avg_losses = {k: v/num_batches for k, v in epoch_losses.items()}
+            loss_history.append(avg_losses)
+            
+            logging.info(
+                f"{Fore.GREEN}Epoch {epoch+1} - "
+                f"Total: {avg_losses['total']:.4f}, "
+                f"MSE: {avg_losses['mse']:.4f}, "
+                f"Cos: {avg_losses['cos']:.4f}, "
+                f"Inter: {avg_losses['inter']:.4f}{Fore.RESET}"
+            )
+            
+            # Save best model
+            if avg_losses['total'] < best_loss:
+                best_loss = avg_losses['total']
+                best_state = meta_block.state_dict().copy()
+                print(f"[DEBUG] New best loss: {best_loss:.4f}")
         
         scheduler.step()
     
@@ -464,7 +497,7 @@ def optimized_plds_compress(
     torch.cuda.empty_cache()
     
     # Reload for modification
-    logging.info(f"{Fore.YELLOW}Loading model for integration...{Fore.RESET}")
+    logging.info(f"{Fore.YELLOW}Loading model for ReplaceMe-style integration...{Fore.RESET}")
     
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
@@ -473,46 +506,57 @@ def optimized_plds_compress(
         token=token
     )
     
-    # Truncate model
+    # ReplaceMe 스타일 통합
+    print(f"[DEBUG] Applying ReplaceMe-style integration...")
+    
+    # 메타블록의 변환을 단일 선형 변환으로 통합
+    with torch.no_grad():
+        # Core transform weight
+        transform_matrix = meta_block.core_transform.weight.data.cpu()
+        
+        # Residual 효과 통합
+        identity = torch.eye(hidden_size, dtype=torch.bfloat16)
+        avg_residual_scale = meta_block.residual_scales.mean().item()
+        gate_value = meta_block.residual_gate.item()
+        
+        # 최종 변환 = gated transform + residuals
+        final_transform = (gate_value * transform_matrix + 
+                          (1 - gate_value) * identity +
+                          avg_residual_scale * num_blocks_to_compress * identity)
+        
+        print(f"[DEBUG] Final transform computed:")
+        print(f"  - Gate value: {gate_value:.4f}")
+        print(f"  - Avg residual scale: {avg_residual_scale:.4f}")
+        print(f"  - Transform shape: {final_transform.shape}")
+        
+        # Correction 효과 추가 (있는 경우)
+        if meta_block.use_correction and meta_block.correction_weight.item() > 0.01:
+            correction_weight = meta_block.correction_weight.item()
+            print(f"[DEBUG] Adding correction effect: {correction_weight:.4f}")
+            # Correction을 작은 perturbation으로 근사
+            final_transform = final_transform * (1 + correction_weight)
+    
+    # 이전 레이어의 down_proj 수정 (ReplaceMe 방식)
+    prev_layer_idx = start_id - num_layer - 1
+    prev_layer = model.model.layers[prev_layer_idx]
+    
+    print(f"[DEBUG] Modifying layer {prev_layer_idx} down_proj...")
+    print(f"  - Original weight shape: {prev_layer.mlp.down_proj.weight.shape}")
+    
+    original_weight = prev_layer.mlp.down_proj.weight.data
+    
+    # Transform 적용: new = T^T @ original
+    new_weight = torch.matmul(
+        final_transform.T.to(torch.float32),
+        original_weight.to(torch.float32)
+    ).to(torch.bfloat16)
+    
+    prev_layer.mlp.down_proj.weight.data = new_weight
+    print(f"[DEBUG] down_proj weight updated")
+    
+    # Truncate model (중간 레이어 제거)
     model = truncate_model(model, start_id - num_layer, end_id - num_layer)
     print(f"[DEBUG] Model truncated: removed layers {start_id - num_layer} to {end_id - num_layer}")
-    
-    # Create wrapper for integration
-    class OptimizedMetaBlockWrapper(nn.Module):
-        def __init__(self, meta_block, original_layer):
-            super().__init__()
-            self.meta_block = meta_block
-            # Preserve original attributes
-            if hasattr(original_layer, 'self_attn'):
-                self.self_attn = original_layer.self_attn
-            if hasattr(original_layer, 'mlp'):
-                self.mlp = original_layer.mlp
-            if hasattr(original_layer, 'input_layernorm'):
-                self.input_layernorm = original_layer.input_layernorm
-            if hasattr(original_layer, 'post_attention_layernorm'):
-                self.post_attention_layernorm = original_layer.post_attention_layernorm
-        
-        def forward(self, hidden_states, attention_mask=None, position_ids=None,
-                   past_key_value=None, output_attentions=False, use_cache=False,
-                   cache_position=None, **kwargs):
-            # Apply meta-block
-            hidden_states = self.meta_block(hidden_states)
-            
-            outputs = (hidden_states,)
-            if output_attentions:
-                outputs += (None,)
-            if use_cache:
-                outputs += (None,)
-            return outputs
-    
-    # Insert wrapper
-    wrapper = OptimizedMetaBlockWrapper(
-        meta_block.cpu(),
-        model.model.layers[start_id - num_layer - 1]
-    )
-    model.model.layers[start_id - num_layer - 1] = wrapper
-    
-    print(f"[DEBUG] Meta-block wrapper inserted at layer {start_id - num_layer - 1}")
     
     # Save model
     if save_path is None:
@@ -520,13 +564,13 @@ def optimized_plds_compress(
             os.makedirs('output_models')
         save_path = "output_models/" + (
             f"{model_path}_{layers_to_skip}_layers_{start_id}_"
-            f"{end_id}_{dataset}_{dataset_size}_OptimizedPLDS"
+            f"{end_id}_{dataset}_{dataset_size}_OptimizedPLDS_ReplaceMe"
         ).replace("/", "_")
     
     model.save_pretrained(f"{save_path}")
     tokenizer.save_pretrained(f"{save_path}")
     
-    # Save meta-block and training history
+    # Save training info
     torch.save({
         'meta_block': meta_block.state_dict(),
         'loss_history': loss_history,
@@ -534,7 +578,8 @@ def optimized_plds_compress(
             'start_id': start_id,
             'end_id': end_id,
             'num_blocks': num_blocks_to_compress,
-            'best_loss': best_loss
+            'best_loss': best_loss,
+            'final_transform': final_transform
         }
     }, f"{save_path}/training_info.pth")
     
@@ -542,7 +587,7 @@ def optimized_plds_compress(
     print(f"[DEBUG] Training complete. Best loss: {best_loss:.4f}")
     
     # Cleanup
-    del model
+    del model, meta_block
     gc.collect()
     torch.cuda.empty_cache()
     
