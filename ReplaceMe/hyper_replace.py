@@ -17,6 +17,7 @@ from colorama import Fore, init
 from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
+from torch.cuda.amp import autocast, GradScaler
 
 from .utils import (get_calib_dataloader, select_non_overlapping_blocks, 
                     truncate_model, seed_all)
@@ -44,14 +45,14 @@ class HyperNetwork(nn.Module):
     that adapt to the complexity and characteristics of the input.
     """
     
-    def __init__(self, hidden_size: int, rank: int = 64, 
-                 feature_dim: int = 7, dropout: float = 0.1):
+    def __init__(self, hidden_size: int, rank: int = 16, 
+                 feature_dim: int = 3, dropout: float = 0.1):
         """Initialize HyperNetwork.
         
         Args:
             hidden_size: Model's hidden dimension
             rank: Rank for low-rank decomposition
-            feature_dim: Dimension of input features (mean, std, norm, etc.)
+            feature_dim: Dimension of input features (mean, std, norm)
             dropout: Dropout rate for regularization
         """
         super().__init__()
@@ -59,16 +60,10 @@ class HyperNetwork(nn.Module):
         print(f"[DEBUG] Initializing HyperNetwork: hidden_size={hidden_size}, rank={rank}")
         
         # Feature extraction network
-        # Input: statistical features of the batch
-        # Output: transformation parameters
-        input_dim = hidden_size * feature_dim  # mean, std, norm, max, min, kurtosis, skewness
+        input_dim = hidden_size * feature_dim  # mean, std, norm only
         
         self.feature_extractor = nn.Sequential(
-            nn.Linear(input_dim, 1024),
-            nn.LayerNorm(1024),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(1024, 512),
+            nn.Linear(input_dim, 512),
             nn.LayerNorm(512),
             nn.ReLU(),
             nn.Dropout(dropout),
@@ -77,19 +72,21 @@ class HyperNetwork(nn.Module):
         )
         
         # Low-rank matrix generators
-        # U: [hidden_size, rank], V: [rank, hidden_size]
         self.u_generator = nn.Linear(256, hidden_size * rank)
         self.v_generator = nn.Linear(256, hidden_size * rank)
         
         # Scaling factors for adaptive adjustment
-        self.scale_u = nn.Parameter(torch.ones(1))
-        self.scale_v = nn.Parameter(torch.ones(1))
+        self.scale_u = nn.Parameter(torch.ones(1) * 0.1)
+        self.scale_v = nn.Parameter(torch.ones(1) * 0.1)
         
         # Base transformation (starts from identity)
         self.register_buffer('base_transform', torch.eye(hidden_size))
         
-        # Residual weight for stability
-        self.residual_weight = nn.Parameter(torch.tensor(0.9))
+        # Higher residual weight for stability (0.95 instead of 0.9)
+        self.residual_weight = nn.Parameter(torch.tensor(0.95))
+        
+        # Complexity threshold for selective adaptation
+        self.complexity_threshold = 0.5
         
         self.hidden_size = hidden_size
         self.rank = rank
@@ -104,69 +101,33 @@ class HyperNetwork(nn.Module):
         """Careful initialization for stability."""
         for module in self.modules():
             if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight, gain=0.1)
+                nn.init.xavier_uniform_(module.weight, gain=0.01)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
         
-        # Small initial values for U and V generators
-        nn.init.normal_(self.u_generator.weight, std=0.01)
-        nn.init.normal_(self.v_generator.weight, std=0.01)
-
+        # Very small initial values for U and V generators
+        nn.init.normal_(self.u_generator.weight, std=0.001)
+        nn.init.normal_(self.v_generator.weight, std=0.001)
+    
     def extract_features(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Extract statistical features from hidden states."""
-        # print(f"[DEBUG] Extracting features from hidden_states shape: {hidden_states.shape}")
+        """Extract statistical features from hidden states.
         
+        Args:
+            hidden_states: [batch_size, seq_len, hidden_size]
+        
+        Returns:
+            features: [batch_size, hidden_size * feature_dim]
+        """
         # Use only 3 basic statistics to reduce memory
         batch_mean = hidden_states.mean(dim=1)
         batch_std = hidden_states.std(dim=1)
         batch_norm = hidden_states.norm(dim=2).mean(dim=1, keepdim=True).expand(-1, self.hidden_size)
         
         features = torch.cat([batch_mean, batch_std, batch_norm], dim=-1)
-        
-        # print(f"[DEBUG] Extracted features shape: {features.shape}")
         return features
-
-    def forward(self, hidden_states: torch.Tensor, return_components: bool = False):
-        batch_size, seq_len, hidden_size = hidden_states.shape
-        
-        # Generate transformation parameters
-        features = self.extract_features(hidden_states)
-        feat_encoded = self.feature_extractor(features)
-        
-        u_params = self.u_generator(feat_encoded)
-        v_params = self.v_generator(feat_encoded)
-        
-        U = u_params.view(batch_size, hidden_size, self.rank) * self.scale_u
-        V = v_params.view(batch_size, self.rank, hidden_size) * self.scale_v
-        
-        # Low-rank transformation
-        adaptive_transform = torch.bmm(U, V)
-        
-        # Combine with base transformation
-        transform = (self.residual_weight * self.base_transform.unsqueeze(0) + 
-                    (1 - self.residual_weight) * adaptive_transform)
-        
-        # Efficient application: Use einsum or bmm directly
-        # hidden_states: [batch, seq, hidden]
-        # transform: [batch, hidden, hidden]
-        # Result: [batch, seq, hidden]
-        
-        transformed = torch.einsum('bsh,bhd->bsd', hidden_states, transform)
-        # OR: transformed = torch.bmm(hidden_states, transform.transpose(1, 2))
-        
-        if return_components:
-            return transformed, U, V
-        return transformed
-
+    
     def get_complexity_score(self, hidden_states: torch.Tensor) -> float:
-        """Estimate input complexity for adaptive block selection.
-        
-        Args:
-            hidden_states: [batch_size, seq_len, hidden_size]
-        
-        Returns:
-            complexity_score: Scalar value indicating input complexity
-        """
+        """Estimate input complexity for adaptive block selection."""
         features = self.extract_features(hidden_states)
         
         # Use feature statistics as complexity indicators
@@ -174,153 +135,112 @@ class HyperNetwork(nn.Module):
         feature_norm = features.norm(dim=-1).mean()
         
         complexity = (feature_std + feature_norm) / 2
-        
-        print(f"[DEBUG] Complexity score: {complexity.item():.4f}")
         return complexity.item()
+    
+    def forward(self, hidden_states: torch.Tensor, 
+                return_components: bool = False) -> torch.Tensor:
+        """Generate and apply adaptive transformation.
+        
+        Args:
+            hidden_states: [batch_size, seq_len, hidden_size]
+            return_components: Whether to return U and V separately
+        
+        Returns:
+            transformed: [batch_size, seq_len, hidden_size]
+            or (transformed, U, V) if return_components=True
+        """
+        batch_size, seq_len, hidden_size = hidden_states.shape
+        
+        # Extract features
+        features = self.extract_features(hidden_states)
+        
+        # Check complexity for selective adaptation
+        complexity = features.std(dim=-1).mean()
+        
+        if complexity < self.complexity_threshold:
+            # Low complexity: use mostly base transformation
+            transform = self.base_transform.unsqueeze(0).expand(batch_size, -1, -1)
+            
+            # Apply transformation efficiently using einsum
+            transformed = torch.einsum('bsh,bhd->bsd', hidden_states, transform)
+            
+            if return_components:
+                # Return dummy U and V for compatibility
+                U = torch.zeros(batch_size, hidden_size, self.rank, device=hidden_states.device)
+                V = torch.zeros(batch_size, self.rank, hidden_size, device=hidden_states.device)
+                return transformed, U, V
+            return transformed
+        
+        # High complexity: use adaptive transformation
+        feat_encoded = self.feature_extractor(features)
+        
+        # Generate U and V matrices
+        u_params = self.u_generator(feat_encoded)
+        v_params = self.v_generator(feat_encoded)
+        
+        # Reshape to matrices with smaller scaling
+        U = u_params.view(batch_size, hidden_size, self.rank) * self.scale_u
+        V = v_params.view(batch_size, self.rank, hidden_size) * self.scale_v
+        
+        # Compute low-rank transformation: U @ V
+        adaptive_transform = torch.bmm(U, V)
+        
+        # Combine with base transformation using high residual weight
+        transform = (self.residual_weight * self.base_transform.unsqueeze(0) + 
+                    (1 - self.residual_weight) * adaptive_transform)
+        
+        # Apply transformation efficiently using einsum (no repeat_interleave!)
+        transformed = torch.einsum('bsh,bhd->bsd', hidden_states, transform)
+        
+        if return_components:
+            return transformed, U, V
+        return transformed
 
 
 # ============================
-# Training Functions
+# Loss Functions
 # ============================
 
-def train_hypernet(
-    hypernet: HyperNetwork,
-    dataloader: torch.utils.data.DataLoader,
-    target_activations: Dict[str, torch.Tensor],
-    input_activations: Dict[str, torch.Tensor],
-    epochs: int = 5,
-    lr: float = 1e-4,
-    progressive: bool = True,
-    device: str = "cuda"
-) -> HyperNetwork:
-    """Train the HyperNetwork to generate appropriate transformations.
+def cosine_similarity_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Cosine similarity loss."""
+    pred_norm = F.normalize(pred.reshape(-1, pred.shape[-1]), p=2, dim=-1)
+    target_norm = F.normalize(target.reshape(-1, target.shape[-1]), p=2, dim=-1)
+    return 1 - (pred_norm * target_norm).sum(dim=-1).mean()
+
+def kl_divergence_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """KL divergence loss for better language modeling preservation."""
+    # Treat hidden states as distributions
+    pred_log_probs = F.log_softmax(pred.view(-1, pred.size(-1)), dim=-1)
+    target_probs = F.softmax(target.view(-1, target.size(-1)), dim=-1)
+    return F.kl_div(pred_log_probs, target_probs, reduction='batchmean')
+
+def combined_loss(pred: torch.Tensor, target: torch.Tensor, 
+                 stage: int = 0, use_kl: bool = True) -> torch.Tensor:
+    """Combined loss with progressive weighting."""
+    mse = F.mse_loss(pred, target)
+    cosine = cosine_similarity_loss(pred, target)
     
-    Args:
-        hypernet: HyperNetwork model
-        dataloader: DataLoader for calibration data
-        target_activations: Target outputs from original blocks
-        input_activations: Input activations to blocks
-        epochs: Number of training epochs
-        lr: Learning rate
-        progressive: Whether to use progressive training
-        device: Device to train on
+    if use_kl:
+        kl = kl_divergence_loss(pred, target)
+    else:
+        kl = 0
     
-    Returns:
-        Trained HyperNetwork
-    """
-    print(f"[DEBUG] Starting HyperNetwork training: epochs={epochs}, lr={lr}")
+    if stage == 0:
+        # Stage 1: Focus on reconstruction
+        loss = mse
+    elif stage == 1:
+        # Stage 2: Balance reconstruction and direction
+        loss = 0.5 * mse + 0.3 * cosine + 0.2 * kl if use_kl else 0.7 * mse + 0.3 * cosine
+    else:
+        # Stage 3: Focus on direction with KL for language modeling
+        loss = 0.2 * mse + 0.3 * cosine + 0.5 * kl if use_kl else 0.3 * mse + 0.7 * cosine
     
-    hypernet = hypernet.to(device)
-    optimizer = torch.optim.AdamW(hypernet.parameters(), lr=lr, weight_decay=1e-5)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-    
-    def cosine_similarity_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """Cosine similarity loss."""
-        pred_norm = F.normalize(pred, p=2, dim=-1)
-        target_norm = F.normalize(target, p=2, dim=-1)
-        return 1 - (pred_norm * target_norm).sum(dim=-1).mean()
-    
-    def combined_loss(pred: torch.Tensor, target: torch.Tensor, 
-                     stage: int = 0) -> torch.Tensor:
-        """Combined loss with progressive weighting."""
-        mse = F.mse_loss(pred, target)
-        cosine = cosine_similarity_loss(pred, target)
-        
-        if stage == 0:
-            # Stage 1: Focus on reconstruction
-            loss = mse
-            print(f"[DEBUG] Stage 1 - MSE Loss: {mse.item():.6f}")
-        elif stage == 1:
-            # Stage 2: Balance reconstruction and direction
-            loss = 0.7 * mse + 0.3 * cosine
-            print(f"[DEBUG] Stage 2 - MSE: {mse.item():.6f}, Cosine: {cosine.item():.6f}")
-        else:
-            # Stage 3: Focus on direction with sparsity
-            # Add L1 regularization on U and V for sparsity
-            loss = 0.3 * mse + 0.7 * cosine
-            print(f"[DEBUG] Stage 3 - MSE: {mse.item():.6f}, Cosine: {cosine.item():.6f}")
-        
-        return loss
-    
-    # Training loop
-    for epoch in range(epochs):
-        print(f"\n{Fore.GREEN}=== Epoch {epoch+1}/{epochs} ==={Fore.RESET}")
-        
-        # Determine training stage for progressive training
-        if progressive:
-            if epoch < epochs // 3:
-                stage = 0
-            elif epoch < 2 * epochs // 3:
-                stage = 1
-            else:
-                stage = 2
-        else:
-            stage = 2  # Use full loss from the start
-        
-        total_loss = 0
-        num_batches = 0
-        
-        progress_bar = tqdm(enumerate(dataloader), total=len(dataloader), 
-                           desc=f"Training Epoch {epoch+1}")
-        
-        for batch_idx, batch_data in progress_bar:
-            # Get corresponding activations for this batch
-            batch_start = batch_idx * dataloader.batch_size
-            batch_end = batch_start + len(batch_data)
-            
-            # Get input and target activations for current batch
-            batch_input = input_activations[batch_start:batch_end].to(device)
-            batch_target = target_activations[batch_start:batch_end].to(device)
-            
-            # Forward pass through HyperNetwork
-            optimizer.zero_grad()
-            transformed, U, V = hypernet(batch_input, return_components=True)
-            
-            # Compute loss
-            loss = combined_loss(transformed, batch_target, stage)
-            
-            # Add regularization for U and V matrices
-            if stage >= 2:
-                u_reg = torch.norm(U, p=1) * 1e-5
-                v_reg = torch.norm(V, p=1) * 1e-5
-                loss = loss + u_reg + v_reg
-                
-            # Backward pass
-            loss.backward()
-            
-            # Gradient clipping for stability
-            torch.nn.utils.clip_grad_norm_(hypernet.parameters(), max_norm=1.0)
-            
-            optimizer.step()
-            
-            total_loss += loss.item()
-            num_batches += 1
-            
-            # Update progress bar
-            progress_bar.set_postfix({
-                'loss': f'{loss.item():.6f}',
-                'avg_loss': f'{total_loss/num_batches:.6f}',
-                'lr': f'{scheduler.get_last_lr()[0]:.6f}'
-            })
-        
-        scheduler.step()
-        
-        avg_epoch_loss = total_loss / num_batches
-        print(f"{Fore.CYAN}Epoch {epoch+1} completed - Average Loss: {avg_epoch_loss:.6f}{Fore.RESET}")
-        
-        # Early stopping check
-        if avg_epoch_loss < 1e-5:
-            print(f"{Fore.YELLOW}Early stopping: Loss below threshold{Fore.RESET}")
-            break
-    
-    print(f"{Fore.GREEN}Training completed!{Fore.RESET}")
-    return hypernet
+    return loss
 
 
 # ============================
 # Main HyperReplace Function
 # ============================
-
 
 def hyper_replace(
     model_path: str,
@@ -335,9 +255,9 @@ def hyper_replace(
     save_path: Optional[str] = None,
     token: Optional[str] = None,
     # HyperReplace specific parameters
-    hyper_rank: int = 64,
-    hyper_lr: float = 1e-4,
-    hyper_epochs: int = 5,
+    hyper_rank: int = 16,
+    hyper_lr: float = 5e-5,
+    hyper_epochs: int = 20,
     adaptive_selection: bool = True,
     complexity_threshold: List[float] = [0.3, 0.7],
     progressive_stages: bool = True,
@@ -347,9 +267,19 @@ def hyper_replace(
     start_id: int = 0,
     end_id: int = 0,
     num_layer: int = 0,
+    use_kl_loss: bool = True,
+    use_mixed_precision: bool = True,
     **kwargs
 ) -> str:
     """Main HyperReplace function for adaptive layer replacement."""
+    
+    # Type conversion to ensure correct types
+    hyper_lr = float(hyper_lr) if isinstance(hyper_lr, str) else hyper_lr
+    hyper_rank = int(hyper_rank) if isinstance(hyper_rank, str) else hyper_rank
+    hyper_epochs = int(hyper_epochs) if isinstance(hyper_epochs, str) else hyper_epochs
+    batch_size = int(batch_size) if isinstance(batch_size, str) else batch_size
+    max_length = int(max_length) if isinstance(max_length, str) else max_length
+    layers_to_skip = int(layers_to_skip) if isinstance(layers_to_skip, str) else layers_to_skip
     
     print(f"\n{Fore.MAGENTA}{'='*60}")
     print(f"Starting HyperReplace Pipeline")
@@ -360,7 +290,10 @@ def hyper_replace(
     print(f"  - Dataset: {dataset} (size: {dataset_size})")
     print(f"  - Layers to skip: {layers_to_skip}")
     print(f"  - HyperNetwork rank: {hyper_rank}")
-    print(f"  - Adaptive selection: {adaptive_selection}")
+    print(f"  - Learning rate: {hyper_lr}")
+    print(f"  - Epochs: {hyper_epochs}")
+    print(f"  - Use KL loss: {use_kl_loss}")
+    print(f"  - Use mixed precision: {use_mixed_precision}")
     
     # ============================
     # Step 1: Load Model and Data
@@ -436,7 +369,7 @@ def hyper_replace(
             inputs = tokenizer(
                 batch,
                 return_tensors="pt",
-                padding="max_length",  # Force max_length padding
+                padding="max_length",
                 max_length=max_length,
                 truncation=True
             )
@@ -460,7 +393,6 @@ def hyper_replace(
     
     print(f"[DEBUG] Collected {len(collected_inputs)} batches")
     
-    # Concatenate all activations
     input_activations = torch.cat(collected_inputs, dim=0)
     output_activations = torch.cat(collected_outputs, dim=0)
     
@@ -473,7 +405,7 @@ def hyper_replace(
     if adaptive_selection:
         print(f"\n{Fore.CYAN}Step 3: Estimating input complexity...{Fore.RESET}")
         
-        temp_hypernet = HyperNetwork(hidden_size, rank=hyper_rank)
+        temp_hypernet = HyperNetwork(hidden_size, rank=hyper_rank, feature_dim=3)
         
         sample_complexities = []
         num_samples = min(10, input_activations.shape[0])
@@ -486,9 +418,11 @@ def hyper_replace(
         print(f"[DEBUG] Average complexity score: {avg_complexity:.4f}")
         
         if avg_complexity < complexity_threshold[0]:
-            print(f"[INFO] Low complexity detected")
+            print(f"[INFO] Low complexity detected - using conservative adaptation")
+            temp_hypernet.complexity_threshold = 0.7
         elif avg_complexity > complexity_threshold[1]:
-            print(f"[INFO] High complexity detected")
+            print(f"[INFO] High complexity detected - using aggressive adaptation")
+            temp_hypernet.complexity_threshold = 0.3
         
         del temp_hypernet
     
@@ -509,10 +443,12 @@ def hyper_replace(
     optimizer = torch.optim.AdamW(hypernet.parameters(), lr=hyper_lr, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=hyper_epochs)
     
-    def cosine_similarity_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        pred_norm = F.normalize(pred.reshape(-1, pred.shape[-1]), p=2, dim=-1)
-        target_norm = F.normalize(target.reshape(-1, target.shape[-1]), p=2, dim=-1)
-        return 1 - (pred_norm * target_norm).sum(dim=-1).mean()
+    # Mixed precision training setup
+    if use_mixed_precision and device == "cuda":
+        scaler = GradScaler()
+        print("[DEBUG] Using mixed precision training")
+    else:
+        scaler = None
     
     # Create index dataloader for training
     num_samples = input_activations.shape[0]
@@ -528,7 +464,12 @@ def hyper_replace(
         print(f"\n{Fore.GREEN}=== Epoch {epoch+1}/{hyper_epochs} ==={Fore.RESET}")
         
         if progressive_stages:
-            stage = epoch // (hyper_epochs // 3) if hyper_epochs >= 3 else 2
+            if epoch < hyper_epochs // 3:
+                stage = 0
+            elif epoch < 2 * hyper_epochs // 3:
+                stage = 1
+            else:
+                stage = 2
         else:
             stage = 2
         
@@ -542,24 +483,35 @@ def hyper_replace(
             batch_target = output_activations[batch_indices].to(device)
             
             optimizer.zero_grad()
-            transformed, U, V = hypernet(batch_input, return_components=True)
             
-            if stage == 0:
-                loss = F.mse_loss(transformed, batch_target)
-            elif stage == 1:
-                mse_loss = F.mse_loss(transformed, batch_target)
-                cos_loss = cosine_similarity_loss(transformed, batch_target)
-                loss = 0.7 * mse_loss + 0.3 * cos_loss
+            if scaler is not None:
+                with autocast():
+                    transformed, U, V = hypernet(batch_input, return_components=True)
+                    loss = combined_loss(transformed, batch_target, stage, use_kl=use_kl_loss)
+                    
+                    # Add regularization for U and V matrices
+                    if stage >= 2:
+                        u_reg = torch.norm(U, p=1) * 1e-6
+                        v_reg = torch.norm(V, p=1) * 1e-6
+                        loss = loss + u_reg + v_reg
+                
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(hypernet.parameters(), max_norm=0.5)
+                scaler.step(optimizer)
+                scaler.update()
             else:
-                mse_loss = F.mse_loss(transformed, batch_target)
-                cos_loss = cosine_similarity_loss(transformed, batch_target)
-                u_reg = torch.norm(U, p=1) * 1e-5
-                v_reg = torch.norm(V, p=1) * 1e-5
-                loss = 0.3 * mse_loss + 0.7 * cos_loss + u_reg + v_reg
-            
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(hypernet.parameters(), max_norm=1.0)
-            optimizer.step()
+                transformed, U, V = hypernet(batch_input, return_components=True)
+                loss = combined_loss(transformed, batch_target, stage, use_kl=use_kl_loss)
+                
+                if stage >= 2:
+                    u_reg = torch.norm(U, p=1) * 1e-6
+                    v_reg = torch.norm(V, p=1) * 1e-6
+                    loss = loss + u_reg + v_reg
+                
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(hypernet.parameters(), max_norm=0.5)
+                optimizer.step()
             
             total_loss += loss.item()
             num_batches += 1
@@ -567,7 +519,8 @@ def hyper_replace(
             progress_bar.set_postfix({
                 'loss': f'{loss.item():.6f}',
                 'avg_loss': f'{total_loss/num_batches:.6f}',
-                'lr': f'{scheduler.get_last_lr()[0]:.6f}'
+                'lr': f'{scheduler.get_last_lr()[0]:.6f}',
+                'stage': stage
             })
         
         scheduler.step()
@@ -575,7 +528,8 @@ def hyper_replace(
         avg_epoch_loss = total_loss / num_batches
         print(f"{Fore.CYAN}Epoch {epoch+1} completed - Average Loss: {avg_epoch_loss:.6f}{Fore.RESET}")
         
-        if avg_epoch_loss < 1e-5:
+        # Early stopping with higher threshold
+        if avg_epoch_loss < 1e-4:
             print(f"{Fore.YELLOW}Early stopping: Loss below threshold{Fore.RESET}")
             break
     
@@ -623,7 +577,7 @@ def hyper_replace(
         'hypernet_config': {
             'hidden_size': hidden_size,
             'rank': hyper_rank,
-            'feature_dim': 7
+            'feature_dim': 3
         },
         'replaced_layers': {
             'start': start_id,
@@ -643,59 +597,3 @@ def hyper_replace(
     print(f"{'='*60}{Fore.RESET}\n")
     
     return f"{save_path}_model"
-
-
-# ============================
-# Configuration Functions
-# ============================
-
-def read_config(config_path: str) -> dict:
-    """Read and parse YAML configuration file."""
-    with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
-
-
-def run_from_config():
-    """Run HyperReplace from a configuration file."""
-    parser = argparse.ArgumentParser(
-        description="Run HyperReplace adaptive layer replacement from configuration."
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        required=True,
-        help="Path to the configuration file."
-    )
-    
-    args = parser.parse_args()
-    config = read_config(args.config)
-    
-    # Load distances if needed
-    if 'distances_path' in config and config['distances_path']:
-        average_distances = torch.load(config['distances_path'])
-        selected_blocks = select_non_overlapping_blocks(
-            average_distances,
-            config['layers_to_skip'],
-            num_blocks=config.get('num_A', 1),
-            merge_consecutive=config.get('merge_consecutive', False)
-        )
-        
-        # Process multiple blocks if needed
-        for i, (start_id, end_id) in enumerate(selected_blocks):
-            print(f"\n[INFO] Processing block {i+1}/{len(selected_blocks)}: layers {start_id} to {end_id}")
-            
-            config['start_id'] = start_id
-            config['end_id'] = end_id
-            
-            path = hyper_replace(**config)
-            
-            # Update model path for next iteration if needed
-            if i < len(selected_blocks) - 1:
-                config["model_path"] = path
-    else:
-        # Single run without distance-based selection
-        hyper_replace(**config)
-
-
-if __name__ == "__main__":
-    run_from_config()
