@@ -35,87 +35,71 @@ seed_all()
 
 
 class CompressedMetaBlock(nn.Module):
-    """Compressed meta-block that replaces multiple transformer layers.
-    
-    Unlike ReplaceMe's simple linear transform, this uses:
-    1. Multiple processing paths (direct, fast, slow)
-    2. Adaptive gating to select paths based on input
-    3. Learnable residual scaling
-    4. Optional attention compression
-    """
+    """Compressed meta-block that replaces multiple transformer layers."""
     
     def __init__(self, hidden_dim: int, num_blocks_compressed: int, 
-                 use_attention: bool = True, num_heads_compressed: int = 8):
+                 use_attention: bool = True, num_heads_compressed: int = 8,
+                 dtype=torch.bfloat16):
         super().__init__()
         
         self.hidden_dim = hidden_dim
         self.num_blocks = num_blocks_compressed
         self.use_attention = use_attention
+        self.dtype = dtype
+        self.num_heads = num_heads_compressed  # Store num_heads
         
-        # Path 1: Direct bypass (for simple cases)
-        # Just learnable scaling, no transformation
-        self.bypass_scale = nn.Parameter(torch.ones(1))
+        # Path 1: Direct bypass
+        self.bypass_scale = nn.Parameter(torch.ones(1, dtype=dtype))
         
         # Path 2: Fast linear transformation
-        self.fast_transform = nn.Linear(hidden_dim, hidden_dim, bias=False)
-        # Initialize as identity
-        self.fast_transform.weight.data.copy_(torch.eye(hidden_dim))
+        self.fast_transform = nn.Linear(hidden_dim, hidden_dim, bias=False, dtype=dtype)
+        with torch.no_grad():
+            self.fast_transform.weight.copy_(torch.eye(hidden_dim, dtype=dtype))
         
         # Path 3: Slow deep processing
         if use_attention:
-            # Compressed attention with fewer heads
             self.compressed_attn = nn.MultiheadAttention(
                 hidden_dim,
                 num_heads=num_heads_compressed,
                 dropout=0.0,
                 batch_first=True
             )
+            self.compressed_attn = self.compressed_attn.to(dtype=dtype)
         
-        # Deep FFN for complex processing
         self.slow_ffn = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim * 2),
+            nn.Linear(hidden_dim, hidden_dim * 2, dtype=dtype),
             nn.GELU(),
             nn.Dropout(0.1),
-            nn.Linear(hidden_dim * 2, hidden_dim)
+            nn.Linear(hidden_dim * 2, hidden_dim, dtype=dtype)
         )
         
-        # Adaptive gating network
         self.gate_network = nn.Sequential(
-            nn.Linear(hidden_dim, 256),
+            nn.Linear(hidden_dim, 256, dtype=dtype),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(256, 3),  # 3 paths
+            nn.Linear(256, 3, dtype=dtype),
             nn.Softmax(dim=-1)
         )
         
-        # Learnable residual connections (one per compressed block)
-        self.residual_scales = nn.Parameter(torch.ones(num_blocks_compressed))
+        self.residual_scales = nn.Parameter(torch.ones(num_blocks_compressed, dtype=dtype))
+        self.layer_norm = nn.LayerNorm(hidden_dim, dtype=dtype)
         
-        # Layer norm for stability
-        self.layer_norm = nn.LayerNorm(hidden_dim)
-        
-        # Learnable shortcuts inspired by ResNet
-        self.shortcut_transform = nn.Linear(hidden_dim, hidden_dim, bias=False)
-        self.shortcut_transform.weight.data.copy_(torch.eye(hidden_dim))
+        self.shortcut_transform = nn.Linear(hidden_dim, hidden_dim, bias=False, dtype=dtype)
+        with torch.no_grad():
+            self.shortcut_transform.weight.copy_(torch.eye(hidden_dim, dtype=dtype))
     
     def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Forward pass through compressed meta-block.
+        """Forward pass through compressed meta-block."""
+        # Ensure input is in correct dtype
+        x = x.to(self.dtype)
         
-        Args:
-            x: Input tensor [batch, seq_len, hidden_dim]
-            attention_mask: Optional attention mask
-            
-        Returns:
-            Processed tensor with same shape as input
-        """
         batch_size, seq_len, _ = x.shape
         identity = x.clone()
         
-        # Compute gating weights based on input statistics
-        # Use mean pooling over sequence for gate computation
-        x_pooled = x.mean(dim=1)  # [batch, hidden_dim]
-        gate_weights = self.gate_network(x_pooled)  # [batch, 3]
-        gate_weights = gate_weights.unsqueeze(1).unsqueeze(2)  # [batch, 1, 1, 3]
+        # Compute gating weights
+        x_pooled = x.mean(dim=1)
+        gate_weights = self.gate_network(x_pooled)
+        gate_weights = gate_weights.unsqueeze(1).unsqueeze(2)
         
         # Path 1: Direct bypass
         path1 = identity * self.bypass_scale
@@ -125,12 +109,38 @@ class CompressedMetaBlock(nn.Module):
         
         # Path 3: Slow deep processing
         if self.use_attention:
-            # Apply compressed attention
-            attn_out, _ = self.compressed_attn(
-                x, x, x,
-                attn_mask=attention_mask,
-                need_weights=False
-            )
+            # Fix attention mask for MultiheadAttention
+            if attention_mask is not None:
+                # Convert [batch, seq_len] -> proper attention mask
+                # MultiheadAttention expects shape [batch*num_heads, tgt_seq, src_seq] OR [batch, tgt_seq, src_seq]
+                # We'll use the simpler [seq_len, seq_len] broadcast format
+                
+                # Create causal mask if needed
+                attn_mask = torch.zeros(seq_len, seq_len, dtype=self.dtype, device=x.device)
+                
+                # Apply padding mask if provided
+                if attention_mask is not None:
+                    # attention_mask is [batch, seq_len] with 1s for valid positions, 0s for padding
+                    # We need to convert this to an additive mask
+                    padding_mask = (1.0 - attention_mask.float()) * -10000.0
+                    # For simplicity, we'll just use key_padding_mask instead
+                    key_padding_mask = (attention_mask == 0)  # True for positions to ignore
+                else:
+                    key_padding_mask = None
+                
+                # Apply attention without attn_mask, only key_padding_mask
+                attn_out, _ = self.compressed_attn(
+                    x, x, x,
+                    key_padding_mask=key_padding_mask,
+                    need_weights=False
+                )
+            else:
+                # No mask needed
+                attn_out, _ = self.compressed_attn(
+                    x, x, x,
+                    need_weights=False
+                )
+            
             path3 = self.slow_ffn(self.layer_norm(attn_out))
         else:
             path3 = self.slow_ffn(self.layer_norm(x))
@@ -141,7 +151,6 @@ class CompressedMetaBlock(nn.Module):
                  gate_weights[..., 2] * path3)
         
         # Apply progressive residual connections
-        # Simulates the effect of multiple layers
         for i in range(self.num_blocks):
             scale = self.residual_scales[i]
             output = output + identity * scale * (1.0 / self.num_blocks)
@@ -185,20 +194,6 @@ def plds_compress(
     
     This method compresses multiple transformer blocks into a single meta-block
     with multiple processing paths and adaptive routing.
-    
-    Args:
-        (standard args same as ReplaceMe)
-        use_attention_in_meta: Whether to use attention in meta-block
-        num_compressed_heads: Number of attention heads in compressed block
-        distillation_epochs: Number of training epochs
-        learning_rate: Learning rate for optimization
-        temperature: Temperature for attention distillation
-        alpha_mse: Weight for MSE loss
-        alpha_cos: Weight for cosine loss
-        alpha_attn: Weight for attention transfer loss
-        
-    Returns:
-        Path to saved compressed model
     """
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -238,14 +233,15 @@ def plds_compress(
         dataset_size, batch_size, tokenizer
     )
     
-    # Initialize compressed meta-block
+    # Initialize compressed meta-block with correct dtype
     logging.info(f"{Fore.YELLOW}Creating compressed meta-block for layers {start_id} to {end_id}{Fore.RESET}")
     
     meta_block = CompressedMetaBlock(
         hidden_dim=hidden_size,
         num_blocks_compressed=num_blocks_to_compress,
         use_attention=use_attention_in_meta,
-        num_heads_compressed=num_compressed_heads
+        num_heads_compressed=num_compressed_heads,
+        dtype=torch.bfloat16  # Explicitly set dtype
     ).to(device)
     
     # Setup optimizer
@@ -281,8 +277,9 @@ def plds_compress(
                     attentions = teacher_outputs.attentions if hasattr(teacher_outputs, 'attentions') else None
                 
                 # Extract inputs and targets for compressed block
-                block_input = hidden_states[start_id - num_layer].detach()
-                block_target = hidden_states[end_id - num_layer].detach()
+                # Convert to bfloat16 explicitly
+                block_input = hidden_states[start_id - num_layer].detach().to(torch.bfloat16)
+                block_target = hidden_states[end_id - num_layer].detach().to(torch.bfloat16)
                 
                 # Forward through meta-block
                 optimizer.zero_grad()
@@ -305,16 +302,7 @@ def plds_compress(
                 loss += alpha_cos * cos_loss
                 
                 # 3. Attention transfer loss (if applicable)
-                if use_attention_in_meta and attentions is not None:
-                    # Average attention patterns from compressed layers
-                    teacher_attn_avg = torch.stack(
-                        [attentions[i] for i in range(start_id - num_layer, end_id - num_layer)]
-                    ).mean(dim=0).mean(dim=1)  # Average over layers and heads
-                    
-                    # Get student attention (need to modify forward to return it)
-                    # For now, we'll skip this component
-                    # attn_loss = F.kl_div(...)
-                    # loss += alpha_attn * attn_loss
+                # Skip for now as it requires more complex implementation
                 
                 # Backward and optimize
                 loss.backward()
@@ -354,19 +342,35 @@ def plds_compress(
     model = truncate_model(model, start_id - num_layer, end_id - num_layer)
     
     # Insert compressed meta-block
-    # We'll create a wrapper that integrates the meta-block
+    # Create a more compatible wrapper
     class MetaBlockWrapper(nn.Module):
         def __init__(self, meta_block, original_layer):
             super().__init__()
             self.meta_block = meta_block
-            self.original_layer = original_layer
+            # Keep original layer attributes for compatibility
+            if hasattr(original_layer, 'self_attn'):
+                self.self_attn = original_layer.self_attn
+            if hasattr(original_layer, 'mlp'):
+                self.mlp = original_layer.mlp
+            if hasattr(original_layer, 'input_layernorm'):
+                self.input_layernorm = original_layer.input_layernorm
+            if hasattr(original_layer, 'post_attention_layernorm'):
+                self.post_attention_layernorm = original_layer.post_attention_layernorm
             
-        def forward(self, hidden_states, **kwargs):
+        def forward(self, hidden_states, attention_mask=None, position_ids=None, 
+                   past_key_value=None, output_attentions=False, use_cache=False, 
+                   cache_position=None, **kwargs):
             # Apply meta-block transformation
-            hidden_states = self.meta_block(hidden_states)
-            # Optionally combine with original layer output
-            # For now, we just return meta-block output
-            return (hidden_states,)
+            hidden_states = self.meta_block(hidden_states, attention_mask=attention_mask)
+            
+            # Return in expected format (tuple)
+            outputs = (hidden_states,)
+            if output_attentions:
+                outputs += (None,)  # No attention weights
+            if use_cache:
+                outputs += (None,)  # No cache
+            
+            return outputs
     
     # Replace the layer before the truncated section with our wrapper
     wrapper = MetaBlockWrapper(meta_block.cpu(), model.model.layers[start_id - num_layer - 1])
