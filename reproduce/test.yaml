@@ -1,4 +1,4 @@
-method: "optimized_plds"
+method: "alf"
 model_path: "meta-llama/Llama-3.2-3B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
@@ -16,16 +16,12 @@ distances_path: "distances.pth"
 num_A: 1
 merge_consecutive: False
 
-# Optimized PLDS specific
-use_correction: True           # Use correction network
-correction_dim_reduction: 16   # Hidden dim reduction factor
-distillation_epochs: 15        # Training epochs
-learning_rate: 0.00005         # Base learning rate
-warmup_epochs: 2               # Warmup epochs
-alpha_mse: 0.7                 # MSE loss weight
-alpha_cos: 0.2                 # Cosine loss weight
-alpha_intermediate: 0.1        # Intermediate supervision weight
-use_pretrained_init: True      # Initialize with ReplaceMe transform
+# ALF specific parameters
+num_experts: 4              # Number of FFN experts in bank
+use_layer_adapters: True    # Use layer-specific adapters
+training_epochs: 10         # Training epochs
+learning_rate: 0.0001       # Learning rate
+warmup_steps: 100          # Warmup steps
 
 # Evaluation
 tasks:

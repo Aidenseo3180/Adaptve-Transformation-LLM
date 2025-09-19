@@ -374,8 +374,8 @@ def optimized_plds_compress(
         
         with tqdm(dataloader, desc=f"Epoch {epoch+1}/{distillation_epochs}", colour="blue") as pbar:
             for batch_idx, batch_text in enumerate(pbar):
-                if batch_idx >= 50:  # Limit batches
-                    break
+                # if batch_idx >= 50:  # Limit batches
+                #     break
                 
                 inputs = tokenizer(
                     batch_text,
