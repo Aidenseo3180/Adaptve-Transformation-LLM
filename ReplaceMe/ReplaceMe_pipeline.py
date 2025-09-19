@@ -85,12 +85,13 @@ def ReplaceMe_pipeline(config):
             path = plds_compress(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
 
-    elif config["method"] == "simplified_plds":  # Simplified PLDS
-        from .simplified_plds import simplified_plds_compress
+    elif config["method"] == "optimized_plds":  # Optimized PLDS
+        from .optimized_plds import optimized_plds_compress
         
-        signature = inspect.signature(simplified_plds_compress)
+        signature = inspect.signature(optimized_plds_compress)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
+        # Load distances and select blocks
         average_distances = torch.load(filtered_config['distances_path'], weights_only=False)
         selected_blocks = select_non_overlapping_blocks(
             average_distances, 
@@ -104,9 +105,16 @@ def ReplaceMe_pipeline(config):
         num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
         num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
         
+        # Process each block
         for i in range(len(selected_blocks)):
-            path = simplified_plds_compress(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
+            path = optimized_plds_compress(
+                **filtered_config, 
+                start_id=start_ids[i], 
+                end_id=end_ids[i], 
+                num_layer=num_layers[i]
+            )
             filtered_config["model_path"] = path
+
 
     # Evaluate using the updated configuration
     signature = inspect.signature(evaluator)
