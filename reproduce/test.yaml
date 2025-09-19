@@ -1,32 +1,24 @@
-method: "alf_v2"
+method: "laco"
 model_path: "meta-llama/Llama-3.2-3B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
 batch_size: 4
 max_length: 512
 layers_to_skip: 4
-dataset_size: 2000  # Increased
+dataset_size: 1000
 dataset_subset: "train"
-use_4bit: False
+use_4bit: False  # CPU에서 weight 추출
 save_path: null
 
-# Standard
-distances_path: "distances.pth"
+distances_path: null
 num_A: 1
 merge_consecutive: False
 
-# ALF v2 parameters
-num_experts: 2              # Reduced from 4
-use_layer_adapters: True
-adapter_reduction: 32       # Smaller adapters
-training_epochs: 15         # More epochs
-learning_rate: 0.00001      # Lower rate
-warmup_ratio: 0.1
-diversity_weight: 0.1       # Increased
-load_balance_weight: 0.05   # New
-adapter_reg_weight: 0.01    # New
+# Layer Collapse specific
+preserve_ratio: 0.1       # 차이의 10%만 보존
+fine_tune_epochs: 5       # Fine-tuning epochs
+learning_rate: 0.00001    # Fine-tuning LR
 
-# Evaluation
 tasks:
   boolq:
     fewshots: 0

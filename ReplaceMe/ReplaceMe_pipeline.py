@@ -85,13 +85,13 @@ def ReplaceMe_pipeline(config):
             path = plds_compress(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
 
-    elif config["method"] == "alf":  # Asymmetric Layer Fusion
-        from .alf_method import alf_compress
+
+    elif config["method"] == "laco":  # Layer Collapse
+        from .layer_collapse import layer_collapse_compress
         
-        signature = inspect.signature(alf_compress)
+        signature = inspect.signature(layer_collapse_compress)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
-        # Load distances and select blocks
         average_distances = torch.load(filtered_config['distances_path'], weights_only=False)
         selected_blocks = select_non_overlapping_blocks(
             average_distances,
@@ -106,7 +106,7 @@ def ReplaceMe_pipeline(config):
         num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
         
         for i in range(len(selected_blocks)):
-            path = alf_compress(
+            path = layer_collapse_compress(
                 **filtered_config,
                 start_id=start_ids[i],
                 end_id=end_ids[i],
@@ -114,34 +114,6 @@ def ReplaceMe_pipeline(config):
             )
             filtered_config["model_path"] = path
 
-    elif config["method"] == "alf_v2":  # Asymmetric Layer Fusion
-        from .alf_method_v2 import alf_compress_v2
-        
-        signature = inspect.signature(alf_compress_v2)
-        filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-        
-        # Load distances and select blocks
-        average_distances = torch.load(filtered_config['distances_path'], weights_only=False)
-        selected_blocks = select_non_overlapping_blocks(
-            average_distances,
-            filtered_config['layers_to_skip'],
-            num_blocks=filtered_config['num_A'],
-            merge_consecutive=filtered_config['merge_consecutive']
-        )
-        
-        start_ids = sorted([x[0] for x in selected_blocks])
-        end_ids = sorted([x[1] for x in selected_blocks])
-        num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
-        num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
-        
-        for i in range(len(selected_blocks)):
-            path = alf_compress_v2(
-                **filtered_config,
-                start_id=start_ids[i],
-                end_id=end_ids[i],
-                num_layer=num_layers[i]
-            )
-            filtered_config["model_path"] = path
 
     # Evaluate using the updated configuration
     signature = inspect.signature(evaluator)
