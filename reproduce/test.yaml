@@ -1,4 +1,4 @@
-method: "ahl"
+method: "mapp"
 model_path: "meta-llama/Llama-3.2-3B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
@@ -11,9 +11,9 @@ save_path: null
 token: null
 distances_path: null
 
-# AHL specific parameters
-strategy: "progressive"  # progressive, linear, or uniform
-min_heads_ratio: 0.5  # Minimum ratio of heads to keep
+# MAPP specific parameters
+pruning_ratio: 0.25  # Remove 25% of layers
+max_perplexity_increase: 1.2  # Allow up to 20% perplexity increase
 
 # Evaluation tasks
 tasks:
@@ -21,7 +21,3 @@ tasks:
     fewshots: 0
   lambada_openai:
     fewshots: 0
-  piqa:
-    fewshots: 0
-  winogrande:
-    fewshots: 5

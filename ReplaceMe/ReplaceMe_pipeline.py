@@ -59,19 +59,21 @@ def ReplaceMe_pipeline(config):
             path = cosine_dist(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
 
-    elif config["method"] == "ahl":  # Attention Head Lifecycle
-        from .ahl import ahl_transform
 
-        print(f"{Fore.CYAN}[Pipeline] Running Attention Head Lifecycle (AHL){Fore.RESET}")
+    elif config["method"] == "mapp":  # Magnitude-Aware Progressive Pruning
+        from .mapp import mapp_transform
+
+        print(f"{Fore.CYAN}[Pipeline] Running MAPP (Magnitude-Aware Progressive Pruning){Fore.RESET}")
         
-        signature = inspect.signature(ahl_transform)
+        signature = inspect.signature(mapp_transform)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
-        # Run AHL transformation
-        path = ahl_transform(**filtered_config)
+        # Run MAPP transformation
+        path = mapp_transform(**filtered_config)
         
-        print(f"{Fore.GREEN}[Pipeline] AHL transformation complete: {path}{Fore.RESET}")
+        print(f"{Fore.GREEN}[Pipeline] MAPP transformation complete: {path}{Fore.RESET}")
         
+
     else:
         raise ValueError(f"Unknown method: {config['method']}")
 
