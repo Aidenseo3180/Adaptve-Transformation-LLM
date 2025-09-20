@@ -345,7 +345,7 @@ def drt_transform(
     model.save_pretrained(save_path)
     tokenizer.save_pretrained(save_path)
     
-    # Save DRT configuration
+    # DRT 설정 생성
     drt_config = {
         'method': 'drt',
         'merge_threshold': merge_threshold,
@@ -354,17 +354,21 @@ def drt_transform(
         'layer_merge_stats': {k: v for k, v in layer_merge_stats.items() if v},
         'total_avg_merges': total_merges / len([v for v in layer_merge_stats.values() if v]) if total_merges > 0 else 0
     }
+
+    from drt_fixed import apply_drt_and_save
     
-    import json
-    with open(f"{save_path}/drt_config.json", 'w') as f:
-        json.dump(drt_config, f, indent=2)
+    # 실제로 DRT 적용하여 저장
+    drt_model = apply_drt_and_save(
+        model_path=model_path,
+        save_path=save_path,
+        drt_config=drt_config
+    )
     
-    print(f"{Fore.CYAN}[DRT] Configuration saved to: {save_path}/drt_config.json{Fore.RESET}")
+    print(f"{Fore.GREEN}[DRT] Model with active DRT saved to: {save_path}{Fore.RESET}")
     
     # Cleanup
-    del model
+    del drt_model
     gc.collect()
     torch.cuda.empty_cache()
     
-    print(f"{Fore.GREEN}[DRT] Transformation complete!{Fore.RESET}")
     return save_path
