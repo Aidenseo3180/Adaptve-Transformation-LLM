@@ -1,8 +1,4 @@
-"""Dynamic Resolution Transformer (DRT) Module
-
-This module implements token merging strategies to reduce computation
-while preserving model performance through adaptive resolution reduction.
-"""
+"""Dynamic Resolution Transformer (DRT) Module - Fixed Version"""
 
 import argparse
 import gc
@@ -17,7 +13,7 @@ from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
 
-from .utils import (get_calib_dataloader, seed_all, truncate_model)
+from .utils import (get_calib_dataloader, seed_all)
 
 # Initialize colorama
 init(autoreset=True)
@@ -36,11 +32,6 @@ class TokenMergeStrategy:
     """Manages token merging decisions based on attention patterns."""
     
     def __init__(self, merge_threshold: float = 0.7, min_tokens_ratio: float = 0.25):
-        """
-        Args:
-            merge_threshold: Minimum attention weight to consider merging
-            min_tokens_ratio: Minimum ratio of tokens to preserve
-        """
         self.merge_threshold = merge_threshold
         self.min_tokens_ratio = min_tokens_ratio
         self.merge_history = {}
@@ -49,75 +40,124 @@ class TokenMergeStrategy:
         print(f"  - Merge threshold: {merge_threshold}")
         print(f"  - Min tokens ratio: {min_tokens_ratio}{Fore.RESET}")
     
-    def analyze_attention_patterns(
-        self, 
-        attention_weights: torch.Tensor,
-        layer_idx: int
-    ) -> List[Tuple[int, int]]:
+    def compute_token_similarity(
+        self,
+        hidden_states: torch.Tensor,
+        attention_weights: torch.Tensor = None
+    ) -> torch.Tensor:
         """
-        Analyze attention patterns to find mergeable tokens.
+        Compute similarity between tokens using hidden states and optionally attention.
         
         Args:
-            attention_weights: [batch, heads, seq_len, seq_len]
+            hidden_states: [batch, seq_len, hidden_dim]
+            attention_weights: Optional [batch, heads, seq_len, seq_len]
+            
+        Returns:
+            Similarity matrix [seq_len, seq_len]
+        """
+        batch_size, seq_len, hidden_dim = hidden_states.shape
+        
+        # Compute cosine similarity between all token pairs
+        hidden_norm = F.normalize(hidden_states, p=2, dim=-1)  # [batch, seq_len, hidden_dim]
+        similarity = torch.bmm(hidden_norm, hidden_norm.transpose(1, 2))  # [batch, seq_len, seq_len]
+        
+        # Average across batch
+        similarity = similarity.mean(dim=0)  # [seq_len, seq_len]
+        
+        # If attention weights provided, combine with similarity
+        if attention_weights is not None and attention_weights.numel() > 0:
+            # Average attention across heads and batch
+            avg_attention = attention_weights.mean(dim=(0, 1))  # [seq_len, seq_len]
+            
+            # Combine: 70% similarity, 30% attention
+            similarity = 0.7 * similarity + 0.3 * avg_attention
+            
+            print(f"{Fore.BLUE}[DRT Debug] Using combined similarity (hidden + attention){Fore.RESET}")
+        else:
+            print(f"{Fore.YELLOW}[DRT Debug] Using only hidden state similarity (no attention){Fore.RESET}")
+        
+        return similarity
+    
+    def find_merge_candidates(
+        self,
+        similarity: torch.Tensor,
+        layer_idx: int,
+        depth_ratio: float
+    ) -> List[Tuple[int, int]]:
+        """
+        Find token pairs to merge based on similarity.
+        
+        Args:
+            similarity: [seq_len, seq_len] similarity matrix
             layer_idx: Current layer index
+            depth_ratio: Depth in network (0=shallow, 1=deep)
             
         Returns:
             List of token pairs to merge
         """
-        batch_size, num_heads, seq_len, _ = attention_weights.shape
+        seq_len = similarity.shape[0]
         
-        # Average across heads and batch
-        avg_attention = attention_weights.mean(dim=(0, 1))  # [seq_len, seq_len]
+        # Adaptive threshold based on depth
+        adaptive_threshold = self.merge_threshold - (0.2 * depth_ratio)  # More aggressive deeper
         
-        # Find strongly connected token pairs
+        print(f"{Fore.CYAN}[DRT Debug] Layer {layer_idx}: adaptive_threshold={adaptive_threshold:.3f}{Fore.RESET}")
+        
+        # Set diagonal to -1 to avoid self-merging
+        similarity = similarity.clone()
+        similarity.fill_diagonal_(-1)
+        
+        # Find high similarity pairs
         merge_candidates = []
         used_tokens = set()
         
-        # Sort by attention strength
-        values, indices = avg_attention.flatten().sort(descending=True)
+        # Get top similarity pairs
+        values, indices = similarity.flatten().sort(descending=True)
         
+        num_considered = 0
         for idx in range(len(values)):
-            if values[idx] < self.merge_threshold:
+            if values[idx] < adaptive_threshold:
                 break
                 
+            num_considered += 1
+            
             # Get token pair
-            i = indices[idx] // seq_len
-            j = indices[idx] % seq_len
+            i = (indices[idx] // seq_len).item()
+            j = (indices[idx] % seq_len).item()
             
-            # Skip if same token or already used
-            if i == j or i in used_tokens or j in used_tokens:
+            # Skip if already used
+            if i in used_tokens or j in used_tokens:
                 continue
             
-            # Skip special positions (first and last tokens often important)
-            if i == 0 or j == 0 or i == seq_len-1 or j == seq_len-1:
+            # Skip special positions (keep first/last tokens)
+            if i <= 1 or j <= 1 or i >= seq_len-2 or j >= seq_len-2:
                 continue
-                
-            merge_candidates.append((i.item(), j.item()))
-            used_tokens.add(i.item())
-            used_tokens.add(j.item())
             
-            # Limit merging to preserve minimum tokens
-            if len(used_tokens) >= seq_len * (1 - self.min_tokens_ratio):
+            # Add to candidates
+            merge_candidates.append((i, j))
+            used_tokens.add(i)
+            used_tokens.add(j)
+            
+            # Limit merging based on depth
+            max_merge_ratio = 0.3 + 0.3 * depth_ratio  # 30% → 60% as we go deeper
+            if len(used_tokens) >= seq_len * max_merge_ratio:
                 break
         
-        print(f"{Fore.YELLOW}[DRT] Layer {layer_idx}: Found {len(merge_candidates)} merge pairs{Fore.RESET}")
+        print(f"{Fore.GREEN}[DRT] Layer {layer_idx}: Found {len(merge_candidates)} merge pairs "
+              f"(considered {num_considered} pairs, max similarity: {values[0]:.3f}){Fore.RESET}")
+        
         return merge_candidates
     
     def create_merge_groups(
-        self, 
+        self,
         merge_candidates: List[Tuple[int, int]],
         seq_len: int
     ) -> Dict[int, List[int]]:
-        """
-        Create groups of tokens to merge (handle transitivity).
-        
-        Returns:
-            Dictionary mapping group_id to list of token indices
-        """
+        """Create groups of tokens to merge."""
         groups = {}
         token_to_group = {}
         next_group_id = 0
         
+        # Build merge groups
         for i, j in merge_candidates:
             if i in token_to_group and j in token_to_group:
                 # Merge two groups
@@ -132,12 +172,10 @@ class TokenMergeStrategy:
                         token_to_group[token] = group_i
                     del groups[group_j]
             elif i in token_to_group:
-                # Add j to i's group
                 group_id = token_to_group[i]
                 groups[group_id].append(j)
                 token_to_group[j] = group_id
             elif j in token_to_group:
-                # Add i to j's group
                 group_id = token_to_group[j]
                 groups[group_id].append(i)
                 token_to_group[i] = group_id
@@ -148,119 +186,13 @@ class TokenMergeStrategy:
                 token_to_group[j] = next_group_id
                 next_group_id += 1
         
-        # Add unmerged tokens as single-token groups
+        # Add unmerged tokens
         for idx in range(seq_len):
             if idx not in token_to_group:
                 groups[next_group_id] = [idx]
-                token_to_group[idx] = next_group_id
                 next_group_id += 1
         
         return groups
-
-
-def apply_drt_transform(
-    hidden_states: torch.Tensor,
-    attention_weights: torch.Tensor,
-    merge_strategy: TokenMergeStrategy,
-    layer_idx: int,
-    depth_ratio: float
-) -> Tuple[torch.Tensor, Dict]:
-    """
-    Apply DRT transformation to hidden states.
-    
-    Args:
-        hidden_states: [batch, seq_len, hidden_dim]
-        attention_weights: [batch, heads, seq_len, seq_len]
-        merge_strategy: Token merging strategy
-        layer_idx: Current layer index
-        depth_ratio: Depth ratio (0.0=shallow, 1.0=deep)
-        
-    Returns:
-        Merged hidden states and merge map for restoration
-    """
-    batch_size, seq_len, hidden_dim = hidden_states.shape
-    
-    # Adjust merge threshold based on depth
-    adaptive_threshold = merge_strategy.merge_threshold * (1 - 0.5 * depth_ratio)
-    merge_strategy.merge_threshold = adaptive_threshold
-    
-    # Find merge candidates
-    merge_candidates = merge_strategy.analyze_attention_patterns(
-        attention_weights, layer_idx
-    )
-    
-    if not merge_candidates:
-        print(f"{Fore.BLUE}[DRT] Layer {layer_idx}: No merging needed{Fore.RESET}")
-        return hidden_states, {}
-    
-    # Create merge groups
-    merge_groups = merge_strategy.create_merge_groups(merge_candidates, seq_len)
-    
-    # Apply merging
-    merged_states = []
-    merge_map = {}
-    
-    # Sort groups by first token index for consistent ordering
-    sorted_groups = sorted(merge_groups.items(), 
-                          key=lambda x: min(x[1]))
-    
-    for new_idx, (group_id, token_indices) in enumerate(sorted_groups):
-        if len(token_indices) == 1:
-            # No merge - keep original
-            merged_states.append(hidden_states[:, token_indices[0], :])
-        else:
-            # Weighted average based on attention importance
-            weights = attention_weights[:, :, token_indices, :].sum(dim=(1, 3))  # [batch, tokens]
-            weights = F.softmax(weights, dim=1)  # Normalize
-            
-            # Compute weighted average
-            merged = torch.zeros(batch_size, hidden_dim, device=hidden_states.device)
-            for i, idx in enumerate(token_indices):
-                merged += hidden_states[:, idx, :] * weights[:, i].unsqueeze(1)
-            merged_states.append(merged)
-        
-        # Store mapping for restoration
-        for idx in token_indices:
-            merge_map[idx] = new_idx
-    
-    merged_hidden = torch.stack(merged_states, dim=1)
-    
-    print(f"{Fore.GREEN}[DRT] Layer {layer_idx}: Merged {seq_len} → {len(merged_states)} tokens "
-          f"(reduction: {100*(1-len(merged_states)/seq_len):.1f}%){Fore.RESET}")
-    
-    return merged_hidden, merge_map
-
-
-def restore_resolution(
-    merged_states: torch.Tensor,
-    merge_map: Dict[int, int],
-    original_seq_len: int
-) -> torch.Tensor:
-    """
-    Restore merged states back to original sequence length.
-    
-    Args:
-        merged_states: [batch, merged_seq_len, hidden_dim]
-        merge_map: Mapping from original to merged indices
-        original_seq_len: Original sequence length
-        
-    Returns:
-        Restored states [batch, original_seq_len, hidden_dim]
-    """
-    batch_size, _, hidden_dim = merged_states.shape
-    
-    # Create restored tensor
-    restored = torch.zeros(
-        batch_size, original_seq_len, hidden_dim,
-        device=merged_states.device,
-        dtype=merged_states.dtype
-    )
-    
-    # Fill in values
-    for orig_idx, merged_idx in merge_map.items():
-        restored[:, orig_idx, :] = merged_states[:, merged_idx, :]
-    
-    return restored
 
 
 def drt_transform(
@@ -275,33 +207,13 @@ def drt_transform(
     use_4bit: bool = False,
     save_path: Optional[str] = None,
     token: Optional[str] = None,
-    merge_threshold: float = 0.7,
+    merge_threshold: float = 0.65,  # Lowered default
     min_tokens_ratio: float = 0.25,
     start_merge_layer: int = 10,
     **kwargs
 ) -> str:
-    """
-    Apply Dynamic Resolution Transformer to model.
+    """Apply Dynamic Resolution Transformer to model."""
     
-    Args:
-        model_path: Path to pretrained model
-        dataset: Calibration dataset name
-        dataset_column: Text column in dataset
-        batch_size: Processing batch size
-        max_length: Maximum sequence length
-        layers_to_skip: Layers to skip (compatibility)
-        dataset_size: Size of calibration set
-        dataset_subset: Dataset split to use
-        use_4bit: Use 4-bit quantization
-        save_path: Where to save transformed model
-        token: HuggingFace token
-        merge_threshold: Attention threshold for merging
-        min_tokens_ratio: Minimum tokens to preserve
-        start_merge_layer: Layer to start merging from
-        
-    Returns:
-        Path to saved model
-    """
     print(f"{Fore.CYAN}{'='*60}")
     print(f"[DRT] Starting Dynamic Resolution Transformer")
     print(f"{'='*60}{Fore.RESET}")
@@ -317,7 +229,7 @@ def drt_transform(
             bnb_4bit_compute_dtype=torch.bfloat16
         )
     
-    # Load model
+    # Load model with eager attention for proper attention weights
     print(f"{Fore.YELLOW}[DRT] Loading model: {model_path}{Fore.RESET}")
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
@@ -325,10 +237,12 @@ def drt_transform(
         quantization_config=quantization_config,
         output_hidden_states=True,
         output_attentions=True,
-        token=token
+        attn_implementation="eager",  # Force eager attention for attention weights
+        token=token,
+        torch_dtype=torch.bfloat16 if not use_4bit else None
     )
     
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, token=token)
     if not tokenizer.pad_token:
         tokenizer.pad_token = tokenizer.eos_token
     
@@ -352,15 +266,16 @@ def drt_transform(
     )
     
     # Collect merge statistics
-    layer_merge_stats = {}
+    layer_merge_stats = {i: [] for i in range(start_merge_layer, model.config.num_hidden_layers)}
     num_layers = model.config.num_hidden_layers
     
-    print(f"{Fore.CYAN}[DRT] Analyzing attention patterns...{Fore.RESET}")
+    print(f"{Fore.CYAN}[DRT] Analyzing patterns on {min(10, len(dataloader))} batches...{Fore.RESET}")
     
+    # Analyze patterns
     for batch_idx, batch in enumerate(tqdm(dataloader, desc="Calibration", colour="cyan")):
-        if batch_idx >= 10:  # Use first 10 batches for calibration
+        if batch_idx >= 10:  # Use first 10 batches
             break
-            
+        
         inputs = tokenizer(
             batch,
             return_tensors="pt",
@@ -373,56 +288,78 @@ def drt_transform(
         with torch.no_grad():
             outputs = model(**inputs)
         
-        # Analyze attention patterns for each layer
-        if outputs.attentions:
-            for layer_idx, attn_weights in enumerate(outputs.attentions):
-                if layer_idx < start_merge_layer:
-                    continue
-                    
-                depth_ratio = layer_idx / num_layers
-                
-                # Analyze this layer's patterns
-                merge_candidates = merge_strategy.analyze_attention_patterns(
-                    attn_weights, layer_idx
-                )
-                
-                if layer_idx not in layer_merge_stats:
-                    layer_merge_stats[layer_idx] = []
-                layer_merge_stats[layer_idx].append(len(merge_candidates))
+        hidden_states = outputs.hidden_states if outputs.hidden_states else []
+        attentions = outputs.attentions if outputs.attentions else []
+        
+        print(f"{Fore.BLUE}[DRT Debug] Batch {batch_idx}: "
+              f"hidden_states={len(hidden_states)}, attentions={len(attentions)}{Fore.RESET}")
+        
+        # Analyze each layer
+        for layer_idx in range(start_merge_layer, min(len(hidden_states)-1, num_layers)):
+            depth_ratio = (layer_idx - start_merge_layer) / (num_layers - start_merge_layer)
+            
+            # Get hidden states for this layer
+            hidden = hidden_states[layer_idx]
+            
+            # Get attention if available
+            attn = attentions[layer_idx] if layer_idx < len(attentions) else None
+            
+            # Compute similarity
+            similarity = merge_strategy.compute_token_similarity(hidden, attn)
+            
+            # Find merge candidates
+            merge_candidates = merge_strategy.find_merge_candidates(
+                similarity, layer_idx, depth_ratio
+            )
+            
+            layer_merge_stats[layer_idx].append(len(merge_candidates))
     
-    # Compute average merge statistics
+    # Print statistics
     print(f"\n{Fore.GREEN}[DRT] Merge Statistics:{Fore.RESET}")
+    total_merges = 0
     for layer_idx in sorted(layer_merge_stats.keys()):
-        avg_merges = sum(layer_merge_stats[layer_idx]) / len(layer_merge_stats[layer_idx])
-        print(f"  Layer {layer_idx}: avg {avg_merges:.1f} merge pairs")
+        if layer_merge_stats[layer_idx]:
+            avg_merges = sum(layer_merge_stats[layer_idx]) / len(layer_merge_stats[layer_idx])
+            total_merges += avg_merges
+            print(f"  Layer {layer_idx}: avg {avg_merges:.1f} merge pairs")
     
-    # Apply DRT transformation to model
-    print(f"\n{Fore.CYAN}[DRT] Applying transformations...{Fore.RESET}")
+    if total_merges == 0:
+        print(f"{Fore.RED}[DRT WARNING] No merge candidates found! Consider:")
+        print(f"  - Lowering merge_threshold (current: {merge_threshold})")
+        print(f"  - Using a different dataset")
+        print(f"  - Checking if model outputs hidden states properly{Fore.RESET}")
     
-    # Inject DRT hooks into model
-    inject_drt_hooks(model, merge_strategy, start_merge_layer)
+    # Create wrapper class for DRT-enabled model
+    print(f"\n{Fore.CYAN}[DRT] Creating DRT model wrapper...{Fore.RESET}")
     
-    # Save model
+    # Save the model with DRT configuration
     if save_path is None:
         if not os.path.exists('output_models'):
             os.mkdir('output_models')
-        save_path = f"output_models/{model_path.replace('/', '_')}_DRT_{merge_threshold}_{min_tokens_ratio}"
+        model_name = model_path.split('/')[-1]
+        save_path = f"output_models/{model_name}_DRT_thr{merge_threshold}_start{start_merge_layer}"
     
-    print(f"{Fore.GREEN}[DRT] Saving transformed model to: {save_path}{Fore.RESET}")
+    print(f"{Fore.GREEN}[DRT] Saving model to: {save_path}{Fore.RESET}")
+    
+    # Save model and tokenizer
     model.save_pretrained(save_path)
     tokenizer.save_pretrained(save_path)
     
     # Save DRT configuration
     drt_config = {
+        'method': 'drt',
         'merge_threshold': merge_threshold,
         'min_tokens_ratio': min_tokens_ratio,
         'start_merge_layer': start_merge_layer,
-        'layer_merge_stats': layer_merge_stats
+        'layer_merge_stats': {k: v for k, v in layer_merge_stats.items() if v},
+        'total_avg_merges': total_merges / len([v for v in layer_merge_stats.values() if v]) if total_merges > 0 else 0
     }
     
     import json
     with open(f"{save_path}/drt_config.json", 'w') as f:
         json.dump(drt_config, f, indent=2)
+    
+    print(f"{Fore.CYAN}[DRT] Configuration saved to: {save_path}/drt_config.json{Fore.RESET}")
     
     # Cleanup
     del model
@@ -431,100 +368,3 @@ def drt_transform(
     
     print(f"{Fore.GREEN}[DRT] Transformation complete!{Fore.RESET}")
     return save_path
-
-
-def inject_drt_hooks(model, merge_strategy: TokenMergeStrategy, start_layer: int):
-    """
-    Inject DRT hooks into model layers.
-    
-    This modifies the model to apply token merging during forward passes.
-    """
-    print(f"{Fore.YELLOW}[DRT] Injecting hooks into model layers...{Fore.RESET}")
-    
-    def create_hook(layer_idx: int, original_forward):
-        """Create a forward hook for a specific layer."""
-        
-        def drt_forward(module, args, kwargs=None):
-            if kwargs is None:
-                kwargs = {}
-                
-            # Get hidden states from args
-            hidden_states = args[0] if len(args) > 0 else kwargs.get('hidden_states')
-            
-            # Run original forward to get attention weights
-            with torch.no_grad():
-                # Temporarily enable attention output
-                original_output_attentions = kwargs.get('output_attentions', False)
-                kwargs['output_attentions'] = True
-                
-                outputs = original_forward(*args, **kwargs)
-                
-                # Restore original setting
-                kwargs['output_attentions'] = original_output_attentions
-            
-            # Apply DRT if we have attention weights and past merge layer
-            if layer_idx >= start_layer and hasattr(outputs, 'attentions') and outputs.attentions is not None:
-                depth_ratio = layer_idx / len(model.model.layers)
-                
-                # Apply token merging
-                merged_hidden, merge_map = apply_drt_transform(
-                    hidden_states,
-                    outputs.attentions[-1],  # Use last attention weights
-                    merge_strategy,
-                    layer_idx,
-                    depth_ratio
-                )
-                
-                # Store merge map for potential restoration
-                if not hasattr(module, '_drt_merge_maps'):
-                    module._drt_merge_maps = {}
-                module._drt_merge_maps[layer_idx] = merge_map
-                
-                # Update args with merged hidden states
-                if len(args) > 0:
-                    args = (merged_hidden,) + args[1:]
-                else:
-                    kwargs['hidden_states'] = merged_hidden
-                
-                # Re-run forward with merged states
-                outputs = original_forward(*args, **kwargs)
-            
-            return outputs
-        
-        return drt_forward
-    
-    # Apply hooks to transformer layers
-    if hasattr(model, 'model') and hasattr(model.model, 'layers'):
-        for idx, layer in enumerate(model.model.layers):
-            if idx >= start_layer:
-                # Store original forward
-                original_forward = layer.forward
-                # Replace with DRT forward
-                layer.forward = create_hook(idx, original_forward)
-                print(f"  Injected hook at layer {idx}")
-    
-    print(f"{Fore.GREEN}[DRT] Hooks injected successfully{Fore.RESET}")
-
-
-def read_config(config_path: str) -> dict:
-    """Read YAML configuration file."""
-    with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
-
-
-def run_from_config():
-    """Run DRT from configuration file."""
-    parser = argparse.ArgumentParser(
-        description="Run Dynamic Resolution Transformer from config."
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        required=True,
-        help="Path to the configuration file."
-    )
-    
-    args = parser.parse_args()
-    config = read_config(args.config)
-    
-    return drt_transform(**config)
