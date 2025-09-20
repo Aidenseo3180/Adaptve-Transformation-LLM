@@ -59,18 +59,18 @@ def ReplaceMe_pipeline(config):
             path = cosine_dist(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
 
-    elif config["method"] == "recycling":  # 새로운 representation recycling 메소드
-        from .representation_recycling import representation_recycling
+    if config["method"] == "conditional_routing":  # 새로운 conditional routing 메소드
+        from .conditional_routing import conditional_routing
 
-        print(f"{Fore.MAGENTA}Using Representation Recycling method{Fore.RESET}")
+        print(f"{Fore.MAGENTA}Using Conditional Block Routing method{Fore.RESET}")
         
-        signature = inspect.signature(representation_recycling)
+        signature = inspect.signature(conditional_routing)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
-        # Apply representation recycling
-        path = representation_recycling(**filtered_config)
+        # Apply conditional routing
+        path = conditional_routing(**filtered_config)
         
-        print(f"{Fore.GREEN}Recycling complete. Model path: {path}{Fore.RESET}")
+        print(f"{Fore.GREEN}Conditional routing complete. Model path: {path}{Fore.RESET}")
         
 
     else:

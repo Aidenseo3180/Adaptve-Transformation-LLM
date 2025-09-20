@@ -1,4 +1,4 @@
-method: "recycling"
+method: "conditional_routing"
 model_path: "meta-llama/Llama-3.2-3B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
@@ -9,8 +9,9 @@ dataset_size: 1000
 dataset_subset: "train"
 use_4bit: False
 save_path: null
-similarity_threshold: 0.85  # Threshold for considering representations similar
-min_recycling_gap: 3  # Minimum gap between source and recycled layer
+target_simple_ratio: 0.3  # Target 30% tokens through simple path
+target_medium_ratio: 0.5  # Target 50% tokens through medium path
+low_rank_dim: 32  # Dimension for low-rank approximation
 distances_path: "distances.pth"
 
 tasks:
