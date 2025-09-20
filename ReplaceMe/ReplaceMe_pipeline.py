@@ -75,7 +75,7 @@ def ReplaceMe_pipeline(config):
                 average_distances,
                 config.get('layers_to_skip', 4),
                 num_blocks=config.get('num_A', 1),
-                merge_consecutive=config.get('merge_consecutive', True)
+                merge_consecutive=config.get('merge_consecutive', False)
             )
             
             if selected_blocks:
@@ -97,7 +97,6 @@ def ReplaceMe_pipeline(config):
         print(f"[Pipeline] DLD will process layers {filtered_config['start_id']} to {filtered_config['end_id']}")
         
         path = apply_dld_transformation(**filtered_config)
-
 
     else:
         raise ValueError(f"Unknown method: {config['method']}")
