@@ -1,21 +1,33 @@
-method: "dtb"
+method: "hciu"
 model_path: "meta-llama/Llama-3.2-3B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
 batch_size: 4
 max_length: 512
 layers_to_skip: 4
-dataset_size: 1000
+dataset_size: 2000  # More data for better calibration
 dataset_subset: "train"
 use_4bit: False
 save_path: null
-min_distance_layer: 20
 distances_path: "distances.pth"
 
-# DTB specific parameters
-min_rank: 4
-max_rank: 64
-use_attention_delta: False  # Use attention-based delta for high-change layers
+# HCIU specific parameters
+# Cache configuration
+cache_max_entries: 1000  # Maximum patterns per layer
+cache_key_dim: 32  # Dimension of cache keys
+cache_similarity_threshold: 0.95  # Similarity threshold for cache hits
+
+# Low-rank update configuration
+update_min_rank: 4  # Minimum rank for updates
+update_max_rank: 128  # Maximum rank for updates
+
+# Calibration parameters
+calibration_samples: 100  # Samples for threshold calibration
+warmup_samples: 50  # Samples for cache warmup
+
+# Optional: Manual layer selection
+start_id: 10  # Start layer (1-indexed)
+end_id: 20  # End layer (1-indexed)
 num_A: 1
 merge_consecutive: True
 
@@ -24,8 +36,4 @@ tasks:
   boolq:
     fewshots: 0
   lambada_openai:
-    fewshots: 0
-  winogrande:
-    fewshots: 5
-  piqa:
     fewshots: 0
