@@ -59,18 +59,43 @@ def ReplaceMe_pipeline(config):
             path = cosine_dist(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
 
-    elif config["method"] == "adaptive":  # NEW: Adaptive routing method
-        from .adaptive_routing import adaptive_routing
+    elif config["method"] == "dtb":  # NEW DTB METHOD
+        from .dtb_method import apply_dtb_transformation  # NEW IMPORT
 
-        print(f"\n{Fore.MAGENTA}[PIPELINE] Using Adaptive Routing Method{Fore.RESET}")
+        print(f"\n{Fore.MAGENTA}[Pipeline] Using Differential Transformer Blocks method{Fore.RESET}")
         
-        signature = inspect.signature(adaptive_routing)
+        signature = inspect.signature(apply_dtb_transformation)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
-        # Run adaptive routing
-        path = adaptive_routing(**filtered_config)
+        # Load average distances and select blocks
+        average_distances = torch.load(config['distances_path'], weights_only=False)
+        selected_blocks = select_non_overlapping_blocks(
+            average_distances,
+            config['layers_to_skip'],
+            num_blocks=config.get('num_A', 1),
+            merge_consecutive=config.get('merge_consecutive', False)
+        )
         
-        print(f"[DEBUG] Adaptive model saved at: {path}")
+        # For DTB, we can process all blocks at once
+        if selected_blocks:
+            start_ids = sorted([x[0] for x in selected_blocks])
+            end_ids = sorted([x[1] for x in selected_blocks])
+            
+            # Use the widest range
+            start_id = min(start_ids)
+            end_id = max(end_ids)
+            
+            print(f"[Pipeline] DTB will process layers {start_id} to {end_id}")
+            
+            path = apply_dtb_transformation(
+                **filtered_config,
+                start_id=start_id,
+                end_id=end_id,
+                num_layer=0
+            )
+        else:
+            print(f"{Fore.RED}[Pipeline] No blocks selected for DTB{Fore.RESET}")
+            return
 
     else:
         raise ValueError(f"Unknown method: {config['method']}")
