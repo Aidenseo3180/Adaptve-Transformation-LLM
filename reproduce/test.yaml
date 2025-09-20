@@ -1,19 +1,22 @@
-method: "mapp"
+method: "adaptive"
 model_path: "meta-llama/Llama-3.2-3B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
 batch_size: 4
 max_length: 512
+layers_to_skip: 4  # Size of blocks to consider for skipping
 dataset_size: 1000
 dataset_subset: "train"
 use_4bit: False
 save_path: null
-token: null
-distances_path: null
+skip_threshold: 0.7  # Similarity threshold for determining skippable blocks
+distances_path: "distances.pth"
 
-# MAPP specific parameters
-pruning_ratio: 0.25  # Remove 25% of layers
-max_perplexity_increase: 1.2  # Allow up to 20% perplexity increase
+# ABR specific parameters
+complexity_thresholds:
+  simple: 0.3
+  medium: 0.6
+  complex: 1.0
 
 # Evaluation tasks
 tasks:
@@ -21,3 +24,7 @@ tasks:
     fewshots: 0
   lambada_openai:
     fewshots: 0
+  piqa:
+    fewshots: 0
+  winogrande:
+    fewshots: 5

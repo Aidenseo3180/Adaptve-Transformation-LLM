@@ -7,7 +7,7 @@ max_length: 512 # 1024
 layers_to_skip: 4
 dataset_size: 1000 # 8000
 dataset_subset: "train"
-use_4bit: True
+use_4bit: False
 save_path: null
 min_distance_layer: 20
 save_transform_only: True
@@ -17,6 +17,7 @@ thri: False # whether to force the LT to be a lower triangular matrix
 solver: "adam" # adam, cg, l-bfgs, trust-ncg are supported
 loss: "cosine" # cosine, mse, elasticnet are supported
 distances_path: null
+
 num_A: 1
 merge_consecutive: False 
 accurate: False # False will run cosine(xA, y - z) where z is the residual attention info, True to run cosine(xA + z, y)

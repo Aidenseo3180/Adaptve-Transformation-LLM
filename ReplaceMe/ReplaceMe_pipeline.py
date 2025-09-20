@@ -59,19 +59,23 @@ def ReplaceMe_pipeline(config):
             path = cosine_dist(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
 
+    elif config["method"] == "adaptive":  # NEW: Adaptive Block Routing method
+        from .adaptive_routing import adaptive_routing
 
-    elif config["method"] == "mapp":  # Magnitude-Aware Progressive Pruning
-        from .mapp import mapp_transform
-
-        print(f"{Fore.CYAN}[Pipeline] Running MAPP (Magnitude-Aware Progressive Pruning){Fore.RESET}")
+        print(f"{Fore.CYAN}=== Starting Adaptive Block Routing Pipeline ==={Fore.RESET}")
         
-        signature = inspect.signature(mapp_transform)
+        # Step 1: Run adaptive routing
+        signature = inspect.signature(adaptive_routing)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
-        # Run MAPP transformation
-        path = mapp_transform(**filtered_config)
+        print(f"{Fore.YELLOW}Configuration for ABR:{Fore.RESET}")
+        for key, value in filtered_config.items():
+            print(f"  {key}: {value}")
         
-        print(f"{Fore.GREEN}[Pipeline] MAPP transformation complete: {path}{Fore.RESET}")
+        # Execute adaptive routing
+        path = adaptive_routing(**filtered_config)
+        
+        print(f"{Fore.GREEN}Adaptive routing completed. Model saved at: {path}{Fore.RESET}")
         
 
     else:
