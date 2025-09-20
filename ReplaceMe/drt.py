@@ -355,7 +355,7 @@ def drt_transform(
         'total_avg_merges': total_merges / len([v for v in layer_merge_stats.values() if v]) if total_merges > 0 else 0
     }
 
-    from drt_fixed import apply_drt_and_save
+    from .drt_fixed import apply_drt_and_save
     
     # 실제로 DRT 적용하여 저장
     drt_model = apply_drt_and_save(

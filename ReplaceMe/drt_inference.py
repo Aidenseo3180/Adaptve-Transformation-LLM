@@ -1,7 +1,7 @@
 import torch
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig)
-from drt_fixed import DRTWrapper
+from .drt_fixed import DRTWrapper
 
 def load_drt_model(save_path: str):
     """저장된 DRT 모델 로드"""
