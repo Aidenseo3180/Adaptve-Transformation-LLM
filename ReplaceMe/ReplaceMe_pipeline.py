@@ -59,19 +59,18 @@ def ReplaceMe_pipeline(config):
             path = cosine_dist(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
 
-    if config["method"] == "conditional_routing":  # 새로운 conditional routing 메소드
-        from .conditional_routing import conditional_routing
+    elif config["method"] == "adaptive":  # NEW: Adaptive routing method
+        from .adaptive_routing import adaptive_routing
 
-        print(f"{Fore.MAGENTA}Using Conditional Block Routing method{Fore.RESET}")
+        print(f"\n{Fore.MAGENTA}[PIPELINE] Using Adaptive Routing Method{Fore.RESET}")
         
-        signature = inspect.signature(conditional_routing)
+        signature = inspect.signature(adaptive_routing)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
-        # Apply conditional routing
-        path = conditional_routing(**filtered_config)
+        # Run adaptive routing
+        path = adaptive_routing(**filtered_config)
         
-        print(f"{Fore.GREEN}Conditional routing complete. Model path: {path}{Fore.RESET}")
-        
+        print(f"[DEBUG] Adaptive model saved at: {path}")
 
     else:
         raise ValueError(f"Unknown method: {config['method']}")

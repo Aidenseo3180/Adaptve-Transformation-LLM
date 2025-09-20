@@ -1,19 +1,28 @@
-method: "conditional_routing"
+method: "adaptive"
 model_path: "meta-llama/Llama-3.2-3B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
 batch_size: 4
 max_length: 512
-layers_to_skip: 4  # Not used but kept for compatibility
+layers_to_skip: 4
 dataset_size: 1000
 dataset_subset: "train"
 use_4bit: False
 save_path: null
-target_simple_ratio: 0.3  # Target 30% tokens through simple path
-target_medium_ratio: 0.5  # Target 50% tokens through medium path
-low_rank_dim: 32  # Dimension for low-rank approximation
-distances_path: "distances.pth"
+min_distance_layer: 20
+distances_path: null
 
+# Adaptive routing specific parameters
+num_A: 2  # Number of layer blocks to make adaptive
+merge_consecutive: True  # Merge consecutive blocks
+router_temp: 1.0  # Temperature for Gumbel softmax
+use_bypass_bias: False  # Whether to use bias in bypass linear
+num_epochs: 3  # Training epochs
+learning_rate: 1e-4  # Learning rate
+sparsity_lambda: 0.01  # Sparsity regularization weight
+sparsity_increase_rate: 1.5  # Rate of sparsity increase per epoch
+
+# Evaluation tasks
 tasks:
   boolq:
     fewshots: 0
