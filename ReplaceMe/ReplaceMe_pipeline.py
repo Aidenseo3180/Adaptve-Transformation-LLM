@@ -59,23 +59,18 @@ def ReplaceMe_pipeline(config):
             path = cosine_dist(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
 
-    elif config["method"] == "adaptive":  # NEW: Adaptive Block Routing method
-        from .adaptive_routing import adaptive_routing
+    elif config["method"] == "recycling":  # 새로운 representation recycling 메소드
+        from .representation_recycling import representation_recycling
 
-        print(f"{Fore.CYAN}=== Starting Adaptive Block Routing Pipeline ==={Fore.RESET}")
+        print(f"{Fore.MAGENTA}Using Representation Recycling method{Fore.RESET}")
         
-        # Step 1: Run adaptive routing
-        signature = inspect.signature(adaptive_routing)
+        signature = inspect.signature(representation_recycling)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
-        print(f"{Fore.YELLOW}Configuration for ABR:{Fore.RESET}")
-        for key, value in filtered_config.items():
-            print(f"  {key}: {value}")
+        # Apply representation recycling
+        path = representation_recycling(**filtered_config)
         
-        # Execute adaptive routing
-        path = adaptive_routing(**filtered_config)
-        
-        print(f"{Fore.GREEN}Adaptive routing completed. Model saved at: {path}{Fore.RESET}")
+        print(f"{Fore.GREEN}Recycling complete. Model path: {path}{Fore.RESET}")
         
 
     else:
