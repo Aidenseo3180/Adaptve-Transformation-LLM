@@ -60,15 +60,15 @@ def ReplaceMe_pipeline(config):
             filtered_config["model_path"] = path
 
 
-    elif config["method"] == "hciu":  # NEW HCIU METHOD
-        from .hciu_method import apply_hciu_transformation
+    elif config["method"] == "dld":  # NEW DLD METHOD
+        from .dld_method import apply_dld_transformation
 
-        print(f"\n{Fore.MAGENTA}[Pipeline] Using Hybrid Caching + Incremental Updates method{Fore.RESET}")
+        print(f"\n{Fore.MAGENTA}[Pipeline] Using Differential Layer Distillation method{Fore.RESET}")
         
-        signature = inspect.signature(apply_hciu_transformation)
+        signature = inspect.signature(apply_dld_transformation)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
-        # Load distances if available
+        # Load distances if available for layer selection
         if config.get('distances_path'):
             average_distances = torch.load(config['distances_path'], weights_only=False)
             selected_blocks = select_non_overlapping_blocks(
@@ -81,26 +81,23 @@ def ReplaceMe_pipeline(config):
             if selected_blocks:
                 start_ids = sorted([x[0] for x in selected_blocks])
                 end_ids = sorted([x[1] for x in selected_blocks])
-                start_id = min(start_ids)
-                end_id = max(end_ids)
+                filtered_config['start_id'] = min(start_ids)
+                filtered_config['end_id'] = max(end_ids)
             else:
                 # Default to middle layers
-                start_id = 10
-                end_id = 20
+                filtered_config['start_id'] = config.get('start_id', 10)
+                filtered_config['end_id'] = config.get('end_id', 20)
         else:
-            # Use default range
-            start_id = config.get('start_id', 10)
-            end_id = config.get('end_id', 20)
+            # Use config values or defaults
+            filtered_config['start_id'] = config.get('start_id', 10)
+            filtered_config['end_id'] = config.get('end_id', 20)
         
-        print(f"[Pipeline] HCIU will process layers {start_id} to {end_id}")
+        filtered_config['num_layer'] = 0
         
-        path = apply_hciu_transformation(
-            **filtered_config,
-            start_id=start_id,
-            end_id=end_id,
-            num_layer=0
-        )
-    
+        print(f"[Pipeline] DLD will process layers {filtered_config['start_id']} to {filtered_config['end_id']}")
+        
+        path = apply_dld_transformation(**filtered_config)
+
 
     else:
         raise ValueError(f"Unknown method: {config['method']}")
