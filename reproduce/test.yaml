@@ -1,21 +1,19 @@
-method: "drt"
+method: "ahl"
 model_path: "meta-llama/Llama-3.2-3B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
 batch_size: 4
 max_length: 512
-layers_to_skip: 0  # Not used in DRT but kept for compatibility
 dataset_size: 1000
 dataset_subset: "train"
-use_4bit: True
+use_4bit: False
 save_path: null
 token: null
 distances_path: null
 
-# DRT specific parameters
-merge_threshold: 0.5  # Attention weight threshold for merging
-min_tokens_ratio: 0.25  # Minimum ratio of tokens to keep
-start_merge_layer: 10  # Start merging from this layer
+# AHL specific parameters
+strategy: "progressive"  # progressive, linear, or uniform
+min_heads_ratio: 0.5  # Minimum ratio of heads to keep
 
 # Evaluation tasks
 tasks:

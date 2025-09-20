@@ -59,18 +59,22 @@ def ReplaceMe_pipeline(config):
             path = cosine_dist(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
 
-    elif config["method"] == "drt":  # Dynamic Resolution Transformer
-        from .drt import drt_transform
-        print(f"{Fore.CYAN}[Pipeline] Running Dynamic Resolution Transformer{Fore.RESET}")
+    elif config["method"] == "ahl":  # Attention Head Lifecycle
+        from .ahl import ahl_transform
+
+        print(f"{Fore.CYAN}[Pipeline] Running Attention Head Lifecycle (AHL){Fore.RESET}")
         
-        signature = inspect.signature(drt_transform)
+        signature = inspect.signature(ahl_transform)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
-        # Run DRT transformation
-        path = drt_transform(**filtered_config)
+        # Run AHL transformation
+        path = ahl_transform(**filtered_config)
         
-        print(f"{Fore.GREEN}[Pipeline] DRT transformation complete: {path}{Fore.RESET}")
+        print(f"{Fore.GREEN}[Pipeline] AHL transformation complete: {path}{Fore.RESET}")
         
+    else:
+        raise ValueError(f"Unknown method: {config['method']}")
+
 
     # Evaluate using the updated configuration
     signature = inspect.signature(evaluator)
