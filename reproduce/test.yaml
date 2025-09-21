@@ -6,12 +6,12 @@ dataset_column: "text"
 batch_size: 4
 max_length: 512
 layers_to_skip: 4
-dataset_size: 1000
+dataset_size: 4000 # 1000
 dataset_subset: "train"
 use_4bit: False
 save_path: null
 min_distance_layer: 20
-distances_path: "distances.pth"
+distances_path: null
 
 # Adaptive-specific parameters
 epochs: 10
