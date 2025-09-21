@@ -60,9 +60,9 @@ def ReplaceMe_pipeline(config):
             filtered_config["model_path"] = path
 
     elif config["method"] == "adaptive":  # New adaptive method
-        from .adaptive_replaceme import adaptive_replaceme
+        from .adaptive_replaceme import improved_adaptive_replaceme
         
-        signature = inspect.signature(adaptive_replaceme)
+        signature = inspect.signature(improved_adaptive_replaceme)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
         # Load distances and select blocks
@@ -84,7 +84,7 @@ def ReplaceMe_pipeline(config):
         
         for i in range(len(selected_blocks)):
             print(f"[AR-ReplaceMe Pipeline] Block {i+1}/{len(selected_blocks)}: layers {start_ids[i]}-{end_ids[i]}")
-            path = adaptive_replaceme(
+            path = improved_adaptive_replaceme(
                 **filtered_config,
                 start_id=start_ids[i],
                 end_id=end_ids[i],

@@ -1,17 +1,15 @@
-# adaptive_replaceme.py
-"""Adaptive Residual ReplaceMe: Context-aware transformation with residual preservation."""
-
+# improved_adaptive_replaceme.py (fixed version)
 import gc
 import logging
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple
+import torch.nn.functional as F
+from typing import Optional
 from tqdm import tqdm
 from colorama import Fore, init
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-from torch.utils.data import DataLoader, Dataset
 
-from .utils import get_calib_dataloader, truncate_model, seed_all
+from .utils import get_calib_dataloader, seed_all
 
 init(autoreset=True)
 logging.basicConfig(
@@ -23,199 +21,54 @@ logging.basicConfig(
 seed_all()
 
 
-class AdaptiveResidualTransform(nn.Module):
-    """Adaptive transformation that preserves important residual information."""
+class ImprovedAdaptiveTransform(nn.Module):
+    """Improved adaptive transformation with better initialization and training."""
     
-    def __init__(self, hidden_size: int, calibration_stats: dict):
+    def __init__(self, hidden_size: int):
         super().__init__()
         
-        # Base transformation matrix (initialized as identity)
-        self.W = nn.Parameter(torch.eye(hidden_size, dtype=torch.float32))
+        # Main transformation (initialized closer to identity)
+        self.W = nn.Linear(hidden_size, hidden_size, bias=False)
+        # Initialize with identity + small noise
+        nn.init.eye_(self.W.weight)
+        self.W.weight.data += torch.randn_like(self.W.weight) * 0.01
         
-        # Residual preservation gate (learnable)
-        initial_ratio = calibration_stats.get('residual_ratio', 0.7)
-        self.residual_gate = nn.Parameter(torch.tensor(initial_ratio, dtype=torch.float32))
+        # Dynamic gating based on input statistics
+        self.gate_net = nn.Sequential(
+            nn.Linear(hidden_size, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+            nn.Sigmoid()
+        )
         
-        # Confidence estimator (small network for adaptive mixing)
-        self.confidence_scale = nn.Parameter(torch.ones(1, dtype=torch.float32))
-        
-        print(f"[AR-ReplaceMe] Initialized with residual_ratio={initial_ratio:.3f}")
+        # Initialize gate network to output ~0.5
+        nn.init.zeros_(self.gate_net[-2].weight)
+        nn.init.constant_(self.gate_net[-2].bias, 0.0)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply adaptive transformation with residual preservation."""
-        # Ensure correct device and dtype
-        device = x.device
-        dtype = x.dtype
+        # Handle both 2D and 3D inputs
+        original_shape = x.shape
+        if len(x.shape) == 3:
+            B, T, D = x.shape
+            x = x.view(-1, D)
         
-        # Move parameters to correct device if needed
-        if self.W.device != device:
-            self.W = self.W.to(device)
-            self.residual_gate = self.residual_gate.to(device)
-            self.confidence_scale = self.confidence_scale.to(device)
+        # Compute transformation
+        transformed = self.W(x)
         
-        # Convert to float32 for computation
-        x_float = x.float()
+        # Compute adaptive gate per token
+        gate = self.gate_net(x)  # [B*T, 1] or [N, 1]
         
-        # Standard transformation
-        transformed = torch.matmul(x_float, self.W.T)
+        # Mix based on gate
+        output = x * gate + transformed * (1 - gate)
         
-        # Compute input confidence (higher variance = more confident)
-        x_std = x_float.std(dim=-1, keepdim=True)
-        x_mean_std = x_std.mean()
-        
-        # Avoid division by zero
-        if x_mean_std > 1e-6:
-            confidence = torch.sigmoid((x_std - x_mean_std) / (x_mean_std + 1e-6))
-        else:
-            confidence = torch.ones_like(x_std) * 0.5
-        
-        # Adaptive mixing: confident inputs preserve more residual
-        gate_value = torch.sigmoid(self.residual_gate) * confidence
-        
-        # Mix original and transformed
-        output = x_float * gate_value + transformed * (1 - gate_value)
-        
-        # Convert back to original dtype
-        return output.to(dtype)
-
-
-def analyze_calibration_data(
-    inputs: torch.Tensor,
-    outputs: torch.Tensor,
-    residuals: Optional[torch.Tensor] = None
-) -> dict:
-    """Analyze calibration data to extract statistics for adaptive transformation."""
-    
-    print("[AR-ReplaceMe] Analyzing calibration data...")
-    
-    # Compute residual vs transformation ratio
-    residual_component = outputs - inputs
-    
-    # Avoid division by zero
-    input_norm = torch.norm(inputs) + 1e-8
-    residual_norm = torch.norm(residual_component) + 1e-8
-    
-    residual_ratio = input_norm / (input_norm + residual_norm)
-    
-    # Compute per-token variance
-    per_token_variance = residual_component.std(dim=1).mean().item()
-    
-    # Position-wise patterns (if sequence dimension exists)
-    if len(inputs.shape) > 2:
-        position_patterns = residual_component.mean(dim=0).std().item()
-    else:
-        position_patterns = 0.0
-    
-    stats = {
-        'residual_ratio': residual_ratio.item(),
-        'token_variance': per_token_variance,
-        'position_bias': position_patterns,
-        'input_norm': input_norm.item(),
-        'output_norm': torch.norm(outputs).item()
-    }
-    
-    print(f"[AR-ReplaceMe] Calibration stats:")
-    print(f"  - Residual ratio: {stats['residual_ratio']:.3f}")
-    print(f"  - Token variance: {stats['token_variance']:.3f}")
-    print(f"  - Position bias: {stats['position_bias']:.3f}")
-    
-    return stats
-
-
-def train_adaptive_transform(
-    transform: AdaptiveResidualTransform,
-    inputs: torch.Tensor,
-    outputs: torch.Tensor,
-    residuals: Optional[torch.Tensor] = None,
-    epochs: int = 10,
-    batch_size: int = 1024,
-    lr: float = 1e-3
-) -> AdaptiveResidualTransform:
-    """Train the adaptive transformation using calibration data."""
-    
-    class CalibrationDataset(Dataset):
-        def __init__(self, inputs, outputs, residuals=None):
-            self.inputs = inputs
-            self.outputs = outputs
-            self.residuals = residuals
+        # Restore original shape if needed
+        if len(original_shape) == 3:
+            output = output.view(original_shape)
             
-        def __len__(self):
-            return len(self.inputs)
-            
-        def __getitem__(self, idx):
-            if self.residuals is not None:
-                return self.inputs[idx], self.outputs[idx], self.residuals[idx]
-            return self.inputs[idx], self.outputs[idx], torch.zeros_like(self.inputs[idx])
-    
-    # Move transform to CUDA if available
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    transform = transform.to(device)
-    
-    # Create dataset and loader
-    dataset = CalibrationDataset(inputs, outputs, residuals)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    
-    # Optimizer
-    optimizer = torch.optim.Adam(transform.parameters(), lr=lr)
-    
-    # Loss function (combination of cosine and MSE)
-    def combined_loss(pred, target):
-        # Cosine similarity loss
-        pred_norm = pred / (pred.norm(dim=-1, keepdim=True) + 1e-8)
-        target_norm = target / (target.norm(dim=-1, keepdim=True) + 1e-8)
-        cosine_loss = 1 - (pred_norm * target_norm).sum(dim=-1).mean()
-        
-        # MSE loss
-        mse_loss = nn.MSELoss()(pred, target)
-        
-        # Weighted combination
-        return 0.7 * cosine_loss + 0.3 * mse_loss
-    
-    print(f"[AR-ReplaceMe] Training adaptive transform for {epochs} epochs...")
-    
-    with tqdm(range(epochs), desc="Training AR-Transform") as pbar:
-        for epoch in pbar:
-            total_loss = 0
-            num_batches = 0
-            
-            for batch_inputs, batch_outputs, batch_residuals in loader:
-                # Move to device
-                batch_inputs = batch_inputs.to(device)
-                batch_outputs = batch_outputs.to(device)
-                batch_residuals = batch_residuals.to(device)
-                
-                optimizer.zero_grad()
-                
-                # Forward pass
-                pred = transform(batch_inputs)
-                
-                # Add residuals if available
-                if residuals is not None and batch_residuals.sum() != 0:
-                    pred = pred + batch_residuals
-                
-                # Compute loss
-                loss = combined_loss(pred, batch_outputs)
-                
-                # Backward pass
-                loss.backward()
-                optimizer.step()
-                
-                # Clamp residual gate to [0, 1] range
-                transform.residual_gate.data = transform.residual_gate.data.clamp(0, 1)
-                
-                total_loss += loss.item()
-                num_batches += 1
-            
-            avg_loss = total_loss / num_batches
-            pbar.set_postfix({'Loss': f'{avg_loss:.4f}', 
-                             'Gate': f'{torch.sigmoid(transform.residual_gate).item():.3f}'})
-    
-    print(f"[AR-ReplaceMe] Training completed. Final gate value: {torch.sigmoid(transform.residual_gate).item():.3f}")
-    
-    return transform
+        return output
 
 
-def adaptive_replaceme(
+def improved_adaptive_replaceme(
     model_path: str,
     dataset: str,
     dataset_column: str,
@@ -230,15 +83,13 @@ def adaptive_replaceme(
     start_id: int = 0,
     end_id: int = 0,
     num_layer: int = 0,
-    epochs: int = 10,
-    lr: float = 1e-3,
     **kwargs
 ) -> str:
-    """Main function for Adaptive Residual ReplaceMe."""
     
-    print(f"[AR-ReplaceMe] Starting adaptive transformation for layers {start_id}-{end_id}")
+    print(f"\n[Improved AR] Processing layers {start_id}-{end_id}")
+    print(f"[Improved AR] Layers to skip: {layers_to_skip}")
     
-    # Load model for activation gathering
+    # Load model
     device_map = "auto" if torch.cuda.is_available() else "cpu"
     quantization_config = None
     
@@ -265,21 +116,19 @@ def adaptive_replaceme(
     hidden_size = model.config.hidden_size
     model.eval()
     
-    # Get calibration dataloader
+    # Gather calibration data
     dataloader = get_calib_dataloader(
         dataset, dataset_subset, dataset_column,
         dataset_size, batch_size, tokenizer
     )
     
-    # Gather activations
-    print(f"[AR-ReplaceMe] Gathering activations from {dataset_size} samples...")
+    print(f"[Improved AR] Gathering calibration data...")
     
-    all_inputs = []
-    all_outputs = []
-    all_residuals = []
+    inputs_list = []
+    outputs_list = []
     
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Gathering activations"):
+        for batch in tqdm(dataloader, desc="Calibration", total=dataset_size//batch_size):
             inputs = tokenizer(
                 batch,
                 return_tensors="pt",
@@ -290,55 +139,120 @@ def adaptive_replaceme(
             inputs = {k: v.to(model.device) for k, v in inputs.items()}
             
             outputs = model(**inputs)
-            hidden_states = outputs.hidden_states[1:]  # Skip embedding layer
+            hidden_states = outputs.hidden_states[1:]
             
-            # Get relevant hidden states
-            h_start = hidden_states[start_id - num_layer - 1]
-            h_end = hidden_states[end_id - num_layer - 1]
+            h_in = hidden_states[start_id - num_layer - 1]
+            h_out = hidden_states[end_id - num_layer - 1]
             
-            # Flatten batch and sequence dimensions
-            h_start_flat = h_start.view(-1, hidden_size).cpu()
-            h_end_flat = h_end.view(-1, hidden_size).cpu()
+            # Flatten batch and sequence dimensions to avoid padding issues
+            B, T, D = h_in.shape
+            h_in_flat = h_in.view(-1, D)
+            h_out_flat = h_out.view(-1, D)
             
-            all_inputs.append(h_start_flat)
-            all_outputs.append(h_end_flat)
+            inputs_list.append(h_in_flat.cpu())
+            outputs_list.append(h_out_flat.cpu())
+    
+    # Concatenate all flattened data
+    all_inputs = torch.cat(inputs_list, dim=0).to(torch.float32)
+    all_outputs = torch.cat(outputs_list, dim=0).to(torch.float32)
+    
+    print(f"[Improved AR] Data shape: {all_inputs.shape}")
+    
+    # Analyze data
+    residual = all_outputs - all_inputs
+    residual_ratio = torch.norm(all_inputs) / (torch.norm(residual) + 1e-8)
+    print(f"[Improved AR] Residual ratio: {residual_ratio:.3f}")
+    
+    # Calculate average transformation magnitude
+    transform_magnitude = torch.norm(residual) / torch.norm(all_inputs)
+    print(f"[Improved AR] Transform magnitude: {transform_magnitude:.3f}")
+    
+    # Create and train transform
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    transform = ImprovedAdaptiveTransform(hidden_size).to(device)
+    
+    # Use both MSE and cosine loss
+    optimizer = torch.optim.AdamW(transform.parameters(), lr=5e-4, weight_decay=1e-5)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=20)
+    
+    # Training
+    print(f"[Improved AR] Training transformation...")
+    
+    all_inputs = all_inputs.to(device)
+    all_outputs = all_outputs.to(device)
+    
+    dataset_size = all_inputs.shape[0]
+    
+    best_loss = float('inf')
+    
+    for epoch in range(20):
+        total_loss = 0
+        total_mse = 0
+        total_cosine = 0
+        num_batches = 0
+        
+        # Shuffle indices
+        indices = torch.randperm(dataset_size)
+        
+        for i in range(0, dataset_size, 1024):
+            batch_idx = indices[i:min(i+1024, dataset_size)]
+            batch_in = all_inputs[batch_idx]
+            batch_out = all_outputs[batch_idx]
             
-            # Optional: gather attention residuals if needed
-            if len(hidden_states) > start_id - num_layer:
-                h_mid = hidden_states[start_id - num_layer]
-                residual = (h_mid - h_start).view(-1, hidden_size).cpu()
-                all_residuals.append(residual)
+            optimizer.zero_grad()
+            
+            # Forward
+            pred = transform(batch_in)
+            
+            # Combined loss
+            mse_loss = F.mse_loss(pred, batch_out)
+            
+            # Cosine loss
+            pred_norm = F.normalize(pred, dim=-1)
+            out_norm = F.normalize(batch_out, dim=-1)
+            cosine_loss = 1 - (pred_norm * out_norm).sum(-1).mean()
+            
+            # Weight cosine loss less
+            loss = mse_loss + 0.1 * cosine_loss
+            
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(transform.parameters(), 1.0)
+            optimizer.step()
+            
+            total_loss += loss.item()
+            total_mse += mse_loss.item()
+            total_cosine += cosine_loss.item()
+            num_batches += 1
+        
+        scheduler.step()
+        
+        avg_loss = total_loss / num_batches
+        avg_mse = total_mse / num_batches
+        avg_cosine = total_cosine / num_batches
+        
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+        
+        if epoch % 5 == 0 or epoch == 19:
+            # Check gate statistics
+            with torch.no_grad():
+                sample_size = min(1000, dataset_size)
+                sample = all_inputs[:sample_size]
+                gates = transform.gate_net(sample).mean().item()
+                gate_std = transform.gate_net(sample).std().item()
+                
+            print(f"[Improved AR] Epoch {epoch}: Loss={avg_loss:.4f} (MSE={avg_mse:.4f}, Cos={avg_cosine:.4f})")
+            print(f"              Gate: mean={gates:.3f}, std={gate_std:.3f}")
     
-    # Concatenate all activations
-    all_inputs = torch.cat(all_inputs, dim=0).to(torch.float32)
-    all_outputs = torch.cat(all_outputs, dim=0).to(torch.float32)
+    print(f"[Improved AR] Training complete. Best loss: {best_loss:.4f}")
     
-    if all_residuals:
-        all_residuals = torch.cat(all_residuals, dim=0).to(torch.float32)
-    else:
-        all_residuals = None
-    
-    print(f"[AR-ReplaceMe] Collected {all_inputs.shape[0]} activation pairs")
-    
-    # Analyze calibration data
-    calibration_stats = analyze_calibration_data(all_inputs, all_outputs, all_residuals)
-    
-    # Create and train adaptive transform
-    transform = AdaptiveResidualTransform(hidden_size, calibration_stats)
-    transform = train_adaptive_transform(
-        transform, all_inputs, all_outputs, all_residuals,
-        epochs=epochs, batch_size=batch_size, lr=lr
-    )
-    
-    # Clean up before reloading
-    del model, all_inputs, all_outputs
-    if all_residuals is not None:
-        del all_residuals
+    # Clean up
+    del model
     gc.collect()
     torch.cuda.empty_cache()
     
-    # Reload model for modification
-    print("[AR-ReplaceMe] Applying transformation to model...")
+    # Load model for modification
+    print(f"[Improved AR] Modifying model...")
     
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
@@ -347,41 +261,65 @@ def adaptive_replaceme(
         token=token
     )
     
-    # Truncate model
-    model = truncate_model(model, start_id - num_layer, end_id - num_layer)
+    # Create custom layer that wraps our transform
+    class AdaptiveReplacementLayer(nn.Module):
+        def __init__(self, transform_module, dtype=torch.bfloat16):
+            super().__init__()
+            self.transform = transform_module
+            self.dtype = dtype
+            
+        def forward(self, hidden_states, attention_mask=None, position_ids=None, **kwargs):
+            # Convert to float32 for computation
+            h = hidden_states.to(torch.float32)
+            
+            # Apply transformation
+            h = self.transform(h)
+            
+            # Convert back to model dtype
+            h = h.to(self.dtype)
+            
+            return h
     
-    # Extract the learned transformation matrix
-    W_learned = transform.W.detach().cpu()
-    gate_value = torch.sigmoid(transform.residual_gate.detach().cpu()).item()
+    # Create replacement
+    replacement = AdaptiveReplacementLayer(transform.cpu(), model.dtype)
     
-    print(f"[AR-ReplaceMe] Applying transformation with gate={gate_value:.3f}")
+    # Modify layers - insert replacement at the right position
+    new_layers = []
     
-    # Create effective transformation (mixing identity and learned)
-    identity = torch.eye(hidden_size, dtype=torch.float32)
-    W_effective = gate_value * identity + (1 - gate_value) * W_learned
+    for i in range(len(model.model.layers)):
+        if i == start_id - num_layer:
+            # Insert replacement layer here
+            new_layers.append(replacement)
+            print(f"[Improved AR] Inserted replacement at position {i}")
+        
+        if i < start_id - num_layer or i >= end_id - num_layer:
+            # Keep this layer
+            new_layers.append(model.model.layers[i])
+        # else: skip this layer (it's being replaced)
     
-    # Apply to down_proj layer
-    target_layer = model.model.layers[start_id - num_layer - 1]
-    original_weight = target_layer.mlp.down_proj.weight.to(torch.float32)
+    model.model.layers = nn.ModuleList(new_layers)
+    model.config.num_hidden_layers = len(new_layers)
     
-    # Apply transformation
-    new_weight = torch.matmul(W_effective.T, original_weight)
-    target_layer.mlp.down_proj.weight = nn.Parameter(new_weight.to(torch.bfloat16))
+    print(f"[Improved AR] Final model has {len(new_layers)} layers")
     
-    # Save model
+    # Save
     if save_path is None:
-        save_path = f"output_models/AR_ReplaceMe_{model_path.replace('/', '_')}_{start_id}_{end_id}"
+        save_path = f"output_models/ImprovedAR_{model_path.replace('/', '_')}_{start_id}_{end_id}"
     
     model.save_pretrained(save_path)
     tokenizer.save_pretrained(save_path)
     
-    print(f"[AR-ReplaceMe] Model saved to {save_path}")
+    print(f"[Improved AR] Model saved to {save_path}")
     
-    # Save transformation details
+    # Save transform details
     torch.save({
-        'W': W_effective,
-        'gate': gate_value,
-        'stats': calibration_stats
-    }, f"{save_path}/transform_details.pt")
+        'transform_state': transform.state_dict(),
+        'config': {
+            'start_id': start_id,
+            'end_id': end_id,
+            'hidden_size': hidden_size,
+            'best_loss': best_loss
+        }
+    }, f"{save_path}/transform.pt")
     
     return save_path
