@@ -4,9 +4,9 @@ model_path: "meta-llama/Llama-3.2-3B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
 batch_size: 4
-max_length: 512
+max_length: 1024
 layers_to_skip: 4
-dataset_size: 4000 # 1000
+dataset_size: 1000 # 1000
 dataset_subset: "train"
 use_4bit: False
 save_path: null
