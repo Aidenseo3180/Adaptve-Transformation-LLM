@@ -1,10 +1,10 @@
 method: "cosine"
-model_path: "meta-llama/Llama-3.2-3B-Instruct" # meta-llama/Llama-3.2-3B-Instruct
+model_path: "meta-llama/Meta-Llama-3-8B-Instruct" # "meta-llama/Llama-3.2-3B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
 batch_size: 4 # 8
-max_length: 512 # 1024
-layers_to_skip: 4
+max_length: 1024 # 1024
+layers_to_skip: 8
 dataset_size: 1000 # 8000
 dataset_subset: "train"
 use_4bit: False
@@ -16,7 +16,7 @@ two_vectors: False # whether to force the LT to be a multiplication of two vecto
 thri: False # whether to force the LT to be a lower triangular matrix
 solver: "adam" # adam, cg, l-bfgs, trust-ncg are supported
 loss: "cosine" # cosine, mse, elasticnet are supported
-distances_path: null
+distances_path: "distances.pth"
 
 num_A: 1
 merge_consecutive: False 

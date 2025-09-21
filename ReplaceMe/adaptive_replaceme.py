@@ -30,7 +30,7 @@ def fixed_adaptive_replaceme(
     start_id: int = 0,
     end_id: int = 0,
     num_layer: int = 0,
-    adaptive_weight: float = 0.3,  # How much to blend with identity (0.3)
+    adaptive_weight: float = 0.6,  # How much to blend with identity (0.3)
     distances_path: str = "./distances.pth",
     num_A: int = 1,
     merge_consecutive: bool = True,
