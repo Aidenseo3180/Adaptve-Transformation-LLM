@@ -1,29 +1,21 @@
-method: "dld"
+# adaptive_replaceme.yaml
+method: "adaptive"
 model_path: "meta-llama/Llama-3.2-3B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
 batch_size: 4
 max_length: 512
 layers_to_skip: 4
-dataset_size: 2000
+dataset_size: 1000
 dataset_subset: "train"
 use_4bit: False
 save_path: null
+min_distance_layer: 20
 distances_path: null
 
-# DLD specific parameters
-compression_threshold: 0.90  # Cosine similarity threshold for minimal compression
-min_compression_ratio: 0.05  # Minimum compression (5% of original)
-max_compression_ratio: 0.3   # Maximum compression (30% of original)
-use_attention_for_complex: True  # Use attention-based delta for complex layers
-training_epochs: 50  # Epochs for delta network training
-preserve_critical_layers: True  # Keep first/last 3 layers intact
-healing_epochs: 5  # Fine-tuning epochs after replacement
-healing_lr: 0.00001  # Learning rate for healing
-
-# Layer selection (if not using distances_path)
-start_id: 10
-end_id: 20
+# Adaptive-specific parameters
+epochs: 10
+lr: 0.001
 num_A: 1
 merge_consecutive: False
 

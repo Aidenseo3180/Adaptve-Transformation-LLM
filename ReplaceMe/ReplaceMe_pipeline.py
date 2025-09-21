@@ -59,44 +59,38 @@ def ReplaceMe_pipeline(config):
             path = cosine_dist(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
 
-
-    elif config["method"] == "dld":  # NEW DLD METHOD
-        from .dld_method import apply_dld_transformation
-
-        print(f"\n{Fore.MAGENTA}[Pipeline] Using Differential Layer Distillation method{Fore.RESET}")
+    elif config["method"] == "adaptive":  # New adaptive method
+        from .adaptive_replaceme import adaptive_replaceme
         
-        signature = inspect.signature(apply_dld_transformation)
+        signature = inspect.signature(adaptive_replaceme)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
-        # Load distances if available for layer selection
-        if config.get('distances_path'):
-            average_distances = torch.load(config['distances_path'], weights_only=False)
-            selected_blocks = select_non_overlapping_blocks(
-                average_distances,
-                config.get('layers_to_skip', 4),
-                num_blocks=config.get('num_A', 1),
-                merge_consecutive=config.get('merge_consecutive', False)
+        # Load distances and select blocks
+        average_distances = torch.load(filtered_config['distances_path'], weights_only=False)
+        selected_blocks = select_non_overlapping_blocks(
+            average_distances,
+            filtered_config['layers_to_skip'],
+            num_blocks=filtered_config.get('num_A', 1),
+            merge_consecutive=filtered_config.get('merge_consecutive', False)
+        )
+        
+        # Process each block
+        start_ids = sorted([x[0] for x in selected_blocks])
+        end_ids = sorted([x[1] for x in selected_blocks])
+        num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
+        num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
+        
+        print(f"[AR-ReplaceMe Pipeline] Processing {len(selected_blocks)} blocks")
+        
+        for i in range(len(selected_blocks)):
+            print(f"[AR-ReplaceMe Pipeline] Block {i+1}/{len(selected_blocks)}: layers {start_ids[i]}-{end_ids[i]}")
+            path = adaptive_replaceme(
+                **filtered_config,
+                start_id=start_ids[i],
+                end_id=end_ids[i],
+                num_layer=num_layers[i]
             )
-            
-            if selected_blocks:
-                start_ids = sorted([x[0] for x in selected_blocks])
-                end_ids = sorted([x[1] for x in selected_blocks])
-                filtered_config['start_id'] = min(start_ids)
-                filtered_config['end_id'] = max(end_ids)
-            else:
-                # Default to middle layers
-                filtered_config['start_id'] = config.get('start_id', 10)
-                filtered_config['end_id'] = config.get('end_id', 20)
-        else:
-            # Use config values or defaults
-            filtered_config['start_id'] = config.get('start_id', 10)
-            filtered_config['end_id'] = config.get('end_id', 20)
-        
-        filtered_config['num_layer'] = 0
-        
-        print(f"[Pipeline] DLD will process layers {filtered_config['start_id']} to {filtered_config['end_id']}")
-        
-        path = apply_dld_transformation(**filtered_config)
+            filtered_config["model_path"] = path
 
     else:
         raise ValueError(f"Unknown method: {config['method']}")
