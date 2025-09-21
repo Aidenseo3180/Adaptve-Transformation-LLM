@@ -11,7 +11,7 @@ dataset_subset: "train"
 use_4bit: False
 save_path: null
 min_distance_layer: 20
-distances_path: null
+distances_path: "distances.pth"
 
 # Adaptive-specific parameters
 epochs: 10
