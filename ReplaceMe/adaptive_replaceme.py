@@ -30,7 +30,7 @@ def fixed_adaptive_replaceme(
     start_id: int = 0,
     end_id: int = 0,
     num_layer: int = 0,
-    adaptive_weight: float = 0.3,  # How much to blend with identity
+    adaptive_weight: float = 0.1,  # How much to blend with identity
     distances_path: str = "./distances.pth",
     num_A: int = 1,
     merge_consecutive: bool = True,
@@ -140,7 +140,7 @@ def fixed_adaptive_replaceme(
     best_W = W.clone()
     best_loss = float('inf')
     
-    for epoch in range(10):
+    for epoch in range(20):
         total_loss = 0
         num_batches = 0
         
