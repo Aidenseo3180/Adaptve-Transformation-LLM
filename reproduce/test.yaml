@@ -20,8 +20,8 @@ num_A: 1
 merge_consecutive: False
 
 # Evaluation tasks
-# tasks:
-#   boolq:
-#     fewshots: 0
-#   lambada_openai:
-#     fewshots: 0
+tasks:
+  boolq:
+    fewshots: 0
+  lambada_openai:
+    fewshots: 0
