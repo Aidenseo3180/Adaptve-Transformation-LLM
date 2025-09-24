@@ -11,7 +11,7 @@ dataset_subset: "train"
 use_4bit: False
 
 # Quantization settings
-num_layers_to_quantize: 16  # Number of layers to quantize
+num_layers_to_quantize: 24  # Number of layers to quantize
 quantization_bits: 8  # 8-bit quantization
 
 # Paths
