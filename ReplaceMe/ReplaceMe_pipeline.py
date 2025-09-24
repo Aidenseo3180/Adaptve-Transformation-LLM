@@ -59,10 +59,10 @@ def ReplaceMe_pipeline(config):
             path = cosine_dist(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
 
-    elif config["method"] == "adaptive":  # New adaptive method
-        from .adaptive_replaceme import fixed_adaptive_replaceme
+    elif config["method"] == "improved_cosine":  # 새로운 메소드 추가
+        from .improved_cosine_dist import improved_cosine_dist
         
-        signature = inspect.signature(fixed_adaptive_replaceme)
+        signature = inspect.signature(improved_cosine_dist)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
         # Load distances and select blocks
@@ -70,8 +70,8 @@ def ReplaceMe_pipeline(config):
         selected_blocks = select_non_overlapping_blocks(
             average_distances,
             filtered_config['layers_to_skip'],
-            num_blocks=filtered_config.get('num_A', 1),
-            merge_consecutive=filtered_config.get('merge_consecutive', False)
+            num_blocks=filtered_config['num_A'],
+            merge_consecutive=filtered_config['merge_consecutive']
         )
         
         # Process each block
@@ -80,11 +80,8 @@ def ReplaceMe_pipeline(config):
         num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
         num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
         
-        print(f"[AR-ReplaceMe Pipeline] Processing {len(selected_blocks)} blocks")
-        
         for i in range(len(selected_blocks)):
-            print(f"[AR-ReplaceMe Pipeline] Block {i+1}/{len(selected_blocks)}: layers {start_ids[i]}-{end_ids[i]}")
-            path = fixed_adaptive_replaceme(
+            path = improved_cosine_dist(
                 **filtered_config,
                 start_id=start_ids[i],
                 end_id=end_ids[i],

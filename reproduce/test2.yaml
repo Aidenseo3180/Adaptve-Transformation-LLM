@@ -1,0 +1,28 @@
+method: "improved_cosine"  # 새로운 메소드
+model_path: "meta-llama/Meta-Llama-3-8B-Instruct"
+dataset: "Open-Orca/SlimOrca"
+dataset_column: "text"
+batch_size: 4
+max_length: 1024
+layers_to_skip: 8
+dataset_size: 4000
+dataset_subset: "train"
+use_4bit: False
+save_path: null
+min_distance_layer: 20
+distances_path: "distances.pth"
+num_A: 1
+merge_consecutive: False
+
+# Improved optimizer parameters
+optimizer_epochs: 20  # 증가된 epochs
+optimizer_lr: 0.0005  # 5e-4, 더 높은 learning rate
+optimizer_batch_size: 1024
+loss_type: "mixed"  # "cosine", "mixed", or "mse"
+early_stopping_patience: 3
+
+tasks:
+  boolq:
+    fewshots: 0
+  lambada_openai:
+    fewshots: 0
