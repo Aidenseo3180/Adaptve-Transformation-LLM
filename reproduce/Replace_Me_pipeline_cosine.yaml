@@ -5,7 +5,7 @@ dataset_column: "text"
 batch_size: 4 # 8
 max_length: 1024 # 1024
 layers_to_skip: 8
-dataset_size: 1000 # 8000
+dataset_size: 4000 # 8000
 dataset_subset: "train"
 use_4bit: False
 save_path: null
@@ -16,13 +16,8 @@ two_vectors: False # whether to force the LT to be a multiplication of two vecto
 thri: False # whether to force the LT to be a lower triangular matrix
 solver: "adam" # adam, cg, l-bfgs, trust-ncg are supported
 loss: "cosine" # cosine, mse, elasticnet are supported
-distances_path: "distances.pth"
+distances_path: null
 
 num_A: 1
 merge_consecutive: False 
 accurate: False # False will run cosine(xA, y - z) where z is the residual attention info, True to run cosine(xA + z, y)
-tasks:
-  boolq:
-    fewshots: 0
-  lambada_openai:
-    fewshots: 0

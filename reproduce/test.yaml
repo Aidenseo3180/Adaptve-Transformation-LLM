@@ -1,27 +1,23 @@
-# adaptive_replaceme.yaml
-method: "adaptive"
+# layer_quantization.yaml
+method: "layer_quantization"
 model_path: "meta-llama/Meta-Llama-3-8B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
 batch_size: 4
 max_length: 1024
-layers_to_skip: 8
-dataset_size: 4000 # 1000
+layers_to_skip: 1  # Individual layer analysis
+dataset_size: 1000  # For profiling
 dataset_subset: "train"
 use_4bit: False
-save_path: null
-min_distance_layer: 20
-distances_path: "distances.pth"
 
-# Adaptive-specific parameters
-epochs: 10
-lr: 0.001
-num_A: 1
-merge_consecutive: False
+# Quantization settings
+num_layers_to_quantize: 16  # Number of layers to quantize
+quantization_bits: 8  # 8-bit quantization
 
-# Evaluation tasks
-tasks:
-  boolq:
-    fewshots: 0
-  lambada_openai:
-    fewshots: 0
+# Paths
+distances_path: null  # Will be auto-generated
+save_path: null  # Will auto-generate based on settings
+
+# Optional
+token: null  # Your HuggingFace token if needed
+min_distance_layer: null

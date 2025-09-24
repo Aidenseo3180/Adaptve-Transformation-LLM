@@ -59,35 +59,48 @@ def ReplaceMe_pipeline(config):
             path = cosine_dist(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
             filtered_config["model_path"] = path
 
-    elif config["method"] == "improved_cosine":  # 새로운 메소드 추가
-        from .improved_cosine_dist import improved_cosine_dist
+    elif config["method"] == "layer_quantization":
+        from .layer_quantization import apply_layer_quantization
+
+        # Profile distances if not already done
+        if config['distances_path'] is None:
+            signature = inspect.signature(profile_distances)
+            filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
+            profile_distances(**filtered_config)
+            config['distances_path'] = "./distances.pth"
         
-        signature = inspect.signature(improved_cosine_dist)
-        filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
+        # Load layer importance scores
+        logging.info(f"{Fore.CYAN}Loading layer importance scores...{Fore.RESET}")
+        layer_distances = torch.load(config['distances_path'], weights_only=False)
         
-        # Load distances and select blocks
-        average_distances = torch.load(filtered_config['distances_path'], weights_only=False)
-        selected_blocks = select_non_overlapping_blocks(
-            average_distances,
-            filtered_config['layers_to_skip'],
-            num_blocks=filtered_config['num_A'],
-            merge_consecutive=filtered_config['merge_consecutive']
+        # For layers_to_skip=1, each score represents individual layer importance
+        # Higher distance = less important (more similar input/output)
+        layer_indices_sorted = sorted(
+            range(len(layer_distances)), 
+            key=lambda i: layer_distances[i], 
+            reverse=True  # Most redundant first
         )
         
-        # Process each block
-        start_ids = sorted([x[0] for x in selected_blocks])
-        end_ids = sorted([x[1] for x in selected_blocks])
-        num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
-        num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
+        # Select top N least important layers for quantization
+        num_layers_to_quantize = config.get('num_layers_to_quantize', 16)
+        layers_to_quantize = layer_indices_sorted[:num_layers_to_quantize]
         
-        for i in range(len(selected_blocks)):
-            path = improved_cosine_dist(
-                **filtered_config,
-                start_id=start_ids[i],
-                end_id=end_ids[i],
-                num_layer=num_layers[i]
-            )
-            filtered_config["model_path"] = path
+        logging.info(f"{Fore.YELLOW}Selected {num_layers_to_quantize} least important layers:{Fore.RESET}")
+        logging.info(f"Layers: {sorted(layers_to_quantize)}")
+        logging.info(f"Importance scores: {[layer_distances[i] for i in layers_to_quantize[:5]]}...")
+        
+        # Apply quantization
+        quantization_bits = config.get('quantization_bits', 8)
+        path = apply_layer_quantization(
+            model_path=config['model_path'],
+            layers_to_quantize=layers_to_quantize,
+            quantization_bits=quantization_bits,
+            save_path=config.get('save_path'),
+            token=config.get('token')
+        )
+        
+        # Update config for evaluation
+        config["model_path"] = path
 
     else:
         raise ValueError(f"Unknown method: {config['method']}")
