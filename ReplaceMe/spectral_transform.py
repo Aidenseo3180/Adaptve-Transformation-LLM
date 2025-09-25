@@ -6,12 +6,16 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+import numpy as np
 import torch.nn.functional as F
 from colorama import Fore, init
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from torch.utils.data import Dataset, DataLoader
 
 from .utils import get_calib_dataloader, seed_all, truncate_model
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # Initialize colorama
 init(autoreset=True)
@@ -26,59 +30,75 @@ logging.basicConfig(
 seed_all()
 
 
-def spectral_regularized_transform(
+class ActivationDataset(Dataset):
+    """Dataset for batch processing of activations."""
+    def __init__(self, a1, a2, a3=None):
+        self.a1 = a1
+        self.a2 = a2
+        self.a3 = a3
+    
+    def __len__(self):
+        return len(self.a1)
+    
+    def __getitem__(self, idx):
+        if self.a3 is not None:
+            return self.a1[idx], self.a2[idx], self.a3[idx]
+        return self.a1[idx], self.a2[idx], torch.zeros_like(self.a1[idx])
+
+
+def spectral_regularized_transform_batched(
     a1: torch.Tensor,
     a2: torch.Tensor,
     a3: Optional[torch.Tensor] = None,
     hidden_dim: int = 4096,
     epochs: int = 100,
     lr: float = 1e-3,
+    batch_size: int = 1024,
     spectral_weight: float = 0.01,
     condition_weight: float = 0.001,
     orth_weight: float = 0.0001,
     use_residual: bool = False,
+    device: str = 'cuda',
     debug: bool = True
 ) -> torch.Tensor:
     """
-    Learn transformation matrix with spectral regularization.
+    Learn transformation matrix with spectral regularization using batch processing.
     
-    Args:
-        a1: Input activations [N x hidden_dim]
-        a2: Target activations [N x hidden_dim]
-        a3: Optional residual correction [N x hidden_dim]
-        hidden_dim: Dimension of hidden states
-        epochs: Number of optimization epochs
-        lr: Learning rate
-        spectral_weight: Weight for spectral regularization
-        condition_weight: Weight for condition number regularization
-        orth_weight: Weight for orthogonality regularization
-        use_residual: Whether to add residual connection
-        debug: Whether to print debug information
-    
-    Returns:
-        Optimized transformation matrix
+    All data stays on CPU, only small batches move to GPU for optimization.
     """
     if debug:
-        print(f"{Fore.CYAN}Starting spectral regularized transform optimization{Fore.RESET}")
+        print(f"{Fore.CYAN}Starting spectral regularized transform optimization (Batched){Fore.RESET}")
         print(f"  Input shape: {a1.shape}")
         print(f"  Target shape: {a2.shape}")
         print(f"  Using residual: {a3 is not None}")
+        print(f"  Batch size: {batch_size}")
+        print(f"  Device: {device}")
     
-    # Move to GPU if available
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    a1 = a1.to(device).float()
-    a2 = a2.to(device).float()
+    # Keep data on CPU
+    a1 = a1.cpu().float()
+    a2 = a2.cpu().float()
     if a3 is not None:
-        a3 = a3.to(device).float()
+        a3 = a3.cpu().float()
     
-    # Smart initialization using SVD
-    print(f"{Fore.YELLOW}Initializing transformation matrix using SVD...{Fore.RESET}")
+    # Smart initialization using subset of data
+    print(f"{Fore.YELLOW}Initializing transformation matrix using SVD on subset...{Fore.RESET}")
     try:
-        U, S, V = torch.svd(a1.T @ a2)
+        # Use only first 10000 samples for SVD to save memory
+        subset_size = min(10000, a1.shape[0])
+        indices = torch.randperm(a1.shape[0])[:subset_size]
+        a1_subset = a1[indices].to(device)
+        a2_subset = a2[indices].to(device)
+        
+        U, S, V = torch.svd(a1_subset.T @ a2_subset)
         W = (U @ V.T).contiguous()
-        print(f"  SVD initialization successful")
-    except:
-        print(f"{Fore.RED}  SVD failed, using identity initialization{Fore.RESET}")
+        print(f"  SVD initialization successful on {subset_size} samples")
+        
+        # Clean up
+        del a1_subset, a2_subset, U, S, V
+        torch.cuda.empty_cache()
+        
+    except Exception as e:
+        print(f"{Fore.RED}  SVD failed: {e}, using identity initialization{Fore.RESET}")
         W = torch.eye(hidden_dim, device=device)
     
     W.requires_grad_(True)
@@ -89,96 +109,108 @@ def spectral_regularized_transform(
         optimizer, mode='min', factor=0.5, patience=10, verbose=debug
     )
     
+    # Create dataset and dataloader
+    dataset = ActivationDataset(a1, a2, a3)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
+    
     # Best model tracking
     best_W = W.clone().detach()
     best_loss = float('inf')
     
     # Training loop
-    pbar = tqdm(range(epochs), desc="Optimizing Transform", colour="blue")
-    
-    for epoch in pbar:
-        optimizer.zero_grad()
+    for epoch in range(epochs):
+        epoch_losses = []
         
-        # Forward pass
-        pred = a1 @ W
-        if a3 is not None:
-            pred = pred + a3
+        pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}", leave=False)
+        for batch_idx, batch_data in enumerate(pbar):
+            if len(batch_data) == 3:
+                X, Y, Z = batch_data
+            else:
+                X, Y = batch_data
+                Z = torch.zeros_like(X)
+            
+            # Move batch to device
+            X = X.to(device).float()
+            Y = Y.to(device).float()
+            Z = Z.to(device).float()
+            
+            optimizer.zero_grad()
+            
+            # Forward pass
+            pred = X @ W
+            if a3 is not None and Z.sum() != 0:
+                pred = pred + Z
+            
+            # 1. Main reconstruction loss (cosine similarity)
+            pred_norm = F.normalize(pred, dim=-1)
+            Y_norm = F.normalize(Y, dim=-1)
+            recon_loss = 1 - (pred_norm * Y_norm).sum(-1).mean()
+            
+            # Calculate regularization losses only every 10 batches to save compute
+            if batch_idx % 10 == 0:
+                # 2. Spectral regularization
+                try:
+                    U_w, S_w, V_w = torch.svd(W)
+                    spectral_loss = torch.norm(S_w - 1.0, p=2) / math.sqrt(hidden_dim)
+                    condition_number = S_w.max() / (S_w.min() + 1e-8)
+                    condition_loss = torch.log(condition_number + 1.0)
+                except:
+                    spectral_loss = torch.tensor(0.0, device=device)
+                    condition_loss = torch.tensor(0.0, device=device)
+                
+                # 3. Orthogonality regularization
+                orth_loss = torch.norm(W @ W.T - torch.eye(hidden_dim, device=device), 'fro')
+                
+                # Combined loss with regularization
+                total_loss = (
+                    recon_loss + 
+                    spectral_weight * spectral_loss +
+                    condition_weight * condition_loss +
+                    orth_weight * orth_loss
+                )
+            else:
+                # Just reconstruction loss for other batches
+                total_loss = recon_loss
+            
+            # Backward pass
+            total_loss.backward()
+            
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_([W], max_norm=1.0)
+            
+            optimizer.step()
+            
+            epoch_losses.append(recon_loss.item())
+            
+            # Update progress bar
+            pbar.set_postfix({
+                'loss': f'{recon_loss.item():.4f}',
+                'avg': f'{np.mean(epoch_losses):.4f}'
+            })
+            
+            # Clear GPU cache periodically
+            if batch_idx % 50 == 0:
+                torch.cuda.empty_cache()
         
-        # 1. Main reconstruction loss (cosine similarity)
-        pred_norm = F.normalize(pred, dim=-1)
-        a2_norm = F.normalize(a2, dim=-1)
-        recon_loss = 1 - (pred_norm * a2_norm).sum(-1).mean()
-        
-        # 2. Spectral regularization
-        try:
-            U_w, S_w, V_w = torch.svd(W)
-            # Encourage singular values to be close to 1
-            spectral_loss = torch.norm(S_w - 1.0, p=2) / math.sqrt(hidden_dim)
-        except:
-            # SVD convergence issue
-            spectral_loss = torch.tensor(0.0, device=device)
-            if debug and epoch % 10 == 0:
-                print(f"\n{Fore.YELLOW}Warning: SVD failed at epoch {epoch}{Fore.RESET}")
-        
-        # 3. Condition number regularization
-        if spectral_loss > 0:
-            condition_number = S_w.max() / (S_w.min() + 1e-8)
-            condition_loss = torch.log(condition_number + 1.0)
-        else:
-            condition_loss = torch.tensor(0.0, device=device)
-        
-        # 4. Orthogonality regularization
-        orth_loss = torch.norm(W @ W.T - torch.eye(hidden_dim, device=device), 'fro')
-        
-        # 5. Optional: Residual connection regularization
-        if use_residual:
-            residual_loss = 0.001 * torch.norm(W - torch.eye(hidden_dim, device=device), 'fro')
-        else:
-            residual_loss = torch.tensor(0.0, device=device)
-        
-        # Combined loss
-        total_loss = (
-            recon_loss + 
-            spectral_weight * spectral_loss +
-            condition_weight * condition_loss +
-            orth_weight * orth_loss +
-            residual_loss
-        )
-        
-        # Backward pass
-        total_loss.backward()
-        
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_([W], max_norm=1.0)
-        
-        optimizer.step()
-        scheduler.step(recon_loss)
+        # Epoch statistics
+        avg_loss = np.mean(epoch_losses)
+        scheduler.step(avg_loss)
         
         # Track best model
-        if recon_loss < best_loss:
-            best_loss = recon_loss
+        if avg_loss < best_loss:
+            best_loss = avg_loss
             best_W = W.clone().detach()
         
-        # Update progress bar
-        pbar.set_postfix({
-            'recon': f'{recon_loss.item():.4f}',
-            'spectral': f'{spectral_loss.item():.4f}',
-            'best': f'{best_loss:.4f}'
-        })
-        
         # Debug prints
-        if debug and epoch % 20 == 0:
-            print(f"\n{Fore.GREEN}Epoch {epoch}/{epochs}:{Fore.RESET}")
-            print(f"  Reconstruction loss: {recon_loss.item():.6f}")
-            print(f"  Spectral loss: {spectral_loss.item():.6f}")
-            print(f"  Condition loss: {condition_loss.item():.6f}")
-            print(f"  Orthogonality loss: {orth_loss.item():.6f}")
-            if spectral_loss > 0:
-                print(f"  Singular values range: [{S_w.min().item():.3f}, {S_w.max().item():.3f}]")
+        if debug and epoch % 10 == 0:
+            print(f"\n{Fore.GREEN}Epoch {epoch+1}/{epochs}:{Fore.RESET}")
+            print(f"  Average loss: {avg_loss:.6f}")
+            print(f"  Best loss: {best_loss:.6f}")
+            print(f"  Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
     
     print(f"\n{Fore.GREEN}Optimization complete! Best loss: {best_loss:.6f}{Fore.RESET}")
     
-    return best_W.to(torch.float64)
+    return best_W.cpu().to(torch.float64)
 
 
 def apply_spectral_transform(
@@ -200,16 +232,23 @@ def apply_spectral_transform(
     orth_weight: float = 0.0001,
     use_residual: bool = False,
     epochs: int = 100,
+    optim_batch_size: int = 1024,
+    use_accurate: bool = False,
+    distances_path: str = "./distances.pth",
+    num_A: int = 1,
+    merge_consecutive: bool = True,
     **kwargs
 ) -> str:
     """
     Apply spectral regularized transform to model layers.
+    Memory-efficient version that stores activations on CPU.
     """
     print(f"\n{Fore.CYAN}{'='*60}{Fore.RESET}")
-    print(f"{Fore.CYAN}Applying Spectral Regularized Transform{Fore.RESET}")
+    print(f"{Fore.CYAN}Applying Spectral Regularized Transform (Memory Efficient){Fore.RESET}")
     print(f"{Fore.CYAN}{'='*60}{Fore.RESET}")
     print(f"Model: {model_path}")
     print(f"Layers to replace: {start_id} to {end_id}")
+    print(f"Dataset size: {dataset_size}")
     
     # Load model for activation collection
     device_map = "auto" if torch.cuda.is_available() else "cpu"
@@ -249,15 +288,23 @@ def apply_spectral_transform(
             save_mlp_activation(f'layer_{i}_mlp')
         ))
     
+    # Pre-allocate CPU tensors (like ReplaceMe does)
+    print(f"\n{Fore.YELLOW}Allocating CPU memory for activations...{Fore.RESET}")
+    estimated_tokens = dataset_size * max_length
+    a1 = torch.empty((estimated_tokens, hidden_size), dtype=torch.bfloat16, device='cpu')
+    a2 = torch.empty((estimated_tokens, hidden_size), dtype=torch.bfloat16, device='cpu')
+    if use_accurate:
+        a3 = torch.empty((estimated_tokens, hidden_size), dtype=torch.bfloat16, device='cpu')
+    else:
+        a3 = None
+    
     # Collect activations
     print(f"\n{Fore.YELLOW}Collecting activations...{Fore.RESET}")
-    a1_list = []
-    a2_list = []
-    a3_list = []
+    cnt = 0
     
-    for batch_idx, batch in enumerate(tqdm(dataloader, desc="Gathering Activations")):
+    for batch_idx, batch in enumerate(tqdm(dataloader, desc="Gathering Activations", colour="green")):
         if batch_idx % 10 == 0:
-            print(f"  Processing batch {batch_idx}/{len(dataloader)}")
+            print(f"  Processing batch {batch_idx}/{len(dataloader)}, collected {cnt} tokens so far")
         
         inputs = tokenizer(
             batch,
@@ -274,43 +321,73 @@ def apply_spectral_transform(
         hidden_states = outputs.hidden_states[1:]
         hidden_states_mlp = mlp_activations[f'layer_{start_id - num_layer - 1}_mlp']
         
-        # Get relevant hidden states
-        h_mlp = hidden_states_mlp.view(-1, hidden_size)
-        h_in = hidden_states[start_id - num_layer - 1].view(-1, hidden_size)
-        h_out = hidden_states[end_id - num_layer - 1].view(-1, hidden_size)
+        # Get relevant hidden states and move to CPU immediately
+        h_mlp = hidden_states_mlp.view(-1, hidden_size).cpu().to(torch.bfloat16)
+        h_in = hidden_states[start_id - num_layer - 1].view(-1, hidden_size).cpu().to(torch.bfloat16)
+        h_out = hidden_states[end_id - num_layer - 1].view(-1, hidden_size).cpu().to(torch.bfloat16)
         
-        a1_list.append(h_mlp.cpu())
-        a2_list.append(h_out.cpu())
-        a3_list.append((h_in - h_mlp).cpu())
+        # Store in pre-allocated tensors
+        batch_size_actual = h_mlp.shape[0]
+        if cnt + batch_size_actual > estimated_tokens:
+            print(f"{Fore.YELLOW}Warning: Exceeding estimated tokens, stopping collection{Fore.RESET}")
+            break
+        
+        a1[cnt:cnt+batch_size_actual] = h_mlp
+        if use_accurate:
+            a2[cnt:cnt+batch_size_actual] = h_out
+            a3[cnt:cnt+batch_size_actual] = h_in - h_mlp
+        else:
+            a2[cnt:cnt+batch_size_actual] = h_out + h_mlp - h_in
+        
+        cnt += batch_size_actual
+        
+        # Clear GPU cache
+        del hidden_states_mlp, h_in, h_out
+        torch.cuda.empty_cache()
     
-    # Concatenate all batches
-    a1 = torch.cat(a1_list, dim=0)
-    a2 = torch.cat(a2_list, dim=0)
-    a3 = torch.cat(a3_list, dim=0)
+    # Trim to actual size
+    a1 = a1[:cnt]
+    a2 = a2[:cnt]
+    if use_accurate and a3 is not None:
+        a3 = a3[:cnt]
     
-    print(f"\nCollected activations shape: {a1.shape}")
+    print(f"\nCollected {cnt} activation vectors")
     
     # Remove hooks
     for hook in hooks:
         hook.remove()
     
-    # Clean up
+    # Clean up model
     del model
     gc.collect()
     torch.cuda.empty_cache()
     
     # Learn transformation
     print(f"\n{Fore.CYAN}Learning spectral regularized transform...{Fore.RESET}")
-    transform = spectral_regularized_transform(
+    
+    # Determine device for optimization
+    optim_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    if optim_device == 'cpu':
+        print(f"{Fore.YELLOW}Warning: Using CPU for optimization, this will be slow{Fore.RESET}")
+    
+    transform = spectral_regularized_transform_batched(
         a1, a2, a3,
         hidden_dim=hidden_size,
         epochs=epochs,
+        batch_size=optim_batch_size,
         spectral_weight=spectral_weight,
         condition_weight=condition_weight,
         orth_weight=orth_weight,
         use_residual=use_residual,
+        device=optim_device,
         debug=True
     )
+    
+    # Clean up activations
+    del a1, a2
+    if a3 is not None:
+        del a3
+    gc.collect()
     
     # Reload model and apply transformation
     print(f"\n{Fore.YELLOW}Applying transformation to model...{Fore.RESET}")
@@ -326,12 +403,14 @@ def apply_spectral_transform(
     
     # Apply transformation to down_proj
     original_weight = model.model.layers[start_id - num_layer - 1].mlp.down_proj.weight
-    new_weight = (transform.T.cpu() @ original_weight.to(torch.float64)).to(torch.bfloat16)
+    new_weight = (transform.T @ original_weight.to(torch.float64)).to(torch.bfloat16)
     
     # Stability check
     if torch.isnan(new_weight).any() or torch.isinf(new_weight).any():
         print(f"{Fore.RED}Warning: NaN/Inf detected in new weights, using original{Fore.RESET}")
         new_weight = original_weight
+    else:
+        print(f"{Fore.GREEN}Transformation applied successfully{Fore.RESET}")
     
     model.model.layers[start_id - num_layer - 1].mlp.down_proj.weight = nn.Parameter(new_weight)
     
@@ -339,15 +418,16 @@ def apply_spectral_transform(
     if save_path is None:
         if not os.path.exists('output_models'):
             os.mkdir('output_models')
-        save_path = f"output_models/{model_path.replace('/', '_')}_spectral_{start_id}_{end_id}"
+        save_path = f"output_models/{model_path.replace('/', '_')}_spectral_{start_id}_{end_id}_{dataset}_{dataset_size}"
     
+    save_path = save_path + "_spectral"
     model.save_pretrained(save_path)
     tokenizer.save_pretrained(save_path)
     
     print(f"\n{Fore.GREEN}Model saved to: {save_path}{Fore.RESET}")
     
-    # Clean up
-    del model, a1, a2, a3
+    # Final cleanup
+    del model, transform
     gc.collect()
     torch.cuda.empty_cache()
     

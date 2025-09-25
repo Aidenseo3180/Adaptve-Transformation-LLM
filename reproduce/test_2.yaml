@@ -17,7 +17,9 @@ spectral_weight: 0.01
 condition_weight: 0.001
 orth_weight: 0.0001
 use_residual: False
-epochs: 100
+epochs: 3
+optim_batch_size: 1024  # 최적화 시 배치 크기
+use_accurate: False 
 
 num_A: 1
 merge_consecutive: False
