@@ -5,7 +5,7 @@ dataset_column: "text"
 batch_size: 4
 max_length: 1024
 layers_to_skip: 8
-dataset_size: 4000
+dataset_size: 8000
 dataset_subset: "train"
 use_4bit: False
 save_path: null
