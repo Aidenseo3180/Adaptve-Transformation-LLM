@@ -102,6 +102,41 @@ def ReplaceMe_pipeline(config):
         # Update config for evaluation
         config["model_path"] = path
 
+    elif config["method"] == "spectral":
+        from .spectral_transform import apply_spectral_transform
+        
+        print(f"\n{Fore.MAGENTA}Running Spectral Regularized Transform method{Fore.RESET}")
+        
+        signature = inspect.signature(apply_spectral_transform)
+        filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
+        
+        # Load distances and select blocks
+        average_distances = torch.load(filtered_config['distances_path'], weights_only=False)
+        selected_blocks = select_non_overlapping_blocks(
+            average_distances,
+            filtered_config['layers_to_skip'],
+            num_blocks=filtered_config.get('num_A', 1),
+            merge_consecutive=filtered_config.get('merge_consecutive', False)
+        )
+        
+        print(f"Selected blocks for spectral transform: {selected_blocks}")
+        
+        # Process each block
+        start_ids = sorted([x[0] for x in selected_blocks])
+        end_ids = sorted([x[1] for x in selected_blocks])
+        num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
+        num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
+        
+        for i in range(len(selected_blocks)):
+            print(f"\n{Fore.CYAN}Processing block {i+1}/{len(selected_blocks)}{Fore.RESET}")
+            path = apply_spectral_transform(
+                **filtered_config,
+                start_id=start_ids[i],
+                end_id=end_ids[i],
+                num_layer=num_layers[i]
+            )
+            filtered_config["model_path"] = path
+
     else:
         raise ValueError(f"Unknown method: {config['method']}")
 

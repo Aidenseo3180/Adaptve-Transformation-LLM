@@ -35,7 +35,6 @@ def quantize_to_int8_symmetric(tensor: torch.Tensor) -> tuple[torch.Tensor, floa
     
     return dequantized.to(tensor.dtype), scale
 
-
 def quantize_linear_layer(layer: nn.Linear, bits: int = 8) -> Dict:
     """Quantize a linear layer's weights and return statistics."""
     stats = {
@@ -55,9 +54,10 @@ def quantize_linear_layer(layer: nn.Linear, bits: int = 8) -> Dict:
             layer.weight.data = quantized_weight
             
             # Store quantization metadata as buffers
+            # FIX 1: torch.tensor() warning 수정
             if not hasattr(layer, 'weight_scale'):
-                layer.register_buffer('weight_scale', torch.tensor(weight_scale))
-                layer.register_buffer('weight_bits', torch.tensor(bits))
+                layer.register_buffer('weight_scale', torch.tensor([weight_scale]))  # Use list
+                layer.register_buffer('weight_bits', torch.tensor([bits]))  # Use list
             
             # Keep bias at higher precision (bfloat16)
             if layer.bias is not None:
@@ -68,14 +68,13 @@ def quantize_linear_layer(layer: nn.Linear, bits: int = 8) -> Dict:
                 'quantized_std': layer.weight.data.std().item(),
                 'quantized_min': layer.weight.data.min().item(),
                 'quantized_max': layer.weight.data.max().item(),
-                'scale': weight_scale,
-                'bits': bits
+                'scale': float(weight_scale),  # FIX 2: Ensure it's float not tensor
+                'bits': int(bits)  # FIX 2: Ensure it's int not tensor
             })
         else:
             raise NotImplementedError(f"{bits}-bit quantization not implemented")
     
     return stats
-
 
 def apply_layer_quantization(
     model_path: str,
@@ -191,13 +190,13 @@ def apply_layer_quantization(
     # Save quantization metadata
     metadata = {
         "original_model": model_path,
-        "total_layers": total_layers,
+        "total_layers": int(total_layers),  # Ensure int
         "quantized_layers": sorted(layers_to_quantize),
         "num_quantized_layers": len(layers_to_quantize),
-        "quantization_bits": quantization_bits,
-        "compression_ratio": compression_ratio,
-        "memory_saved_percent": memory_saved,
-        "quantization_stats": all_stats
+        "quantization_bits": int(quantization_bits),  # Ensure int
+        "compression_ratio": float(compression_ratio),  # Ensure float
+        "memory_saved_percent": float(memory_saved),  # Ensure float
+        "quantization_stats": all_stats  # This should already be clean
     }
     
     with open(f"{save_path}/quantization_metadata.json", 'w') as f:
