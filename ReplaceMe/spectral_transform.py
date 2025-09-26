@@ -352,6 +352,21 @@ def apply_spectral_transform(
         a3 = a3[:cnt]
     
     print(f"\nCollected {cnt} activation vectors")
+
+    # 여기에 샘플링 코드 추가
+    max_tokens = 3000000  # 300만 토큰 제한
+    if cnt > max_tokens:
+        print(f"{Fore.YELLOW}Sampling {max_tokens} from {cnt} tokens...{Fore.RESET}")
+        # 랜덤 인덱스 생성
+        indices = torch.randperm(cnt)[:max_tokens]
+        # 샘플링
+        a1 = a1[indices]
+        a2 = a2[indices]
+        if use_accurate and a3 is not None:
+            a3 = a3[indices]
+        print(f"Sampled down to {a1.shape[0]} tokens")
+    else:
+        print(f"Using all {cnt} tokens (under {max_tokens} limit)")
     
     # Remove hooks
     for hook in hooks:
