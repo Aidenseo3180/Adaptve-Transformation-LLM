@@ -52,7 +52,7 @@ def spectral_regularized_transform_batched(
     a3: Optional[torch.Tensor] = None,
     hidden_dim: int = 4096,
     epochs: int = 100,
-    lr: float = 1e-3,
+    lr: float = 5e-4, #1e-3
     batch_size: int = 1024,
     spectral_weight: float = 0.01,
     condition_weight: float = 0.001,
