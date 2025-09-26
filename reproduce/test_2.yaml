@@ -13,11 +13,11 @@ min_distance_layer: 20
 distances_path: "distances.pth"
 
 # Spectral regularization specific parameters
-spectral_weight: 0.01
-condition_weight: 0.001
-orth_weight: 0.0001
+spectral_weight: 0.0
+condition_weight: 0.0
+orth_weight: 0.0
 use_residual: False
-epochs: 5
+epochs: 3
 optim_batch_size: 1024  # 최적화 시 배치 크기
 use_accurate: False 
 
