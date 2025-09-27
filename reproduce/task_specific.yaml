@@ -1,0 +1,18 @@
+# task_generation_config.yaml
+method: "task_specific"
+task_mode: "generation"  # "generation", "reasoning", or "balanced"
+model_path: "meta-llama/Meta-Llama-3-8B-Instruct"
+dataset: "Open-Orca/SlimOrca"
+dataset_column: "text"
+batch_size: 4
+max_length: 1024
+layers_to_skip: 8
+dataset_size: 4000
+dataset_subset: "train"
+distances_path: "distances.pth"
+epochs: 3
+optim_batch_size: 1024
+learning_rate: 0.001
+num_A: 1
+merge_consecutive: False
+use_accurate: False
