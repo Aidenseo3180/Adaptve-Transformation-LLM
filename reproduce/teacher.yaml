@@ -1,23 +1,23 @@
-# Teacher-Guided Transform Configuration
-method: "teacher_guided"  # Use teacher-guided transform
+# teacher_guided_pipeline.yaml
+method: "teacher_guided"
 model_path: "meta-llama/Meta-Llama-3-8B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
 batch_size: 8
 max_length: 1024
-layers_to_skip: 8  # Number of consecutive layers to remove
-dataset_size: 4000  # Can use smaller dataset since teacher signal is strong
+layers_to_skip: 8
+dataset_size: 4000
 dataset_subset: "train"
-use_4bit: False  # Enable 4-bit quantization to save memory
-save_path: null  # Will auto-generate if null
-min_distance_layer: null  # Not needed for teacher-guided
-save_transform_only: False
-distances_path: "distances.pth"  # Will compute if not provided
-num_A: 1  # Number of transform blocks (1 for single region)
-merge_consecutive: False  # Merge consecutive blocks if multiple
+use_4bit: True
+save_path: null
+min_distance_layer: 20
 
-# Teacher-guided specific parameters (optional, have defaults)
-# These are handled internally but can be overridden if needed:
-epochs: 5  # Training epochs for transform
-# learning_rate: 5e-5  # Learning rate for Adam optimizer
-# batch_size_train: 1024  # Batch size for transform training
+# Teacher-specific parameters
+teacher_weight: 0.3  # How much to weight teacher loss (0.0 to 1.0)
+lr: 0.0001            # Learning rate for optimization
+epochs: 5          # Number of optimization epochs
+
+# Block selection
+distances_path: "distances.pth"
+num_A: 1
+merge_consecutive: False

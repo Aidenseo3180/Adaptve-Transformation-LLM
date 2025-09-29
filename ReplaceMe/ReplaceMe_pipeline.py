@@ -137,49 +137,45 @@ def ReplaceMe_pipeline(config):
             )
             filtered_config["model_path"] = path
 
-    elif config["method"] == "teacher_guided":
-        from .teacher_guided_transform import teacher_guided_cosine_dist
 
-        print(f"{Fore.CYAN}Using Teacher-Guided Transform method{Fore.RESET}")
+    if config["method"] == "teacher_guided":
+        from .teacher_guided_replaceme import teacher_guided_replaceme
+
+        print(f"{Fore.MAGENTA}Using Teacher-Guided ReplaceMe method{Fore.RESET}")
         
-        # Import signature inspection
-        signature = inspect.signature(teacher_guided_cosine_dist)
+        signature = inspect.signature(profile_distances)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
-        # Load average distances and select non-overlapping blocks
-        print(f"{Fore.YELLOW}Loading distances from {filtered_config['distances_path']}{Fore.RESET}")
-        average_distances = torch.load(filtered_config['distances_path'], weights_only=False)
-        
-        # Select blocks to prune
+        # Load distances and select blocks
+        average_distances = torch.load(config['distances_path'], weights_only=False)
         selected_blocks = select_non_overlapping_blocks(
             average_distances,
-            filtered_config.get('layers_to_skip', 8),
-            num_blocks=filtered_config.get('num_A', 1),
-            merge_consecutive=filtered_config.get('merge_consecutive', True)
+            config['layers_to_skip'],
+            num_blocks=config.get('num_A', 1),
+            merge_consecutive=config.get('merge_consecutive', False)
         )
         
-        print(f"{Fore.GREEN}Selected blocks for pruning: {selected_blocks}{Fore.RESET}")
+        print(f"{Fore.YELLOW}[DEBUG] Selected blocks: {selected_blocks}{Fore.RESET}")
         
-        # Calculate start and end IDs, and number of layers
+        # Apply teacher-guided method to each block
         start_ids = sorted([x[0] for x in selected_blocks])
         end_ids = sorted([x[1] for x in selected_blocks])
         num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
         num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
         
-        # Apply teacher-guided transform to each selected block
         for i in range(len(selected_blocks)):
-            print(f"\n{Fore.CYAN}Processing block {i+1}/{len(selected_blocks)}: layers {start_ids[i]} to {end_ids[i]}{Fore.RESET}")
+            print(f"{Fore.CYAN}[DEBUG] Processing block {i+1}/{len(selected_blocks)}{Fore.RESET}")
             
-            # Call teacher-guided transform
-            path = teacher_guided_cosine_dist(
+            signature = inspect.signature(teacher_guided_replaceme)
+            filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
+            
+            path = teacher_guided_replaceme(
                 **filtered_config,
                 start_id=start_ids[i],
                 end_id=end_ids[i],
                 num_layer=num_layers[i]
             )
-            
-            # Update model path for next iteration (if multiple blocks)
-            filtered_config["model_path"] = path
+            config["model_path"] = path
 
     else:
         raise ValueError(f"Unknown method: {config['method']}")
