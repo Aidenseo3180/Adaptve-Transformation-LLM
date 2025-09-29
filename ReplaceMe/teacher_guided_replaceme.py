@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from colorama import Fore, init
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .utils import get_calib_dataloader, truncate_model, seed_all
 
@@ -21,29 +21,32 @@ logging.basicConfig(
 seed_all()
 
 
-def collect_teacher_activations(
+def collect_activations_minimal(
     model,
     tokenizer,
     dataloader,
     start_id: int,
     end_id: int,
+    num_layer: int,
     max_length: int,
     dataset_size: int,
-    device: str
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Collect activations from teacher model."""
+    is_teacher: bool = True
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Collect minimal activations following ReplaceMe pattern."""
     
-    print(f"{Fore.GREEN}[DEBUG] Collecting teacher activations from layers {start_id} to {end_id}{Fore.RESET}")
+    model_type = "Teacher" if is_teacher else "Pruned"
+    print(f"{Fore.GREEN}[DEBUG] Collecting {model_type} model activations{Fore.RESET}")
+    print(f"{Fore.YELLOW}[DEBUG] Layers: {start_id} to {end_id}, num_layer offset: {num_layer}{Fore.RESET}")
     
     hidden_size = model.config.hidden_size
-    num_samples = dataset_size * max_length
+    device = next(model.parameters()).device
     
-    # Initialize storage tensors on CPU to save GPU memory
-    teacher_mlp = torch.zeros((num_samples, hidden_size), dtype=torch.bfloat16, device='cpu')
-    teacher_attn = torch.zeros((num_samples, hidden_size), dtype=torch.bfloat16, device='cpu')
-    teacher_target = torch.zeros((num_samples, hidden_size), dtype=torch.bfloat16, device='cpu')
+    # Pre-allocate CPU tensors like ReplaceMe
+    total_samples = dataset_size * max_length
+    a1 = torch.empty((total_samples, hidden_size), dtype=torch.bfloat16, device='cpu')
+    a2 = torch.empty((total_samples, hidden_size), dtype=torch.bfloat16, device='cpu')
     
-    # Hook to capture MLP outputs
+    # Setup MLP hooks
     mlp_activations = {}
     
     def save_mlp_activation(name):
@@ -53,20 +56,22 @@ def collect_teacher_activations(
     
     # Register hooks
     hooks = []
-    if hasattr(model, 'transformer'):  # Falcon-style
+    if hasattr(model, 'transformer'):  # Falcon
         layers = model.transformer.h
-    else:  # LLaMA-style
+    else:  # LLaMA
         layers = model.model.layers
     
-    for i in range(len(layers)):
-        hook = layers[i].mlp.register_forward_hook(save_mlp_activation(f'layer_{i}_mlp'))
+    for i, layer in enumerate(layers):
+        hook = layer.mlp.register_forward_hook(save_mlp_activation(f'layer_{i}_mlp'))
         hooks.append(hook)
     
     cnt = 0
+    model.eval()
+    
     with torch.no_grad():
         for batch_idx, batch in enumerate(tqdm(
             dataloader,
-            desc=f"{Fore.BLUE}Teacher Forward Pass{Fore.RESET}",
+            desc=f"{Fore.BLUE}{model_type} Forward Pass{Fore.RESET}",
             dynamic_ncols=True
         )):
             inputs = tokenizer(
@@ -78,78 +83,93 @@ def collect_teacher_activations(
             )
             inputs = {k: v.to(device) for k, v in inputs.items()}
             
-            # Forward pass
             outputs = model(**inputs)
-            hidden_states = outputs.hidden_states[1:]  # Skip embedding layer
+            hidden_states = outputs.hidden_states[1:]  # Skip embedding
             
-            # Get activations for the specific layers
-            batch_size = inputs['input_ids'].shape[0]
-            seq_len = inputs['input_ids'].shape[1]
+            # Get the right layer indices
+            if is_teacher:
+                # For teacher: use original indices
+                mlp_idx = start_id - 1
+                hidden_i_idx = start_id - 1
+                hidden_n_idx = end_id - 1
+            else:
+                # For pruned: adjust for removed layers
+                mlp_idx = start_id - num_layer - 1
+                hidden_i_idx = start_id - num_layer - 1
+                hidden_n_idx = end_id - num_layer - 1
+            
+            # Extract activations
+            hidden_states_mlp = mlp_activations[f'layer_{mlp_idx}_mlp']
+            hidden_states_i = hidden_states[hidden_i_idx]
+            hidden_states_n = hidden_states[hidden_n_idx]
+            
+            # Reshape to (batch*seq_len, hidden_size)
+            batch_size, seq_len = inputs['input_ids'].shape
             actual_samples = batch_size * seq_len
             
-            # Extract MLP output at layer (start_id - 1)
-            mlp_out = mlp_activations[f'layer_{start_id-1}_mlp'].view(-1, hidden_size)
+            hidden_states_mlp = hidden_states_mlp.view(-1, hidden_size)
+            hidden_states_i = hidden_states_i.view(-1, hidden_size)
+            hidden_states_n = hidden_states_n.view(-1, hidden_size)
             
-            # Extract attention output (hidden_state - mlp_output) at layer (start_id - 1)
-            hidden_i = hidden_states[start_id-1].view(-1, hidden_size)
-            attn_out = hidden_i - mlp_out
+            # Store like ReplaceMe does
+            a1_batch = hidden_states_mlp
             
-            # Extract target: hidden state at layer (end_id - 1)
-            hidden_n = hidden_states[end_id-1].view(-1, hidden_size)
+            if is_teacher:
+                # For teacher: store the actual transformation
+                a2_batch = hidden_states_n
+            else:
+                # For pruned: store the target (like ReplaceMe)
+                a2_batch = hidden_states_n - hidden_states_i + hidden_states_mlp
             
-            # Store in CPU tensors
-            teacher_mlp[cnt:cnt+actual_samples] = mlp_out.cpu().to(torch.bfloat16)
-            teacher_attn[cnt:cnt+actual_samples] = attn_out.cpu().to(torch.bfloat16)
-            teacher_target[cnt:cnt+actual_samples] = hidden_n.cpu().to(torch.bfloat16)
+            # Move to CPU and store
+            a1[cnt:cnt+actual_samples] = a1_batch.cpu().to(torch.bfloat16)
+            a2[cnt:cnt+actual_samples] = a2_batch.cpu().to(torch.bfloat16)
             
             cnt += actual_samples
             
-            if batch_idx % 10 == 0:
-                print(f"{Fore.YELLOW}[DEBUG] Processed {cnt}/{num_samples} samples{Fore.RESET}")
-            
-            # Clear GPU cache periodically
+            # Periodic memory cleanup
             if batch_idx % 50 == 0:
                 torch.cuda.empty_cache()
+                print(f"{Fore.YELLOW}[DEBUG] Processed {cnt}/{total_samples} samples{Fore.RESET}")
     
     # Remove hooks
     for hook in hooks:
         hook.remove()
     
     # Trim to actual size
-    teacher_mlp = teacher_mlp[:cnt]
-    teacher_attn = teacher_attn[:cnt]
-    teacher_target = teacher_target[:cnt]
+    a1 = a1[:cnt]
+    a2 = a2[:cnt]
     
-    print(f"{Fore.GREEN}[DEBUG] Collected {cnt} teacher samples{Fore.RESET}")
-    print(f"{Fore.GREEN}[DEBUG] Teacher tensors shapes: mlp={teacher_mlp.shape}, attn={teacher_attn.shape}, target={teacher_target.shape}{Fore.RESET}")
+    print(f"{Fore.GREEN}[DEBUG] {model_type} collection complete: {cnt} samples{Fore.RESET}")
+    print(f"{Fore.YELLOW}[DEBUG] Shapes: a1={a1.shape}, a2={a2.shape}{Fore.RESET}")
     
-    return teacher_mlp, teacher_attn, teacher_target
+    return a1, a2
 
 
 def teacher_guided_adam_optimization(
-    pruned_mlp: torch.Tensor,
-    pruned_target: torch.Tensor,
-    teacher_mlp: torch.Tensor,
-    teacher_attn: torch.Tensor,
-    teacher_target: torch.Tensor,
+    pruned_a1: torch.Tensor,
+    pruned_a2: torch.Tensor,
+    teacher_a1: torch.Tensor,
+    teacher_a2: torch.Tensor,
     hidden_size: int,
     teacher_weight: float = 0.3,
     lr: float = 1e-4,
-    epochs: int = 10,
+    epochs: int = 5,
     batch_size: int = 1024
 ) -> torch.Tensor:
-    """Optimize T matrix using teacher guidance."""
+    """Optimize T using both teacher and pruned activations."""
     
-    print(f"{Fore.CYAN}[DEBUG] Starting teacher-guided optimization{Fore.RESET}")
-    print(f"{Fore.CYAN}[DEBUG] Teacher weight: {teacher_weight}, LR: {lr}, Epochs: {epochs}{Fore.RESET}")
+    print(f"{Fore.CYAN}[DEBUG] Starting optimization with teacher weight={teacher_weight}{Fore.RESET}")
     
-    # Initialize T as identity matrix
+    # Initialize T as identity
     T = torch.eye(hidden_size, dtype=torch.float32, requires_grad=True, device='cuda')
     optimizer = torch.optim.Adam([T], lr=lr)
     
-    # Create batches
-    num_samples = min(pruned_mlp.shape[0], teacher_mlp.shape[0])
+    # Use minimum size to handle mismatch
+    num_samples = min(pruned_a1.shape[0], teacher_a1.shape[0])
     num_batches = (num_samples + batch_size - 1) // batch_size
+    
+    print(f"{Fore.YELLOW}[DEBUG] Training samples: {num_samples}, Batches: {num_batches}{Fore.RESET}")
     
     best_loss = float('inf')
     best_T = T.clone()
@@ -168,41 +188,42 @@ def teacher_guided_adam_optimization(
             end_idx = min(start_idx + batch_size, num_samples)
             batch_indices = indices[start_idx:end_idx]
             
-            # Get batch data - ensure all on same device
-            p_mlp = pruned_mlp[batch_indices].to('cuda', dtype=torch.float32)
-            p_target = pruned_target[batch_indices].to('cuda', dtype=torch.float32)
-            
-            t_mlp = teacher_mlp[batch_indices].to('cuda', dtype=torch.float32)
-            t_attn = teacher_attn[batch_indices].to('cuda', dtype=torch.float32)
-            t_target = teacher_target[batch_indices].to('cuda', dtype=torch.float32)
+            # Get batch data and move to GPU
+            p_a1 = pruned_a1[batch_indices].to('cuda', dtype=torch.float32)
+            p_a2 = pruned_a2[batch_indices].to('cuda', dtype=torch.float32)
+            t_a1 = teacher_a1[batch_indices].to('cuda', dtype=torch.float32)
+            t_a2 = teacher_a2[batch_indices].to('cuda', dtype=torch.float32)
             
             optimizer.zero_grad()
             
             # Compute predictions
-            pruned_pred = p_mlp @ T
-            teacher_pred = t_mlp @ T + t_attn  # Add attention for teacher
+            pruned_pred = p_a1 @ T
             
-            # Compute cosine similarity losses
-            # Pruned model loss
+            # For teacher, we need to compute the difference
+            # Teacher a2 contains the full hidden state at layer n
+            # We need to extract what the transformation should be
+            teacher_pred = t_a1 @ T
+            
+            # Cosine similarity loss for pruned model
             pruned_pred_norm = F.normalize(pruned_pred, p=2, dim=1)
-            p_target_norm = F.normalize(p_target, p=2, dim=1)
-            pruned_loss = 1 - (pruned_pred_norm * p_target_norm).sum(dim=1).mean()
+            p_a2_norm = F.normalize(p_a2, p=2, dim=1)
+            pruned_loss = 1 - (pruned_pred_norm * p_a2_norm).sum(dim=1).mean()
             
-            # Teacher model loss
+            # Cosine similarity loss for teacher model
             teacher_pred_norm = F.normalize(teacher_pred, p=2, dim=1)
-            t_target_norm = F.normalize(t_target, p=2, dim=1)
-            teacher_loss = 1 - (teacher_pred_norm * t_target_norm).sum(dim=1).mean()
+            t_a2_norm = F.normalize(t_a2, p=2, dim=1)
+            teacher_loss = 1 - (teacher_pred_norm * t_a2_norm).sum(dim=1).mean()
             
             # Combined loss
             total_loss = (1 - teacher_weight) * pruned_loss + teacher_weight * teacher_loss
             
-            # Add L2 regularization
+            # Add small regularization to keep T close to identity
             reg_loss = 0.001 * torch.norm(T - torch.eye(hidden_size, device='cuda'), p='fro')
             total_loss = total_loss + reg_loss
             
             total_loss.backward()
             
-            # Gradient clipping
+            # Gradient clipping for stability
             torch.nn.utils.clip_grad_norm_([T], max_norm=1.0)
             
             optimizer.step()
@@ -213,18 +234,14 @@ def teacher_guided_adam_optimization(
             epoch_pruned_loss += pruned_loss.item()
             
             pbar.set_postfix({
-                'Total': f'{total_loss.item():.4f}',
+                'Loss': f'{total_loss.item():.4f}',
                 'Teacher': f'{teacher_loss.item():.4f}',
                 'Pruned': f'{pruned_loss.item():.4f}'
             })
         
-        # Epoch summary
         avg_loss = epoch_loss / num_batches
-        print(f"{Fore.GREEN}[DEBUG] Epoch {epoch+1} - Avg Loss: {avg_loss:.4f}, "
-              f"Teacher: {epoch_teacher_loss/num_batches:.4f}, "
-              f"Pruned: {epoch_pruned_loss/num_batches:.4f}{Fore.RESET}")
+        print(f"{Fore.GREEN}[DEBUG] Epoch {epoch+1} - Avg Loss: {avg_loss:.4f}{Fore.RESET}")
         
-        # Save best model
         if avg_loss < best_loss:
             best_loss = avg_loss
             best_T = T.clone()
@@ -249,113 +266,106 @@ def teacher_guided_replaceme(
     num_layer: int = 0,
     teacher_weight: float = 0.3,
     lr: float = 1e-4,
-    epochs: int = 10,
+    epochs: int = 5,
     token: Optional[str] = None,
-    distances_path: str = "./distances.pth",
-    num_A: int = 1,
-    merge_consecutive: bool = True,
     **kwargs
 ) -> str:
-    """Teacher-guided ReplaceMe implementation."""
+    """Teacher-guided ReplaceMe with sequential processing."""
     
     print(f"{Fore.MAGENTA}{'='*60}{Fore.RESET}")
-    print(f"{Fore.MAGENTA}Starting Teacher-Guided ReplaceMe{Fore.RESET}")
+    print(f"{Fore.MAGENTA}Teacher-Guided ReplaceMe (Sequential Mode){Fore.RESET}")
     print(f"{Fore.MAGENTA}Model: {model_path}{Fore.RESET}")
-    print(f"{Fore.MAGENTA}Layers to skip: {start_id} -> {end_id}{Fore.RESET}")
+    print(f"{Fore.MAGENTA}Skip layers: {start_id} to {end_id}{Fore.RESET}")
     print(f"{Fore.MAGENTA}Teacher weight: {teacher_weight}{Fore.RESET}")
+    print(f"{Fore.MAGENTA}4-bit mode: {use_4bit}{Fore.RESET}")
     print(f"{Fore.MAGENTA}{'='*60}{Fore.RESET}")
     
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"{Fore.YELLOW}[DEBUG] Using device: {device}{Fore.RESET}")
+    device_map = 'auto' if torch.cuda.is_available() else 'cpu'
     
-    # Quantization config
-    quantization_config = None
-    if use_4bit:
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16
-        )
-        print(f"{Fore.YELLOW}[DEBUG] Using 4-bit quantization{Fore.RESET}")
-    
-    # Load teacher model (original)
-    print(f"{Fore.CYAN}[STEP 1] Loading teacher model...{Fore.RESET}")
-    teacher_model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        device_map='auto' if device == 'cuda' else 'cpu',
-        quantization_config=quantization_config,
-        output_hidden_states=True,
-        torch_dtype=torch.bfloat16,
-        token=token
-    )
-    teacher_model.eval()
-    
-    # Load tokenizer
+    # Load tokenizer once
     tokenizer = AutoTokenizer.from_pretrained(model_path, token=token)
     if not tokenizer.pad_token:
         tokenizer.pad_token = tokenizer.eos_token
     
-    hidden_size = teacher_model.config.hidden_size
-    print(f"{Fore.YELLOW}[DEBUG] Hidden size: {hidden_size}{Fore.RESET}")
-    
-    # Get dataloader
+    # Get dataloader once
     dataloader = get_calib_dataloader(
         dataset, dataset_subset, dataset_column,
         dataset_size, batch_size, tokenizer
     )
     
-    # Collect teacher activations
-    print(f"{Fore.CYAN}[STEP 2] Collecting teacher activations...{Fore.RESET}")
-    teacher_mlp, teacher_attn, teacher_target = collect_teacher_activations(
-        teacher_model, tokenizer, dataloader,
-        start_id, end_id, max_length, dataset_size, device
+    # ========== PHASE 1: Teacher Model ==========
+    print(f"{Fore.CYAN}[PHASE 1] Processing Teacher Model{Fore.RESET}")
+    
+    teacher_model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        device_map=device_map,
+        torch_dtype=torch.bfloat16,
+        output_hidden_states=True,
+        token=token
     )
     
-    # Clear teacher model from memory
+    hidden_size = teacher_model.config.hidden_size
+    print(f"{Fore.YELLOW}[DEBUG] Model loaded, hidden_size={hidden_size}{Fore.RESET}")
+    
+    # Collect teacher activations
+    teacher_a1, teacher_a2 = collect_activations_minimal(
+        teacher_model, tokenizer, dataloader,
+        start_id, end_id, num_layer, max_length, dataset_size,
+        is_teacher=True
+    )
+    
+    # Clear teacher model
     del teacher_model
     gc.collect()
     torch.cuda.empty_cache()
-    print(f"{Fore.YELLOW}[DEBUG] Teacher model cleared from memory{Fore.RESET}")
+    print(f"{Fore.GREEN}[PHASE 1] Complete - Teacher model cleared{Fore.RESET}")
     
-    # Load pruned model
-    print(f"{Fore.CYAN}[STEP 3] Loading pruned model...{Fore.RESET}")
+    # ========== PHASE 2: Pruned Model ==========
+    print(f"{Fore.CYAN}[PHASE 2] Processing Pruned Model{Fore.RESET}")
+    
     pruned_model = AutoModelForCausalLM.from_pretrained(
         model_path,
-        device_map='auto' if device == 'cuda' else 'cpu',
-        quantization_config=quantization_config,
-        output_hidden_states=True,
+        device_map=device_map,
         torch_dtype=torch.bfloat16,
+        output_hidden_states=True,
         token=token
     )
     
     # Truncate model
     pruned_model = truncate_model(pruned_model, start_id, end_id)
-    pruned_model.eval()
     print(f"{Fore.YELLOW}[DEBUG] Model truncated: removed layers {start_id} to {end_id-1}{Fore.RESET}")
     
-    # Collect pruned model activations
-    print(f"{Fore.CYAN}[STEP 4] Collecting pruned model activations...{Fore.RESET}")
-    pruned_mlp, _, pruned_target = collect_teacher_activations(
+    # Collect pruned activations
+    pruned_a1, pruned_a2 = collect_activations_minimal(
         pruned_model, tokenizer, dataloader,
-        start_id - num_layer, end_id - num_layer, max_length, dataset_size, device
+        start_id, end_id, num_layer, max_length, dataset_size,
+        is_teacher=False
     )
     
-    # Clear pruned model for optimization
+    # Clear pruned model
     del pruned_model
     gc.collect()
     torch.cuda.empty_cache()
+    print(f"{Fore.GREEN}[PHASE 2] Complete - Pruned model cleared{Fore.RESET}")
     
-    # Optimize T matrix
-    print(f"{Fore.CYAN}[STEP 5] Optimizing transformation matrix...{Fore.RESET}")
+    # ========== PHASE 3: Optimization ==========
+    print(f"{Fore.CYAN}[PHASE 3] Optimizing Transformation Matrix{Fore.RESET}")
+    
     T_optimal = teacher_guided_adam_optimization(
-        pruned_mlp, pruned_target,
-        teacher_mlp, teacher_attn, teacher_target,
+        pruned_a1, pruned_a2,
+        teacher_a1, teacher_a2,
         hidden_size, teacher_weight, lr, epochs, batch_size
     )
     
-    # Load model again for final transformation
-    print(f"{Fore.CYAN}[STEP 6] Applying transformation to final model...{Fore.RESET}")
+    print(f"{Fore.GREEN}[PHASE 3] Complete - T matrix optimized{Fore.RESET}")
+    
+    # Clear activation tensors
+    del teacher_a1, teacher_a2, pruned_a1, pruned_a2
+    gc.collect()
+    
+    # ========== PHASE 4: Apply Transformation ==========
+    print(f"{Fore.CYAN}[PHASE 4] Applying Transformation to Final Model{Fore.RESET}")
+    
     final_model = AutoModelForCausalLM.from_pretrained(
         model_path,
         device_map='cpu',
@@ -365,12 +375,11 @@ def teacher_guided_replaceme(
     final_model = truncate_model(final_model, start_id, end_id)
     
     # Apply transformation
-    if hasattr(final_model, 'model'):  # LLaMA-style
+    if hasattr(final_model, 'model'):  # LLaMA
         layer = final_model.model.layers[start_id - num_layer - 1]
-    else:  # Falcon-style
+    else:  # Falcon
         layer = final_model.transformer.h[start_id - num_layer - 1]
     
-    # Update MLP down projection
     old_weight = layer.mlp.down_proj.weight.data.to(torch.float64)
     new_weight = (T_optimal.T @ old_weight).to(torch.bfloat16)
     layer.mlp.down_proj.weight.data = new_weight
@@ -381,14 +390,19 @@ def teacher_guided_replaceme(
     if save_path is None:
         if not os.path.exists('output_models'):
             os.makedirs('output_models')
-        save_path = f"output_models/{model_path.replace('/', '_')}_teacher_guided_{layers_to_skip}layers"
+        save_path = f"output_models/{model_path.replace('/', '_')}_teacher_guided_{layers_to_skip}layers_{start_id}_{end_id}"
     
-    save_path = f"{save_path}_w{teacher_weight}"
+    save_path = f"{save_path}_tw{teacher_weight}"
     final_model.save_pretrained(save_path)
     tokenizer.save_pretrained(save_path)
     
     # Save transformation matrix
-    torch.save(T_optimal, f"{save_path}/transform.pt")
+    torch.save({
+        'transform': T_optimal,
+        'teacher_weight': teacher_weight,
+        'start_id': start_id,
+        'end_id': end_id
+    }, f"{save_path}/transform_info.pt")
     
     print(f"{Fore.GREEN}[SUCCESS] Model saved to {save_path}{Fore.RESET}")
     print(f"{Fore.MAGENTA}{'='*60}{Fore.RESET}")
