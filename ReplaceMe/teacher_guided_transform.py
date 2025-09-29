@@ -74,6 +74,17 @@ def collect_teacher_signals(
     model.eval()
     hidden_size = model.config.hidden_size
     
+    # Debug: Check hidden states structure
+    print(f"{Fore.YELLOW}Verifying hidden states indexing...{Fore.RESET}")
+    with torch.no_grad():
+        dummy_input = torch.randint(0, 1000, (1, 10)).to(model.device)
+        dummy_output = model(dummy_input, output_hidden_states=True)
+        print(f"  Number of hidden states: {len(dummy_output.hidden_states)}")
+        print(f"  Model layers: {model.config.num_hidden_layers}")
+        print(f"  Hidden states[0] shape (embedding): {dummy_output.hidden_states[0].shape}")
+        print(f"  Hidden states[1] shape (layer 0 output): {dummy_output.hidden_states[1].shape}")
+        del dummy_output
+    
     # Setup hooks to capture MLP outputs
     mlp_activations = {}
     
@@ -122,14 +133,28 @@ def collect_teacher_signals(
             outputs = model(**inputs, output_hidden_states=True)
             hidden_states = outputs.hidden_states  # List of hidden states from each layer
             
-            # Get MLP output from layer before start_id
+            # IMPORTANT: hidden_states[0] is embedding, hidden_states[i+1] is output of layer i
+            # So for layer i output, we need hidden_states[i+1]
+            
+            # Get MLP output from layer (start_id - 1)
+            # This is the layer whose down_proj we'll modify
             mlp_out = mlp_activations[f'layer_{start_id - 1}_mlp']
             
-            # Get input to start_id layer (includes attention residual)
-            teacher_input = hidden_states[start_id]
+            # Get input to start_id layer
+            # This is the output of layer (start_id - 1) INCLUDING residuals
+            teacher_input = hidden_states[start_id]  # Output of layer start_id-1
             
-            # Get output from end_id layer
-            teacher_output = hidden_states[end_id + 1]
+            # Get output from end_id layer  
+            # We want the output AFTER layer end_id
+            teacher_output = hidden_states[end_id + 1]  # Output of layer end_id
+            
+            # Debug first batch
+            if batch_idx == 0:
+                print(f"  Layer {start_id-1} MLP output shape: {mlp_out.shape}")
+                print(f"  Layer {start_id} input shape: {teacher_input.shape}")
+                print(f"  Layer {end_id} output shape: {teacher_output.shape}")
+                residual_check = teacher_output - teacher_input
+                print(f"  Residual norm (sample): {torch.norm(residual_check[0,0,:]).item():.4f}")
             
             # Apply attention mask to ignore padding tokens
             b, s, h = mlp_out.shape
@@ -185,9 +210,9 @@ def learn_teacher_guided_transform(
     teacher_inputs: torch.Tensor,
     teacher_outputs: torch.Tensor,
     hidden_size: int,
-    epochs: int = 20,
+    epochs: int = 5,
     batch_size: int = 1024,
-    lr: float = 5e-5
+    lr: float = 1e-4  # Increased from 5e-5
 ) -> torch.Tensor:
     """
     Learn transform T that makes layer predictions match teacher outputs.
@@ -198,11 +223,21 @@ def learn_teacher_guided_transform(
     print(f"  Batch size: {batch_size}")
     print(f"  Learning rate: {lr}")
     
+    # Data validation/debugging
+    print(f"\n{Fore.YELLOW}Data Statistics:{Fore.RESET}")
+    print(f"  MLP outputs norm: {torch.norm(mlp_outputs).item():.2f}")
+    print(f"  Teacher inputs norm: {torch.norm(teacher_inputs).item():.2f}")
+    print(f"  Teacher outputs norm: {torch.norm(teacher_outputs).item():.2f}")
+    residual = teacher_outputs - teacher_inputs
+    print(f"  Residual norm: {torch.norm(residual).item():.2f}")
+    print(f"  Residual mean: {residual.mean().item():.4f}")
+    print(f"  Residual std: {residual.std().item():.4f}")
+    
     # Move to appropriate device
     compute_device = device if torch.cuda.is_available() else torch.device('cpu')
     
-    # Initialize transform with least squares solution
-    print(f"{Fore.YELLOW}Computing initial transform with least squares...{Fore.RESET}")
+    # Initialize transform with improved strategy
+    print(f"{Fore.YELLOW}Computing initial transform...{Fore.RESET}")
     try:
         # Target: what layers 20-23 add to the representation
         residual_target = teacher_outputs - teacher_inputs
@@ -211,18 +246,31 @@ def learn_teacher_guided_transform(
         XtX = mlp_outputs.T @ mlp_outputs
         XtY = mlp_outputs.T @ residual_target
         reg = 1e-4 * torch.trace(XtX) / hidden_size * torch.eye(hidden_size)
-        T_init = torch.linalg.solve(XtX + reg, XtY)
-        print(f"{Fore.GREEN}Least squares initialization successful{Fore.RESET}")
+        T_lstsq = torch.linalg.solve(XtX + reg, XtY)
+        
+        # Improved initialization: blend with identity
+        T_init = 0.9 * torch.eye(hidden_size) + 0.1 * T_lstsq
+        print(f"{Fore.GREEN}Hybrid initialization successful (90% identity + 10% lstsq){Fore.RESET}")
     except Exception as e:
-        print(f"{Fore.RED}Least squares failed: {e}, using identity init{Fore.RESET}")
-        T_init = torch.eye(hidden_size)
+        print(f"{Fore.RED}Least squares failed: {e}, using scaled identity{Fore.RESET}")
+        T_init = 0.95 * torch.eye(hidden_size)
     
     # Move to device and enable gradients
     T = T_init.to(compute_device).requires_grad_(True)
     
-    # Optimizer and scheduler
+    # Optimizer with warmup
     optimizer = Adam([T], lr=lr)
-    scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
+    
+    # Use warmup + cosine annealing for better convergence
+    def get_lr(epoch):
+        warmup_epochs = 3
+        if epoch < warmup_epochs:
+            return lr * (epoch + 1) / warmup_epochs
+        else:
+            progress = (epoch - warmup_epochs) / (epochs - warmup_epochs)
+            return lr * (1 + np.cos(np.pi * progress)) / 2
+    
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda epoch: get_lr(epoch) / lr)
     
     # Create dataset and dataloader
     dataset = TeacherGuidedDataset(mlp_outputs, teacher_inputs, teacher_outputs)
@@ -252,35 +300,17 @@ def learn_teacher_guided_transform(
             
             optimizer.zero_grad()
             
-            # Apply transform
-            transformed = batch_mlp @ T
+            # Simple teacher loss
+            # Target: what the removed layers should produce
+            target_residual = batch_output - batch_input
             
-            # Predict output after layers
-            predicted_output = batch_input + transformed
+            # What our transform produces
+            predicted_residual = batch_mlp @ T
             
-            # Loss 1: Output matching (main objective)
-            output_norm = F.normalize(predicted_output, dim=-1)
-            teacher_norm = F.normalize(batch_output, dim=-1)
-            loss_output = 1 - (output_norm * teacher_norm).sum(-1).mean()
-            
-            # Loss 2: Residual matching
-            actual_residual = batch_output - batch_input
-            residual_norm = F.normalize(transformed, dim=-1)
-            actual_residual_norm = F.normalize(actual_residual, dim=-1)
-            loss_residual = 1 - (residual_norm * actual_residual_norm).sum(-1).mean()
-            
-            # Loss 3: Magnitude preservation (softer constraint)
-            pred_magnitude = torch.norm(predicted_output, dim=-1)
-            teacher_magnitude = torch.norm(batch_output, dim=-1)
-            magnitude_ratio = pred_magnitude / (teacher_magnitude + 1e-8)
-            loss_magnitude = (magnitude_ratio - 1).abs().mean()
-            
-            # Combined loss with weights
-            total_loss = (
-                0.5 * loss_output +     # Primary objective
-                0.3 * loss_residual +   # Residual accuracy
-                0.2 * loss_magnitude * 0.1  # Soft magnitude constraint
-            )
+            # Simple cosine similarity loss (like original ReplaceMe)
+            pred_norm = F.normalize(predicted_residual, dim=-1)
+            target_norm = F.normalize(target_residual, dim=-1)
+            total_loss = 1 - (pred_norm * target_norm).sum(-1).mean()
             
             # Backward pass
             total_loss.backward()

@@ -146,16 +146,6 @@ def ReplaceMe_pipeline(config):
         signature = inspect.signature(teacher_guided_cosine_dist)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
-        # Check if distances_path exists, if not compute it
-        if config.get('distances_path') is None or not os.path.exists(config.get('distances_path', '')):
-            print(f"{Fore.YELLOW}Computing layer distances...{Fore.RESET}")
-            # Profile distances using filtered configuration
-            dist_signature = inspect.signature(profile_distances)
-            dist_config = {k: v for k, v in config.items() if k in dist_signature.parameters}
-            profile_distances(**dist_config)
-            config['distances_path'] = "./distances.pth"
-            filtered_config['distances_path'] = "./distances.pth"
-        
         # Load average distances and select non-overlapping blocks
         print(f"{Fore.YELLOW}Loading distances from {filtered_config['distances_path']}{Fore.RESET}")
         average_distances = torch.load(filtered_config['distances_path'], weights_only=False)
@@ -190,10 +180,6 @@ def ReplaceMe_pipeline(config):
             
             # Update model path for next iteration (if multiple blocks)
             filtered_config["model_path"] = path
-            
-        # Store final path
-        final_model_path = path
-
 
     else:
         raise ValueError(f"Unknown method: {config['method']}")
