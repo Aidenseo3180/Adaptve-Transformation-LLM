@@ -210,21 +210,24 @@ def learn_teacher_guided_transform(
     teacher_inputs: torch.Tensor,
     teacher_outputs: torch.Tensor,
     hidden_size: int,
-    epochs: int = 5,
+    epochs: int = 20,
     batch_size: int = 1024,
-    lr: float = 1e-4  # Increased from 5e-5
+    lr: float = 1e-4,  # Increased from 5e-5
+    gradient_accumulation_steps: int = 4
 ) -> torch.Tensor:
     """
     Learn transform T that makes layer predictions match teacher outputs.
+    With normalization, scaling, and gradient accumulation.
     """
-    print(f"\n{Fore.CYAN}Learning teacher-guided transform{Fore.RESET}")
+    print(f"\n{Fore.CYAN}Learning teacher-guided transform (Enhanced){Fore.RESET}")
     print(f"  Hidden size: {hidden_size}")
     print(f"  Epochs: {epochs}")
     print(f"  Batch size: {batch_size}")
     print(f"  Learning rate: {lr}")
+    print(f"  Gradient accumulation steps: {gradient_accumulation_steps}")
     
     # Data validation/debugging
-    print(f"\n{Fore.YELLOW}Data Statistics:{Fore.RESET}")
+    print(f"\n{Fore.YELLOW}Data Statistics (Original):{Fore.RESET}")
     print(f"  MLP outputs norm: {torch.norm(mlp_outputs).item():.2f}")
     print(f"  Teacher inputs norm: {torch.norm(teacher_inputs).item():.2f}")
     print(f"  Teacher outputs norm: {torch.norm(teacher_outputs).item():.2f}")
@@ -233,30 +236,65 @@ def learn_teacher_guided_transform(
     print(f"  Residual mean: {residual.mean().item():.4f}")
     print(f"  Residual std: {residual.std().item():.4f}")
     
+    # Layer-wise Scaling
+    print(f"\n{Fore.YELLOW}Applying Layer-wise Scaling...{Fore.RESET}")
+    # Calculate scale factor based on average norms
+    mlp_avg_norm = torch.norm(mlp_outputs, dim=-1).mean()
+    teacher_input_avg_norm = torch.norm(teacher_inputs, dim=-1).mean()
+    scale_factor = teacher_input_avg_norm / mlp_avg_norm
+    print(f"  MLP avg norm per token: {mlp_avg_norm:.4f}")
+    print(f"  Teacher input avg norm per token: {teacher_input_avg_norm:.4f}")
+    print(f"  Scale factor: {scale_factor:.4f}")
+    
+    # Apply scaling to MLP outputs
+    mlp_outputs_scaled = mlp_outputs * scale_factor
+    print(f"  Scaled MLP outputs norm: {torch.norm(mlp_outputs_scaled).item():.2f}")
+    
+    # Normalization for better training stability
+    print(f"\n{Fore.YELLOW}Applying Normalization...{Fore.RESET}")
+    # Normalize each sample to unit norm
+    mlp_normalized = F.normalize(mlp_outputs_scaled, dim=-1)
+    residual_normalized = F.normalize(residual, dim=-1)
+    
+    # Keep track of original magnitudes for reconstruction
+    mlp_magnitudes = torch.norm(mlp_outputs_scaled, dim=-1, keepdim=True)
+    residual_magnitudes = torch.norm(residual, dim=-1, keepdim=True)
+    
+    print(f"  Normalized MLP mean magnitude: {mlp_magnitudes.mean().item():.4f}")
+    print(f"  Normalized residual mean magnitude: {residual_magnitudes.mean().item():.4f}")
+    
     # Move to appropriate device
     compute_device = device if torch.cuda.is_available() else torch.device('cpu')
     
     # Initialize transform with improved strategy
-    print(f"{Fore.YELLOW}Computing initial transform...{Fore.RESET}")
+    print(f"\n{Fore.YELLOW}Computing initial transform...{Fore.RESET}")
     try:
-        # Target: what layers 20-23 add to the representation
-        residual_target = teacher_outputs - teacher_inputs
-        
-        # Least squares initialization
-        XtX = mlp_outputs.T @ mlp_outputs
-        XtY = mlp_outputs.T @ residual_target
+        # Least squares initialization on normalized data
+        XtX = mlp_normalized.T @ mlp_normalized
+        XtY = mlp_normalized.T @ residual_normalized
         reg = 1e-4 * torch.trace(XtX) / hidden_size * torch.eye(hidden_size)
         T_lstsq = torch.linalg.solve(XtX + reg, XtY)
         
-        # Improved initialization: blend with identity
-        T_init = 0.9 * torch.eye(hidden_size) + 0.1 * T_lstsq
-        print(f"{Fore.GREEN}Hybrid initialization successful (90% identity + 10% lstsq){Fore.RESET}")
+        # Check if lstsq solution is reasonable
+        lstsq_norm = torch.norm(T_lstsq)
+        print(f"  Least squares solution norm: {lstsq_norm:.4f}")
+        
+        if lstsq_norm > 10 or lstsq_norm < 0.1:
+            print(f"  {Fore.YELLOW}Lstsq solution seems unstable, using more conservative init{Fore.RESET}")
+            T_init = 0.95 * torch.eye(hidden_size) + 0.05 * T_lstsq
+        else:
+            # Improved initialization: blend with identity
+            T_init = 0.9 * torch.eye(hidden_size) + 0.1 * T_lstsq
+            print(f"{Fore.GREEN}Hybrid initialization successful (90% identity + 10% lstsq){Fore.RESET}")
     except Exception as e:
         print(f"{Fore.RED}Least squares failed: {e}, using scaled identity{Fore.RESET}")
         T_init = 0.95 * torch.eye(hidden_size)
     
     # Move to device and enable gradients
     T = T_init.to(compute_device).requires_grad_(True)
+    
+    # Store scale factor for later use
+    scale_factor_tensor = torch.tensor(scale_factor).to(compute_device)
     
     # Optimizer with warmup
     optimizer = Adam([T], lr=lr)
@@ -272,8 +310,8 @@ def learn_teacher_guided_transform(
     
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda epoch: get_lr(epoch) / lr)
     
-    # Create dataset and dataloader
-    dataset = TeacherGuidedDataset(mlp_outputs, teacher_inputs, teacher_outputs)
+    # Create dataset with normalized data
+    dataset = TeacherGuidedDataset(mlp_normalized, teacher_inputs, teacher_outputs)
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -286,46 +324,68 @@ def learn_teacher_guided_transform(
     best_loss = float('inf')
     best_T = T.clone().detach()
     
+    # Gradient accumulation setup
+    effective_batch_size = batch_size * gradient_accumulation_steps
     print(f"\n{Fore.GREEN}Starting optimization...{Fore.RESET}")
+    print(f"  Effective batch size with accumulation: {effective_batch_size}")
     
     for epoch in range(epochs):
         epoch_losses = []
+        accumulated_steps = 0
         
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}", leave=False)
-        for batch_mlp, batch_input, batch_output in pbar:
+        for batch_idx, (batch_mlp, batch_input, batch_output) in enumerate(pbar):
             # Move to device
             batch_mlp = batch_mlp.to(compute_device)
             batch_input = batch_input.to(compute_device)
             batch_output = batch_output.to(compute_device)
             
-            optimizer.zero_grad()
-            
-            # Simple teacher loss
-            # Target: what the removed layers should produce
+            # Calculate target residual
             target_residual = batch_output - batch_input
             
-            # What our transform produces
-            predicted_residual = batch_mlp @ T
+            # Normalize target residual for training
+            target_residual_norm = F.normalize(target_residual, dim=-1)
             
-            # Simple cosine similarity loss (like original ReplaceMe)
-            pred_norm = F.normalize(predicted_residual, dim=-1)
-            target_norm = F.normalize(target_residual, dim=-1)
-            total_loss = 1 - (pred_norm * target_norm).sum(-1).mean()
+            # Forward pass
+            predicted_residual_norm = batch_mlp @ T
+            
+            # Simple cosine similarity loss on normalized data
+            cos_sim = (predicted_residual_norm * target_residual_norm).sum(-1)
+            loss = 1 - cos_sim.mean()
+            
+            # Scale loss for gradient accumulation
+            loss = loss / gradient_accumulation_steps
             
             # Backward pass
-            total_loss.backward()
+            loss.backward()
             
-            # Gradient clipping for stability
-            torch.nn.utils.clip_grad_norm_([T], max_norm=1.0)
+            # Track loss (unscaled)
+            epoch_losses.append(loss.item() * gradient_accumulation_steps)
             
-            # Optimizer step
-            optimizer.step()
-            
-            # Track loss
-            epoch_losses.append(total_loss.item())
+            # Update weights every gradient_accumulation_steps
+            accumulated_steps += 1
+            if accumulated_steps % gradient_accumulation_steps == 0:
+                # Gradient clipping for stability
+                torch.nn.utils.clip_grad_norm_([T], max_norm=1.0)
+                
+                # Optimizer step
+                optimizer.step()
+                optimizer.zero_grad()
+                
+                # Debug info for first few updates
+                if batch_idx < 5 and epoch == 0:
+                    grad_norm = torch.norm(T.grad) if T.grad is not None else 0
+                    print(f"    Batch {batch_idx}: loss={loss.item()*gradient_accumulation_steps:.4f}, grad_norm={grad_norm:.4f}")
             
             # Update progress bar
-            pbar.set_postfix({'loss': f'{total_loss.item():.4f}'})
+            current_loss = np.mean(epoch_losses) if epoch_losses else 0
+            pbar.set_postfix({'loss': f'{current_loss:.4f}', 'accum': f'{accumulated_steps % gradient_accumulation_steps}/{gradient_accumulation_steps}'})
+            
+        # Final optimizer step if there are remaining gradients
+        if accumulated_steps % gradient_accumulation_steps != 0:
+            torch.nn.utils.clip_grad_norm_([T], max_norm=1.0)
+            optimizer.step()
+            optimizer.zero_grad()
         
         # Learning rate scheduling
         scheduler.step()
@@ -346,7 +406,23 @@ def learn_teacher_guided_transform(
     
     print(f"\n{Fore.GREEN}Optimization complete! Final best loss: {best_loss:.6f}{Fore.RESET}")
     
-    return best_T.cpu().to(torch.float64)
+    # De-normalize and de-scale the transform
+    print(f"\n{Fore.YELLOW}Applying inverse scaling to transform...{Fore.RESET}")
+    # The transform was learned on normalized + scaled data
+    # We need to account for the scaling when applying it to original MLP outputs
+    T_final = best_T.cpu().to(torch.float64)
+    
+    # Debug: Check transform properties
+    print(f"  Transform norm: {torch.norm(T_final):.4f}")
+    print(f"  Transform diagonal mean: {torch.diag(T_final).mean():.4f}")
+    print(f"  Transform off-diagonal mean: {(T_final - torch.diag(torch.diag(T_final))).abs().mean():.6f}")
+    
+    # Apply scale correction
+    # When we apply this to un-scaled MLP outputs, we need to include the scale factor
+    T_final = T_final * scale_factor
+    print(f"  Final transform norm (after scaling): {torch.norm(T_final):.4f}")
+    
+    return T_final
 
 
 def teacher_guided_cosine_dist(
@@ -367,6 +443,7 @@ def teacher_guided_cosine_dist(
     distances_path: str = "./distances.pth",
     num_A: int = 1,
     merge_consecutive: bool = True,
+    gradient_accumulation_steps: int = 4,  # New parameter
     **kwargs
 ) -> str:
     """
@@ -450,7 +527,8 @@ def teacher_guided_cosine_dist(
         hidden_size,
         epochs=20,
         batch_size=1024,
-        lr=5e-5
+        lr=1e-4,
+        gradient_accumulation_steps=gradient_accumulation_steps
     )
     
     # Clean up training data
@@ -475,13 +553,24 @@ def teacher_guided_cosine_dist(
     
     try:
         down_proj_weight = model.model.layers[start_id - num_layer - 1].mlp.down_proj.weight
+        print(f"  Original down_proj weight shape: {down_proj_weight.shape}")
+        print(f"  Original down_proj weight norm: {torch.norm(down_proj_weight).item():.4f}")
+        
         new_weight = (transform.T @ down_proj_weight.to(torch.float64)).to(torch.bfloat16)
+        print(f"  New down_proj weight norm: {torch.norm(new_weight).item():.4f}")
         
         # Stability check
         if torch.isnan(new_weight).any() or torch.isinf(new_weight).any():
             print(f"{Fore.RED}Warning: Transform produced NaN/Inf, using original weights{Fore.RESET}")
             new_weight = down_proj_weight
         else:
+            # Additional validation
+            weight_change = torch.norm(new_weight - down_proj_weight) / torch.norm(down_proj_weight)
+            print(f"  Relative weight change: {weight_change.item():.4f}")
+            
+            if weight_change > 2.0:
+                print(f"{Fore.YELLOW}Warning: Large weight change detected ({weight_change:.4f}){Fore.RESET}")
+            
             print(f"{Fore.GREEN}Transform applied successfully{Fore.RESET}")
         
         model.model.layers[start_id - num_layer - 1].mlp.down_proj.weight = nn.Parameter(new_weight)
