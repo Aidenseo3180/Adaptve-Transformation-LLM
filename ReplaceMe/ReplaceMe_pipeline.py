@@ -30,10 +30,10 @@ def ReplaceMe_pipeline(config):
     # Extract the relevant parameters based on function signatures
     signature = inspect.signature(profile_distances)
     filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-    if config['distances_path'] is None:
-        # Profile distances using filtered configuration
-        profile_distances(**filtered_config)
-        config['distances_path'] = "./distances.pth"
+    # if config['distances_path'] is None:
+    #     # Profile distances using filtered configuration
+    #     profile_distances(**filtered_config)
+    #     config['distances_path'] = "./distances.pth"
 
     if config["method"] == "cosine":  # Original cosine/adam methods
         signature = inspect.signature(cosine_dist)
@@ -137,45 +137,19 @@ def ReplaceMe_pipeline(config):
             )
             filtered_config["model_path"] = path
 
+    elif config["method"] == "adaptive_kernel":  # 새로운 방법 추가
+        from .adaptive_kernel_replacement import adaptive_kernel_replacement
 
-    if config["method"] == "teacher_guided":
-        from .teacher_guided_replaceme import teacher_guided_replaceme
-
-        print(f"{Fore.MAGENTA}Using Teacher-Guided ReplaceMe method{Fore.RESET}")
+        print(f"\n{Fore.GREEN}[INFO] Using Adaptive Kernel Network method{Fore.RESET}")
         
-        signature = inspect.signature(profile_distances)
+        # Get function signature for filtering config
+        signature = inspect.signature(adaptive_kernel_replacement)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
-        # Load distances and select blocks
-        average_distances = torch.load(config['distances_path'], weights_only=False)
-        selected_blocks = select_non_overlapping_blocks(
-            average_distances,
-            config['layers_to_skip'],
-            num_blocks=config.get('num_A', 1),
-            merge_consecutive=config.get('merge_consecutive', False)
-        )
+        # Run adaptive kernel replacement
+        path = adaptive_kernel_replacement(**filtered_config)
         
-        print(f"{Fore.YELLOW}[DEBUG] Selected blocks: {selected_blocks}{Fore.RESET}")
-        
-        # Apply teacher-guided method to each block
-        start_ids = sorted([x[0] for x in selected_blocks])
-        end_ids = sorted([x[1] for x in selected_blocks])
-        num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
-        num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
-        
-        for i in range(len(selected_blocks)):
-            print(f"{Fore.CYAN}[DEBUG] Processing block {i+1}/{len(selected_blocks)}{Fore.RESET}")
-            
-            signature = inspect.signature(teacher_guided_replaceme)
-            filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-            
-            path = teacher_guided_replaceme(
-                **filtered_config,
-                start_id=start_ids[i],
-                end_id=end_ids[i],
-                num_layer=num_layers[i]
-            )
-            config["model_path"] = path
+        print(f"\n[INFO] Adaptive Kernel replacement completed")
 
     else:
         raise ValueError(f"Unknown method: {config['method']}")
