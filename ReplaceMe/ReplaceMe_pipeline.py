@@ -137,19 +137,12 @@ def ReplaceMe_pipeline(config):
             )
             filtered_config["model_path"] = path
 
-    elif config["method"] == "adaptive_kernel":  # 새로운 방법 추가
-        from .adaptive_kernel_replacement import adaptive_kernel_replacement
-
-        print(f"\n{Fore.GREEN}[INFO] Using Adaptive Kernel Network method{Fore.RESET}")
-        
-        # Get function signature for filtering config
-        signature = inspect.signature(adaptive_kernel_replacement)
+    elif config["method"] == "ddpc":  # NEW: DDPC method
+        from .ddpc import ddpc  # NEW: Import DDPC
+        print(f"\n{Fore.GREEN}=== Running DDPC Method ==={Fore.RESET}")
+        signature = inspect.signature(ddpc)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-        
-        # Run adaptive kernel replacement
-        path = adaptive_kernel_replacement(**filtered_config)
-        
-        print(f"\n[INFO] Adaptive Kernel replacement completed")
+        path = ddpc(**filtered_config)
 
     else:
         raise ValueError(f"Unknown method: {config['method']}")
