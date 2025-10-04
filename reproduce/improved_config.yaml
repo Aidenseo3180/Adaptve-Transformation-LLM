@@ -1,4 +1,4 @@
-method: "hybrid"
+method: "improved"
 model_path: "meta-llama/Meta-Llama-3-8B-Instruct"
 dataset: "Open-Orca/SlimOrca"
 dataset_column: "text"
@@ -13,8 +13,9 @@ distances_path: "distances_8layer.pth"
 num_A: 1
 merge_consecutive: False
 
-# Hybrid specific parameters
-hybrid_epochs: 10
-hybrid_lr: 0.00005  # 5e-5
-hybrid_alpha: 0.6  # Balance between teacher (0.6) and cosine (0.4)
-hybrid_batch_size: 4096  # Larger batch for all tokens
+# Improved ReplaceMe parameters
+improved_epochs: 10
+improved_lr: 0.0005  # 5e-4
+improved_cosine_weight: 0.9
+improved_norm_weight: 0.1
+improved_init_scale: 0.01
