@@ -137,12 +137,12 @@ def ReplaceMe_pipeline(config):
             )
             filtered_config["model_path"] = path
 
-    elif config["method"] == "bidirectional":  # 새로 추가
-        from .bidirectional_replace import bidirectional_cosine_dist
-        signature = inspect.signature(bidirectional_cosine_dist)
+    elif config["method"] == "smart_init":  # 새로 추가
+        from .smart_init_replace import smart_init_cosine_dist
+        signature = inspect.signature(smart_init_cosine_dist)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
-        # Load average distances and select non-overlapping blocks
+        # Load distances and select blocks
         average_distances = torch.load(filtered_config['distances_path'], weights_only=False)
         selected_blocks = select_non_overlapping_blocks(
             average_distances,
@@ -151,15 +151,15 @@ def ReplaceMe_pipeline(config):
             merge_consecutive=filtered_config['merge_consecutive']
         )
         
-        # Calculate start and end IDs, and number of layers
+        # Process each block
         start_ids = sorted([x[0] for x in selected_blocks])
         end_ids = sorted([x[1] for x in selected_blocks])
         num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
         num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
         
-        # Iterate over each selected block
         for i in range(len(selected_blocks)):
-            path = bidirectional_cosine_dist(
+            print(f"\n{Fore.MAGENTA}Processing block {i+1}/{len(selected_blocks)}: layers {start_ids[i]}-{end_ids[i]}{Fore.RESET}")
+            path = smart_init_cosine_dist(
                 **filtered_config,
                 start_id=start_ids[i],
                 end_id=end_ids[i],
