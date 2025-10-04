@@ -137,9 +137,9 @@ def ReplaceMe_pipeline(config):
             )
             filtered_config["model_path"] = path
 
-    elif config["method"] == "smart_init":  # 새로 추가
-        from .smart_init_replace import smart_init_cosine_dist
-        signature = inspect.signature(smart_init_cosine_dist)
+    elif config["method"] == "kd_guided":  # 새로 추가
+        from .kd_guided_replace import kd_guided_replace
+        signature = inspect.signature(kd_guided_replace)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
         # Load distances and select blocks
@@ -159,7 +159,7 @@ def ReplaceMe_pipeline(config):
         
         for i in range(len(selected_blocks)):
             print(f"\n{Fore.MAGENTA}Processing block {i+1}/{len(selected_blocks)}: layers {start_ids[i]}-{end_ids[i]}{Fore.RESET}")
-            path = smart_init_cosine_dist(
+            path = kd_guided_replace(
                 **filtered_config,
                 start_id=start_ids[i],
                 end_id=end_ids[i],
