@@ -137,9 +137,10 @@ def ReplaceMe_pipeline(config):
             )
             filtered_config["model_path"] = path
 
-    elif config["method"] == "kd_guided":  # 새로 추가
-        from .kd_guided_replace import kd_guided_replace
-        signature = inspect.signature(kd_guided_replace)
+
+    elif config["method"] == "hybrid":  # 새로 추가
+        from .hybrid_kd_replace import hybrid_kd_replace
+        signature = inspect.signature(hybrid_kd_replace)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
         # Load distances and select blocks
@@ -159,7 +160,7 @@ def ReplaceMe_pipeline(config):
         
         for i in range(len(selected_blocks)):
             print(f"\n{Fore.MAGENTA}Processing block {i+1}/{len(selected_blocks)}: layers {start_ids[i]}-{end_ids[i]}{Fore.RESET}")
-            path = kd_guided_replace(
+            path = hybrid_kd_replace(
                 **filtered_config,
                 start_id=start_ids[i],
                 end_id=end_ids[i],

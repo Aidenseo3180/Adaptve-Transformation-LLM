@@ -1,0 +1,20 @@
+method: "hybrid"
+model_path: "meta-llama/Meta-Llama-3-8B-Instruct"
+dataset: "Open-Orca/SlimOrca"
+dataset_column: "text"
+batch_size: 8
+max_length: 1024
+layers_to_skip: 8
+dataset_size: 4000
+dataset_subset: "train"
+use_4bit: True
+save_path: null
+distances_path: "distances_8layer.pth"
+num_A: 1
+merge_consecutive: False
+
+# Hybrid specific parameters
+hybrid_epochs: 10
+hybrid_lr: 0.00005  # 5e-5
+hybrid_alpha: 0.6  # Balance between teacher (0.6) and cosine (0.4)
+hybrid_batch_size: 4096  # Larger batch for all tokens
