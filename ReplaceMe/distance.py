@@ -263,30 +263,156 @@ def profile_distances(
     torch.save(average_distances, "distances.pth")
     logging.info(f"{Fore.BLUE}Distances saved to distances.pth{Fore.RESET}")
 
-def read_config(config_path: str) -> dict:
-    """Read and parse YAML configuration file.
-
-    Args:
-        config_path: Path to YAML configuration file
-
-    Returns:
-        Parsed configuration dictionary
-    """
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
-
-
-def run_from_config() -> None:
-    """Run distance profiling from configuration file."""
-    parser = argparse.ArgumentParser(
-        description="Run distance analysis based on a configuration file."
+def profile_distances_llava(
+    model_path: str,
+    dataset: str,
+    batch_size: int,
+    max_length: int,
+    layers_to_skip: int,
+    dataset_size: Optional[int] = None,
+    use_4bit: bool = False,
+    token: Optional[str] = None,
+) -> None:
+    """Profile distances for LLaVA model."""
+    print(f"[DEBUG] Starting LLaVA distance profiling")
+    print(f"[DEBUG] Model: {model_path}")
+    print(f"[DEBUG] Dataset: {dataset}, Size: {dataset_size}")
+    print(f"[DEBUG] Layers to skip: {layers_to_skip}")
+    
+    from transformers import LlavaForConditionalGeneration, AutoProcessor
+    
+    device_map = "auto" if torch.cuda.is_available() else "cpu"
+    print(f"[DEBUG] Using device_map: {device_map}")
+    
+    quantization_config = None
+    if use_4bit:
+        print("[DEBUG] Using 4-bit quantization")
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16
+        )
+    
+    # Load model
+    print("[DEBUG] Loading LLaVA model...")
+    model = LlavaForConditionalGeneration.from_pretrained(
+        model_path,
+        device_map=device_map,
+        quantization_config=quantization_config,
+        output_hidden_states=True,
+        token=token
     )
-    parser.add_argument(
-        "--config",
-        type=str,
-        required=True,
-        help="Path to the configuration file.",
-    )
-    args = parser.parse_args()
-    config = read_config(args.config)
-    profile_distances(**config)
+    print(f"[DEBUG] Model loaded. Number of language layers: {model.config.text_config.num_hidden_layers}")
+    
+    # Load processor
+    print("[DEBUG] Loading processor...")
+    processor = AutoProcessor.from_pretrained(model_path)
+    
+    # Get dataloader
+    print("[DEBUG] Loading calibration data...")
+    dataloader = get_calib_dataloader_llava(dataset, dataset_size, batch_size, processor)
+    
+    model.eval()
+    
+    # Initialize distance tracking
+    num_layers = model.config.text_config.num_hidden_layers
+    all_distances = [[] for _ in range(num_layers - layers_to_skip)]
+    print(f"[DEBUG] Tracking distances for {len(all_distances)} layer pairs")
+    
+    # Process batches
+    batch_count = 0
+    for batch in tqdm(
+        dataloader,
+        desc=f"{Fore.GREEN}Computing LLaVA Distances{Fore.RESET}",
+        dynamic_ncols=True,
+        colour="green"
+    ):
+        batch_count += 1
+        print(f"\n[DEBUG] Processing batch {batch_count}")
+        
+        # Prepare inputs
+        try:
+            inputs = processor(
+                text=[item['text'] for item in batch],
+                images=[item['image'] for item in batch],
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=max_length
+            )
+            
+            # Move to device
+            device = next(model.parameters()).device
+            inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
+                     for k, v in inputs.items()}
+            
+            print(f"[DEBUG] Input shape - input_ids: {inputs['input_ids'].shape}")
+            print(f"[DEBUG] Input device: {inputs['input_ids'].device}")
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to process batch {batch_count}: {e}")
+            continue
+        
+        with torch.no_grad():
+            outputs = model(**inputs)
+        
+        print(f"[DEBUG] Got {len(outputs.hidden_states)} hidden states")
+        
+        # Get hidden states (language model states)
+        hidden_states = outputs.hidden_states
+        attention_mask = inputs["attention_mask"]
+        
+        # Get last non-padded tokens
+        last_non_padded = get_last_non_padded_tokens(hidden_states, attention_mask)
+        print(f"[DEBUG] Last non-padded tokens shape: {last_non_padded[0].shape}")
+        
+        # Compute distances
+        distances = compute_block_distances(last_non_padded, layers_to_skip)
+        print(f"[DEBUG] Computed {len(distances)} distances")
+        
+        for i, distance in enumerate(distances):
+            all_distances[i].append(distance)
+        
+        # Cleanup
+        del outputs, hidden_states, inputs
+        gc.collect()
+        torch.cuda.empty_cache()
+    
+    # Calculate average distances
+    print("\n[DEBUG] Computing average distances...")
+    average_distances = [np.mean(block_distances) for block_distances in all_distances]
+    
+    min_distance = float("inf")
+    min_distance_layer = 0
+    
+    # Write to CSV
+    print("[DEBUG] Writing results to CSV...")
+    with open("layer_distances_llava.csv", "w", newline="") as csvfile:
+        fieldnames = ["block_start", "block_end", "average_distance"]
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        
+        for i, avg_dist in enumerate(average_distances):
+            writer.writerow({
+                "block_start": i + 1,
+                "block_end": i + 1 + layers_to_skip,
+                "average_distance": avg_dist,
+            })
+            
+            if avg_dist < min_distance:
+                min_distance = avg_dist
+                min_distance_layer = i + 1
+    
+    # Save distances
+    torch.save(average_distances, "distances_llava.pth")
+    print(f"[DEBUG] Distances saved to distances_llava.pth")
+    
+    # Cleanup
+    del model
+    gc.collect()
+    torch.cuda.empty_cache()
+    
+    print(f"\n{Fore.GREEN}[RESULT] Layer {min_distance_layer} to {min_distance_layer + layers_to_skip} "
+          f"has minimum distance of {min_distance:.6f}{Fore.RESET}")
+    print(f"{Fore.GREEN}Results written to layer_distances_llava.csv{Fore.RESET}")

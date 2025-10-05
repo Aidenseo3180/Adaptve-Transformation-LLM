@@ -396,3 +396,128 @@ def select_non_overlapping_blocks(
     selected = [(start, end) for start, end, _ in selected]
     print(f"List of layers to prune {selected}")
     return selected
+
+
+# ========== LLaVA-specific utilities (새로 추가) ==========
+
+def get_calib_dataloader_llava(
+    dataset: str,
+    dataset_size: int,
+    batch_size: int,
+    processor
+) -> DataLoader:
+    """Load multimodal calibration dataset for LLaVA."""
+    print(f"[DEBUG] Loading LLaVA dataset: {dataset}")
+    print(f"[DEBUG] Dataset size: {dataset_size}, Batch size: {batch_size}")
+    
+    if dataset == 'coco_captions':
+        print("[DEBUG] Using COCO Captions dataset")
+        data = datasets.load_dataset("HuggingFaceM4/COCO", split="train")
+        data = data.select(range(min(dataset_size, len(data))))
+        
+        samples = []
+        for idx, item in enumerate(data):
+            if idx % 500 == 0:
+                print(f"[DEBUG] Processing COCO sample {idx}/{dataset_size}")
+            samples.append({
+                'image': item['image'],
+                'text': item['sentences']['raw'][0]
+            })
+        
+        print(f"[DEBUG] Loaded {len(samples)} COCO samples")
+        return DataLoader(samples, batch_size=batch_size, shuffle=False, drop_last=True)
+    
+    elif dataset == 'llava_instruct':
+        print("[DEBUG] Using LLaVA Instruct dataset")
+        data = datasets.load_dataset("liuhaotian/LLaVA-Instruct-150K", split="train")
+        data = data.select(range(min(dataset_size, len(data))))
+        
+        samples = []
+        for idx, item in enumerate(data):
+            if idx % 500 == 0:
+                print(f"[DEBUG] Processing LLaVA Instruct sample {idx}/{dataset_size}")
+            
+            conversation = item['conversations']
+            text = f"{conversation[0]['value']}\n{conversation[1]['value']}"
+            samples.append({
+                'image': item['image'],
+                'text': text
+            })
+        
+        print(f"[DEBUG] Loaded {len(samples)} LLaVA Instruct samples")
+        return DataLoader(samples, batch_size=batch_size, shuffle=False, drop_last=True)
+    
+    else:
+        raise ValueError(f"Dataset {dataset} not supported for LLaVA. Use 'coco_captions' or 'llava_instruct'")
+
+
+def eval_llava(model_path: str) -> Dict:
+    """Evaluate LLaVA on both vision-language and text tasks."""
+    print(f"[DEBUG] Starting LLaVA evaluation for model: {model_path}")
+    
+    result_path = f'benchmark_results/{os.path.basename(model_path)}.json'
+    
+    if os.path.exists(result_path):
+        print(f"[DEBUG] Loading cached results from {result_path}")
+        with open(result_path) as f:
+            return json.load(f)
+    
+    try:
+        from lmms_eval import simple_evaluate as vlm_evaluate
+        print("[DEBUG] lmms_eval imported successfully")
+        
+        # Vision-Language tasks
+        print("[DEBUG] Evaluating vision-language tasks...")
+        vlm_results = vlm_evaluate(
+            model="llava",
+            model_args=f"pretrained={model_path}",
+            tasks=["vqav2", "gqa", "textvqa", "mme", "pope"],
+            batch_size=1
+        )
+        print("[DEBUG] Vision-language evaluation completed")
+        
+    except ImportError:
+        print("[WARNING] lmms_eval not installed. Skipping vision-language tasks.")
+        print("[WARNING] Install with: pip install lmms-eval")
+        vlm_results = {'results': {}}
+    
+    # Text-only tasks
+    print("[DEBUG] Evaluating text-only tasks...")
+    text_results = evaluator.simple_evaluate(
+        model='hf',
+        tasks=['winogrande', 'boolq', 'race', 'openbookqa', 'piqa', 'sciq'],
+        model_args=f"pretrained={model_path},dtype=bfloat16,device=auto",
+        num_fewshot=0
+    )
+    print("[DEBUG] Text-only evaluation completed")
+    
+    results = {
+        'vlm_tasks': vlm_results.get('results', {}),
+        'text_tasks': text_results['results']
+    }
+    
+    # Save results
+    os.makedirs('benchmark_results', exist_ok=True)
+    with open(result_path, 'w') as f:
+        json.dump(results, f, indent=4)
+    print(f"[DEBUG] Results saved to {result_path}")
+    
+    # Print summary
+    print("\n" + "="*50)
+    print("LLaVA Evaluation Results Summary")
+    print("="*50)
+    
+    if results['vlm_tasks']:
+        print("\nVision-Language Tasks:")
+        for task, res in results['vlm_tasks'].items():
+            acc = res.get('acc', res.get('accuracy', 'N/A'))
+            print(f"  {task}: {acc}")
+    
+    print("\nText-Only Tasks:")
+    for task, res in results['text_tasks'].items():
+        acc = res.get('acc', res.get('accuracy', 'N/A'))
+        print(f"  {task}: {acc}")
+    
+    print("="*50 + "\n")
+    
+    return results
