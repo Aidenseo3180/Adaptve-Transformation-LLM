@@ -398,126 +398,188 @@ def select_non_overlapping_blocks(
     return selected
 
 
-# ========== LLaVA-specific utilities (새로 추가) ==========
 
-def get_calib_dataloader_llava(
-    dataset: str,
-    dataset_size: int,
+
+
+# ============================================================
+# utils.py에 추가할 함수들
+# ============================================================
+
+def get_vlm_calib_dataloader(
+    image_dir: str,
+    dataset_size: Optional[int],
     batch_size: int,
-    processor
+    processor  # LlavaProcessor
 ) -> DataLoader:
-    """Load multimodal calibration dataset for LLaVA."""
-    print(f"[DEBUG] Loading LLaVA dataset: {dataset}")
-    print(f"[DEBUG] Dataset size: {dataset_size}, Batch size: {batch_size}")
+    """Load VLM calibration dataset from local COCO images.
     
-    if dataset == 'coco_captions':
-        print("[DEBUG] Using COCO Captions dataset")
-        data = datasets.load_dataset("HuggingFaceM4/COCO", split="train")
-        data = data.select(range(min(dataset_size, len(data))))
-        
-        samples = []
-        for idx, item in enumerate(data):
-            if idx % 500 == 0:
-                print(f"[DEBUG] Processing COCO sample {idx}/{dataset_size}")
-            samples.append({
-                'image': item['image'],
-                'text': item['sentences']['raw'][0]
+    Args:
+        image_dir: Path to image directory (e.g., 'train2014')
+        dataset_size: Number of samples to use
+        batch_size: Batch size
+        processor: LlavaProcessor instance
+    
+    Returns:
+        DataLoader with processed image-text pairs
+    """
+    from pathlib import Path
+    from PIL import Image
+    import datasets
+    
+    print(f"[VLM DataLoader] Loading images from {image_dir}")
+    
+    # 이미지 파일 로드
+    image_path = Path(image_dir)
+    if not image_path.exists():
+        raise FileNotFoundError(f"Image directory not found: {image_dir}")
+    
+    image_files = list(image_path.glob("*.jpg"))
+    print(f"[VLM DataLoader] Found {len(image_files)} images")
+    
+    if dataset_size:
+        image_files = image_files[:dataset_size]
+        print(f"[VLM DataLoader] Using {len(image_files)} samples")
+    
+    # 질문 템플릿
+    questions = [
+        "What is in this image?",
+        "Describe what you see.",
+        "What objects are present?",
+        "What is the main subject?",
+        "Can you describe the scene?",
+    ]
+    
+    # Dataset 생성
+    data_list = []
+    for i, img_path in enumerate(image_files):
+        try:
+            img = Image.open(img_path).convert('RGB')
+            data_list.append({
+                'image': img,
+                'text': questions[i % len(questions)]
             })
+        except Exception as e:
+            print(f"[VLM DataLoader] Skip {img_path.name}: {e}")
+    
+    dataset = datasets.Dataset.from_list(data_list)
+    print(f"[VLM DataLoader] Dataset created: {len(dataset)} valid samples")
+    
+    def collate_fn(batch):
+        images = [item['image'] for item in batch]
+        texts = [item['text'] for item in batch]
         
-        print(f"[DEBUG] Loaded {len(samples)} COCO samples")
-        return DataLoader(samples, batch_size=batch_size, shuffle=False, drop_last=True)
-    
-    elif dataset == 'llava_instruct':
-        print("[DEBUG] Using LLaVA Instruct dataset")
-        data = datasets.load_dataset("liuhaotian/LLaVA-Instruct-150K", split="train")
-        data = data.select(range(min(dataset_size, len(data))))
-        
-        samples = []
-        for idx, item in enumerate(data):
-            if idx % 500 == 0:
-                print(f"[DEBUG] Processing LLaVA Instruct sample {idx}/{dataset_size}")
-            
-            conversation = item['conversations']
-            text = f"{conversation[0]['value']}\n{conversation[1]['value']}"
-            samples.append({
-                'image': item['image'],
-                'text': text
-            })
-        
-        print(f"[DEBUG] Loaded {len(samples)} LLaVA Instruct samples")
-        return DataLoader(samples, batch_size=batch_size, shuffle=False, drop_last=True)
-    
-    else:
-        raise ValueError(f"Dataset {dataset} not supported for LLaVA. Use 'coco_captions' or 'llava_instruct'")
-
-
-def eval_llava(model_path: str) -> Dict:
-    """Evaluate LLaVA on both vision-language and text tasks."""
-    print(f"[DEBUG] Starting LLaVA evaluation for model: {model_path}")
-    
-    result_path = f'benchmark_results/{os.path.basename(model_path)}.json'
-    
-    if os.path.exists(result_path):
-        print(f"[DEBUG] Loading cached results from {result_path}")
-        with open(result_path) as f:
-            return json.load(f)
-    
-    try:
-        from lmms_eval import simple_evaluate as vlm_evaluate
-        print("[DEBUG] lmms_eval imported successfully")
-        
-        # Vision-Language tasks
-        print("[DEBUG] Evaluating vision-language tasks...")
-        vlm_results = vlm_evaluate(
-            model="llava",
-            model_args=f"pretrained={model_path}",
-            tasks=["vqav2", "gqa", "textvqa", "mme", "pope"],
-            batch_size=1
+        return processor(
+            text=texts,
+            images=images,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=512
         )
-        print("[DEBUG] Vision-language evaluation completed")
-        
-    except ImportError:
-        print("[WARNING] lmms_eval not installed. Skipping vision-language tasks.")
-        print("[WARNING] Install with: pip install lmms-eval")
-        vlm_results = {'results': {}}
     
-    # Text-only tasks
-    print("[DEBUG] Evaluating text-only tasks...")
-    text_results = evaluator.simple_evaluate(
-        model='hf',
-        tasks=['winogrande', 'boolq', 'race', 'openbookqa', 'piqa', 'sciq'],
-        model_args=f"pretrained={model_path},dtype=bfloat16,device=auto",
-        num_fewshot=0
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        collate_fn=collate_fn,
+        shuffle=False,
+        drop_last=True
     )
-    print("[DEBUG] Text-only evaluation completed")
+
+
+def setup_vlm_processor(model_path: str):
+    """Setup VLM processor with proper configuration.
     
-    results = {
-        'vlm_tasks': vlm_results.get('results', {}),
-        'text_tasks': text_results['results']
-    }
+    Args:
+        model_path: Path to VLM model
+        
+    Returns:
+        Configured processor
+    """
+    from transformers import LlavaProcessor
     
-    # Save results
-    os.makedirs('benchmark_results', exist_ok=True)
-    with open(result_path, 'w') as f:
-        json.dump(results, f, indent=4)
-    print(f"[DEBUG] Results saved to {result_path}")
+    print(f"[VLM Processor] Loading from {model_path}")
+    processor = LlavaProcessor.from_pretrained(model_path)
     
-    # Print summary
-    print("\n" + "="*50)
-    print("LLaVA Evaluation Results Summary")
-    print("="*50)
+    # Patch size 설정
+    if processor.patch_size is None:
+        processor.patch_size = 14
+        print(f"[VLM Processor] Set patch_size: 14")
     
-    if results['vlm_tasks']:
-        print("\nVision-Language Tasks:")
-        for task, res in results['vlm_tasks'].items():
-            acc = res.get('acc', res.get('accuracy', 'N/A'))
-            print(f"  {task}: {acc}")
+    # Pad token 설정
+    if processor.tokenizer.pad_token is None:
+        processor.tokenizer.pad_token = processor.tokenizer.eos_token
+        processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
+        print(f"[VLM Processor] Set pad_token to eos_token")
     
-    print("\nText-Only Tasks:")
-    for task, res in results['text_tasks'].items():
-        acc = res.get('acc', res.get('accuracy', 'N/A'))
-        print(f"  {task}: {acc}")
+    return processor
+
+
+def get_vlm_layers(model):
+    """Get language model layers from VLM.
     
-    print("="*50 + "\n")
+    Args:
+        model: VLM model instance
+        
+    Returns:
+        Tuple of (layers, num_layers)
+    """
+    if hasattr(model, 'language_model'):
+        layers = model.language_model.layers
+        num_layers = len(layers)
+        print(f"[VLM Layers] Found language_model.layers: {num_layers} layers")
+        return layers, num_layers
+    else:
+        raise AttributeError("Model does not have language_model attribute")
+
+
+def truncate_vlm_model(model: nn.Module, start_layer: int, end_layer: int) -> nn.Module:
+    """Truncate VLM by removing specified language model layers.
     
-    return results
+    Args:
+        model: VLM model
+        start_layer: Starting layer index to keep
+        end_layer: Ending layer index to remove
+        
+    Returns:
+        Truncated model
+    """
+    print(f"[VLM Truncate] Removing layers {start_layer} to {end_layer-1}")
+    
+    if hasattr(model, 'language_model'):
+        # VLM의 language model config 업데이트
+        model.config.text_config.num_hidden_layers -= (end_layer - start_layer)
+        
+        # Language model layers 제거
+        model.language_model.layers = nn.ModuleList([
+            layer for idx, layer in enumerate(model.language_model.layers) 
+            if idx < start_layer or idx >= end_layer
+        ])
+        
+        print(f"[VLM Truncate] Remaining layers: {len(model.language_model.layers)}")
+    else:
+        raise AttributeError("Model does not have language_model")
+    
+    return model
+
+
+def apply_vlm_transform(model, transform: torch.Tensor, layer_idx: int):
+    """Apply linear transformation to VLM language model layer.
+    
+    Args:
+        model: VLM model
+        transform: Transformation matrix
+        layer_idx: Layer index to apply transform
+    """
+    print(f"[VLM Transform] Applying to language_model.layers[{layer_idx}].mlp.down_proj")
+    
+    if hasattr(model, 'language_model'):
+        target_layer = model.language_model.layers[layer_idx]
+        
+        # down_proj weight와 transform 합성
+        original_weight = target_layer.mlp.down_proj.weight.to(torch.float64)
+        new_weight = (transform.T.cpu() @ original_weight).to(torch.bfloat16)
+        
+        target_layer.mlp.down_proj.load_state_dict({"weight": new_weight})
+        print(f"[VLM Transform] Applied successfully, new weight shape: {new_weight.shape}")
+    else:
+        raise AttributeError("Model does not have language_model")
