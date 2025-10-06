@@ -183,7 +183,7 @@ def ReplaceMe_pipeline(config):
         
         # Evaluation
         from .vlm_evaluator import vlm_evaluator
-        
+
         signature = inspect.signature(evaluator)
         eval_config = {k: v for k, v in config.items() if k in signature.parameters}
         eval_config["model_path"] = path
@@ -205,12 +205,11 @@ def ReplaceMe_pipeline(config):
         raise ValueError(f"Unknown method: {config['method']}")
 
 
-    # Evaluate using the updated configuration
-    signature = inspect.signature(evaluator)
-    filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-    filtered_config["model_path"] = path
-    evaluator(**filtered_config)
-
+    # # Evaluate using the updated configuration
+    # signature = inspect.signature(evaluator)
+    # filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
+    # filtered_config["model_path"] = path
+    # evaluator(**filtered_config)
 
 
 def read_config(config_path: str):
