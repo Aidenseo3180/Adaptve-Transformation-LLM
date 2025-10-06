@@ -108,7 +108,20 @@ def vlm_profile_distances(
         dynamic_ncols=True,
         colour="green",
     ):
+        # ===== 1. Processor 출력 확인 =====
+        # print(f"\n[DEBUG] Batch keys: {batch.keys()}")
+        # for k, v in batch.items():
+        #     if isinstance(v, torch.Tensor):
+        #         print(f"[DEBUG] {k}: shape={v.shape}, dtype={v.dtype}")
+
         inputs = {k: v.to(model.device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
+        # print(f"[DEBUG] Inputs keys after device move: {inputs.keys()}")
+        # print(f"[DEBUG] Has pixel_values: {'pixel_values' in inputs}")
+
+        # # ===== 3. Model 입력 직전 확인 =====
+        # print(f"[DEBUG] Final input shapes:")
+        # for k, v in inputs.items():
+        #     print(f"[DEBUG]   {k}: {v.shape}")
 
         with torch.no_grad():
             outputs = model(**inputs)

@@ -11,7 +11,7 @@ import torch
 import yaml
 from colorama import Fore, init
 from tqdm import tqdm
-from transformers import AutoLlavaForConditionalGenerationModel, BitsAndBytesConfig
+from transformers import LlavaForConditionalGeneration, BitsAndBytesConfig
 
 from .utils import (
     adam_method, 
@@ -147,26 +147,16 @@ def vlm_cosine_dist(
     # Activation 저장 버퍼
     total_tokens = dataset_size * max_length if dataset_size else len(dataloader.dataset) * max_length
     
-    a1 = torch.empty(
-        (total_tokens, hidden_size),
-        dtype=torch.bfloat16,
-        device='cpu'
-    )
-    a2 = torch.empty(
-        (total_tokens, hidden_size),
-        dtype=torch.bfloat16,
-        device='cpu'
-    )
-    
+    # 수정 (동적 리스트)
+    a1_list = []
+    a2_list = []
     if accurate:
-        print(f"{Fore.YELLOW}ACCURATE MODE - More memory required{Fore.RESET}")
-        a3 = torch.empty(
-            (total_tokens, hidden_size),
-            dtype=torch.bfloat16,
-            device='cpu'
-        )
-    
-    cnt = 0
+        a3_list = []
+
+    print(f"[DEBUG] Registered hooks: {list(mlp_activations.keys()) if mlp_activations else 'None yet'}")
+    print(f"[DEBUG] start_id={start_id}, end_id={end_id}, num_layer={num_layer}")
+    print(f"[DEBUG] Trying to access: layer_{start_id - num_layer - 1}")
+    print(f"[DEBUG] Available layers: layer_0 to layer_{num_hidden_layers-1}")
     
     # Activation 수집
     for batch in tqdm(
@@ -183,9 +173,12 @@ def vlm_cosine_dist(
         
         # Hidden states 추출 (vision + text 포함)
         hidden_states = outputs.hidden_states[1:]  # 첫 번째는 embedding
+
+        # print(f"[DEBUG] mlp_activations keys: {list(mlp_activations.keys())[:5]}...")  # 처음 5개만
+        # print(f"[DEBUG] Accessing layer_{start_id - num_layer - 1}")
         
         # MLP outputs
-        hidden_states_mlp = mlp_activations[f'layer_{start_id - num_layer - 1}']
+        hidden_states_mlp = mlp_activations[f'layer_{start_id - num_layer - 1}_mlp']
         
         # Reshape
         hidden_states_mlp = hidden_states_mlp.view(-1, hidden_size).to(torch.float64)
@@ -198,26 +191,23 @@ def vlm_cosine_dist(
         if accurate:
             a2_batch = hidden_states_n
             a3_batch = hidden_states_i - hidden_states_mlp
-            a3[cnt:cnt+a3_batch.shape[0]] = a3_batch.cpu()
         else:
             a2_batch = hidden_states_n + hidden_states_mlp - hidden_states_i
         
-        a1[cnt:cnt+a1_batch.shape[0]] = a1_batch.cpu()
-        a2[cnt:cnt+a2_batch.shape[0]] = a2_batch.cpu()
-        
-        cnt += a2_batch.shape[0]
-        
+        a1_list.append(a1_batch.cpu())
+        a2_list.append(a2_batch.cpu())
+        if accurate:
+            a3_list.append(a3_batch.cpu())
+
         del hidden_states_mlp, hidden_states_i, hidden_states_n
         torch.cuda.empty_cache()
     
     # Activation 크기 조정
-    a1 = a1[:cnt]
-    a2 = a2[:cnt]
+    a1 = torch.cat(a1_list, dim=0)
+    a2 = torch.cat(a2_list, dim=0)
     if accurate:
-        a3 = a3[:cnt]
-    
-    print(f"{Fore.GREEN}Collected {cnt} activation samples{Fore.RESET}")
-    
+        a3 = torch.cat(a3_list, dim=0)
+        
     # Transform 추정
     print(f"{Fore.CYAN}Estimating transformation - Solver: {solver}, Loss: {loss}{Fore.RESET}")
     

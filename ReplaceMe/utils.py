@@ -454,15 +454,27 @@ def get_vlm_calib_dataloader(
     def collate_fn(batch):
         images = [item['image'] for item in batch]
         texts = [item['text'] for item in batch]
-        
-        return processor(
+
+        # ===== 텍스트 확인 =====
+        # print(f"[DEBUG COLLATE] Batch size: {len(batch)}")
+        # print(f"[DEBUG COLLATE] Sample text: {texts[0][:100]}")
+        # print(f"[DEBUG COLLATE] Has <image> token: {'<image>' in texts[0]}")
+
+        result =  processor(
             text=texts,
             images=images,
             return_tensors="pt",
             padding=True,
-            truncation=True,
-            max_length=512
+            truncation=False
         )
+
+        # ===== Processor 결과 확인 =====
+        # print(f"[DEBUG COLLATE] Processor output keys: {result.keys()}")
+        # for k, v in result.items():
+        #     if isinstance(v, torch.Tensor):
+        #         print(f"[DEBUG COLLATE]   {k}: {v.shape}")
+        
+        return result
     
     return DataLoader(
         dataset,

@@ -169,6 +169,11 @@ def ReplaceMe_pipeline(config):
         end_ids = sorted([x[1] for x in selected_blocks])
         num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
         num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
+
+        print(f"[DEBUG] Selected blocks: {selected_blocks}")
+        print(f"[DEBUG] start_ids: {start_ids}")
+        print(f"[DEBUG] end_ids: {end_ids}")
+        print(f"[DEBUG] num_layers: {num_layers}")
         
         # Apply pruning
         for i in range(len(selected_blocks)):
