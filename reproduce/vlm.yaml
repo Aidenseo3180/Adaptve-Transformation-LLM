@@ -1,14 +1,14 @@
 # ============================================================
-# vlm_pipeline_config.yaml 업데이트
+# vlm_pipeline_config.yaml - 최종 설정
 # ============================================================
 method: "vlm_cosine"
-model_path: "lmms-lab/llama3-llava-next-8b"
+model_path: "llava-hf/llava-1.5-7b-hf"  # 검증된 모델
 image_dir: "train2014"
 batch_size: 4
 max_length: 512
 layers_to_skip: 8
 dataset_size: 500
-use_4bit: True
+use_4bit: False  # 메모리 충분하면 False
 save_path: null
 save_transform_only: True
 diag: False
@@ -22,7 +22,7 @@ merge_consecutive: False
 accurate: False
 token: null
 
-# VLM Evaluation 설정 추가
+# Evaluation
 eval_tasks:
   - "vqav2"
   - "gqa"

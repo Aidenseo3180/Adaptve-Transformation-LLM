@@ -137,18 +137,18 @@ def ReplaceMe_pipeline(config):
             )
             filtered_config["model_path"] = path
 
-    elif config.get("method") == "vlm_cosine":
+    elif config["method"] == "vlm_cosine":
         from .vlm_cosine_dist import vlm_cosine_dist
         from .vlm_distance import vlm_profile_distances
 
-        logging.info(f"{Fore.MAGENTA}=== VLM COSINE METHOD ==={Fore.RESET}")
+        print(f"{Fore.MAGENTA}=== VLM COSINE METHOD ==={Fore.RESET}")
         
         # Distance profiling (VLM 전용)
         signature = inspect.signature(vlm_profile_distances)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
         if config.get('distances_path') is None or not os.path.exists(config.get('distances_path', '')):
-            logging.info(f"{Fore.CYAN}Profiling VLM distances...{Fore.RESET}")
+            print(f"{Fore.CYAN}Profiling VLM distances...{Fore.RESET}")
             vlm_profile_distances(**filtered_config)
             config['distances_path'] = "./vlm_distances.pth"
         
@@ -172,7 +172,7 @@ def ReplaceMe_pipeline(config):
         
         # Apply pruning
         for i in range(len(selected_blocks)):
-            logging.info(f"{Fore.YELLOW}Processing block {i+1}/{len(selected_blocks)}{Fore.RESET}")
+            print(f"{Fore.YELLOW}Processing block {i+1}/{len(selected_blocks)}{Fore.RESET}")
             path = vlm_cosine_dist(
                 **filtered_config,
                 start_id=start_ids[i],
@@ -189,7 +189,7 @@ def ReplaceMe_pipeline(config):
         eval_config["model_path"] = path
         
         # VLM Evaluation
-        logging.info(f"{Fore.MAGENTA}=== VLM Evaluation ==={Fore.RESET}")
+        print(f"{Fore.MAGENTA}=== VLM Evaluation ==={Fore.RESET}")
         
         eval_config = {
             "model_path": path,

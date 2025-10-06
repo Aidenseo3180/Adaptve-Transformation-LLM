@@ -400,35 +400,23 @@ def select_non_overlapping_blocks(
 
 
 
-
 # ============================================================
-# utils.py에 추가할 함수들
+# utils.py - VLM 함수 업데이트
 # ============================================================
 
 def get_vlm_calib_dataloader(
     image_dir: str,
     dataset_size: Optional[int],
     batch_size: int,
-    processor  # LlavaProcessor
+    processor
 ) -> DataLoader:
-    """Load VLM calibration dataset from local COCO images.
-    
-    Args:
-        image_dir: Path to image directory (e.g., 'train2014')
-        dataset_size: Number of samples to use
-        batch_size: Batch size
-        processor: LlavaProcessor instance
-    
-    Returns:
-        DataLoader with processed image-text pairs
-    """
+    """Load VLM calibration dataset from local COCO images."""
     from pathlib import Path
     from PIL import Image
     import datasets
     
     print(f"[VLM DataLoader] Loading images from {image_dir}")
     
-    # 이미지 파일 로드
     image_path = Path(image_dir)
     if not image_path.exists():
         raise FileNotFoundError(f"Image directory not found: {image_dir}")
@@ -440,16 +428,15 @@ def get_vlm_calib_dataloader(
         image_files = image_files[:dataset_size]
         print(f"[VLM DataLoader] Using {len(image_files)} samples")
     
-    # 질문 템플릿
+    # LLaVA 질문 템플릿 (<image> 토큰 포함!)
     questions = [
-        "What is in this image?",
-        "Describe what you see.",
-        "What objects are present?",
-        "What is the main subject?",
-        "Can you describe the scene?",
+        "<image>\nWhat is in this image?",
+        "<image>\nDescribe what you see.",
+        "<image>\nWhat objects are present?",
+        "<image>\nWhat is the main subject?",
+        "<image>\nCan you describe the scene?",
     ]
     
-    # Dataset 생성
     data_list = []
     for i, img_path in enumerate(image_files):
         try:
@@ -487,23 +474,16 @@ def get_vlm_calib_dataloader(
 
 
 def setup_vlm_processor(model_path: str):
-    """Setup VLM processor with proper configuration.
-    
-    Args:
-        model_path: Path to VLM model
-        
-    Returns:
-        Configured processor
-    """
-    from transformers import LlavaProcessor
+    """Setup VLM processor with proper configuration."""
+    from transformers import AutoProcessor
     
     print(f"[VLM Processor] Loading from {model_path}")
-    processor = LlavaProcessor.from_pretrained(model_path)
+    processor = AutoProcessor.from_pretrained(model_path)
     
-    # Patch size 설정
-    if processor.patch_size is None:
-        processor.patch_size = 14
-        print(f"[VLM Processor] Set patch_size: 14")
+    # LLaVA 필수 설정
+    processor.patch_size = 14
+    processor.vision_feature_select_strategy = "default"
+    print(f"[VLM Processor] Set patch_size: 14, strategy: default")
     
     # Pad token 설정
     if processor.tokenizer.pad_token is None:
@@ -515,71 +495,51 @@ def setup_vlm_processor(model_path: str):
 
 
 def get_vlm_layers(model):
-    """Get language model layers from VLM.
-    
-    Args:
-        model: VLM model instance
-        
-    Returns:
-        Tuple of (layers, num_layers)
-    """
+    """Get language model layers from VLM."""
     if hasattr(model, 'language_model'):
-        layers = model.language_model.layers
-        num_layers = len(layers)
-        print(f"[VLM Layers] Found language_model.layers: {num_layers} layers")
-        return layers, num_layers
+        if hasattr(model.language_model, 'model'):
+            layers = model.language_model.model.layers
+            num_layers = len(layers)
+            print(f"[VLM Layers] Found language_model.model.layers: {num_layers} layers")
+            return layers, num_layers
+        else:
+            raise AttributeError("Model has language_model but no .model attribute")
     else:
         raise AttributeError("Model does not have language_model attribute")
 
 
 def truncate_vlm_model(model: nn.Module, start_layer: int, end_layer: int) -> nn.Module:
-    """Truncate VLM by removing specified language model layers.
-    
-    Args:
-        model: VLM model
-        start_layer: Starting layer index to keep
-        end_layer: Ending layer index to remove
-        
-    Returns:
-        Truncated model
-    """
+    """Truncate VLM by removing specified language model layers."""
     print(f"[VLM Truncate] Removing layers {start_layer} to {end_layer-1}")
     
-    if hasattr(model, 'language_model'):
-        # VLM의 language model config 업데이트
+    if hasattr(model, 'language_model') and hasattr(model.language_model, 'model'):
+        # Config 업데이트
         model.config.text_config.num_hidden_layers -= (end_layer - start_layer)
         
-        # Language model layers 제거
-        model.language_model.layers = nn.ModuleList([
-            layer for idx, layer in enumerate(model.language_model.layers) 
+        # Layers 제거
+        model.language_model.model.layers = nn.ModuleList([
+            layer for idx, layer in enumerate(model.language_model.model.layers) 
             if idx < start_layer or idx >= end_layer
         ])
         
-        print(f"[VLM Truncate] Remaining layers: {len(model.language_model.layers)}")
+        print(f"[VLM Truncate] Remaining layers: {len(model.language_model.model.layers)}")
     else:
-        raise AttributeError("Model does not have language_model")
+        raise AttributeError("Model structure not compatible")
     
     return model
 
 
 def apply_vlm_transform(model, transform: torch.Tensor, layer_idx: int):
-    """Apply linear transformation to VLM language model layer.
+    """Apply linear transformation to VLM language model layer."""
+    print(f"[VLM Transform] Applying to language_model.model.layers[{layer_idx}].mlp.down_proj")
     
-    Args:
-        model: VLM model
-        transform: Transformation matrix
-        layer_idx: Layer index to apply transform
-    """
-    print(f"[VLM Transform] Applying to language_model.layers[{layer_idx}].mlp.down_proj")
-    
-    if hasattr(model, 'language_model'):
-        target_layer = model.language_model.layers[layer_idx]
+    if hasattr(model, 'language_model') and hasattr(model.language_model, 'model'):
+        target_layer = model.language_model.model.layers[layer_idx]
         
-        # down_proj weight와 transform 합성
         original_weight = target_layer.mlp.down_proj.weight.to(torch.float64)
         new_weight = (transform.T.cpu() @ original_weight).to(torch.bfloat16)
         
         target_layer.mlp.down_proj.load_state_dict({"weight": new_weight})
         print(f"[VLM Transform] Applied successfully, new weight shape: {new_weight.shape}")
     else:
-        raise AttributeError("Model does not have language_model")
+        raise AttributeError("Model structure not compatible")

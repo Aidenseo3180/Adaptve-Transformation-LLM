@@ -13,7 +13,7 @@ import torch
 import yaml
 from colorama import Fore, init
 from tqdm import tqdm
-from transformers import AutoModelForVision2Seq, BitsAndBytesConfig
+from transformers import LlavaForConditionalGeneration, BitsAndBytesConfig
 
 from .utils import (
     compute_block_distances,
@@ -72,9 +72,9 @@ def vlm_profile_distances(
             bnb_4bit_compute_dtype=torch.bfloat16,
         )
 
-    logging.info(f"{Fore.GREEN}Loading VLM for distance profiling{Fore.RESET}")
+    print(f"{Fore.GREEN}Loading VLM for distance profiling{Fore.RESET}")
     
-    model = AutoModelForVision2Seq.from_pretrained(
+    model = LlavaForConditionalGeneration.from_pretrained(
         model_path,
         device_map=device_map,
         quantization_config=quantization_config,
@@ -86,7 +86,7 @@ def vlm_profile_distances(
     processor = setup_vlm_processor(model_path)
     layers, num_hidden_layers = get_vlm_layers(model)
     
-    logging.info(f"{Fore.GREEN}VLM loaded - {num_hidden_layers} language model layers{Fore.RESET}")
+    print(f"{Fore.GREEN}VLM loaded - {num_hidden_layers} language model layers{Fore.RESET}")
 
     model.eval()
     dataloader = get_vlm_calib_dataloader(
@@ -161,10 +161,10 @@ def vlm_profile_distances(
     
     torch.save(average_distances, "vlm_distances.pth")
     
-    logging.info(
+    print(
         f"{Fore.GREEN}VLM Layer {min_distance_layer} to {min_distance_layer + layers_to_skip} "
         f"has minimum distance of {min_distance}{Fore.RESET}"
     )
-    logging.info(
+    print(
         f"{Fore.GREEN}Distances saved to vlm_layer_distances.csv and vlm_distances.pth{Fore.RESET}"
     )

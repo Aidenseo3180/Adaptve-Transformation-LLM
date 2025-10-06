@@ -17,7 +17,7 @@ from colorama import Fore, init
 from tqdm import tqdm
 from PIL import Image
 from datasets import load_dataset
-from transformers import AutoModelForVision2Seq
+from transformers import LlavaForConditionalGeneration
 
 from .utils import setup_vlm_processor, seed_all
 
@@ -53,7 +53,7 @@ def eval_vlm_vqav2(
     Returns:
         Evaluation results
     """
-    logging.info(f"{Fore.CYAN}Evaluating on VQAv2...{Fore.RESET}")
+    print(f"{Fore.CYAN}Evaluating on VQAv2...{Fore.RESET}")
     
     try:
         # VQAv2 validation set 로드
@@ -102,7 +102,7 @@ def eval_vlm_vqav2(
                 total += 1
         
         accuracy = correct / total if total > 0 else 0
-        logging.info(f"{Fore.GREEN}VQAv2 Accuracy: {accuracy:.4f} ({correct}/{total}){Fore.RESET}")
+        print(f"{Fore.GREEN}VQAv2 Accuracy: {accuracy:.4f} ({correct}/{total}){Fore.RESET}")
         
         return {
             "vqav2_accuracy": accuracy,
@@ -111,7 +111,7 @@ def eval_vlm_vqav2(
         }
         
     except Exception as e:
-        logging.error(f"{Fore.RED}VQAv2 evaluation failed: {e}{Fore.RESET}")
+        print(f"{Fore.RED}VQAv2 evaluation failed: {e}{Fore.RESET}")
         return {"vqav2_accuracy": 0.0, "error": str(e)}
 
 
@@ -132,7 +132,7 @@ def eval_vlm_gqa(
     Returns:
         Evaluation results
     """
-    logging.info(f"{Fore.CYAN}Evaluating on GQA...{Fore.RESET}")
+    print(f"{Fore.CYAN}Evaluating on GQA...{Fore.RESET}")
     
     try:
         # GQA testdev 로드
@@ -178,7 +178,7 @@ def eval_vlm_gqa(
                 total += 1
         
         accuracy = correct / total if total > 0 else 0
-        logging.info(f"{Fore.GREEN}GQA Accuracy: {accuracy:.4f} ({correct}/{total}){Fore.RESET}")
+        print(f"{Fore.GREEN}GQA Accuracy: {accuracy:.4f} ({correct}/{total}){Fore.RESET}")
         
         return {
             "gqa_accuracy": accuracy,
@@ -187,7 +187,7 @@ def eval_vlm_gqa(
         }
         
     except Exception as e:
-        logging.error(f"{Fore.RED}GQA evaluation failed: {e}{Fore.RESET}")
+        print(f"{Fore.RED}GQA evaluation failed: {e}{Fore.RESET}")
         return {"gqa_accuracy": 0.0, "error": str(e)}
 
 
@@ -208,7 +208,7 @@ def eval_vlm_textvqa(
     Returns:
         Evaluation results
     """
-    logging.info(f"{Fore.CYAN}Evaluating on TextVQA...{Fore.RESET}")
+    print(f"{Fore.CYAN}Evaluating on TextVQA...{Fore.RESET}")
     
     try:
         dataset = load_dataset(
@@ -253,7 +253,7 @@ def eval_vlm_textvqa(
                 total += 1
         
         accuracy = correct / total if total > 0 else 0
-        logging.info(f"{Fore.GREEN}TextVQA Accuracy: {accuracy:.4f} ({correct}/{total}){Fore.RESET}")
+        print(f"{Fore.GREEN}TextVQA Accuracy: {accuracy:.4f} ({correct}/{total}){Fore.RESET}")
         
         return {
             "textvqa_accuracy": accuracy,
@@ -262,7 +262,7 @@ def eval_vlm_textvqa(
         }
         
     except Exception as e:
-        logging.error(f"{Fore.RED}TextVQA evaluation failed: {e}{Fore.RESET}")
+        print(f"{Fore.RED}TextVQA evaluation failed: {e}{Fore.RESET}")
         return {"textvqa_accuracy": 0.0, "error": str(e)}
 
 
@@ -283,7 +283,7 @@ def eval_vlm_ok_vqa(
     Returns:
         Evaluation results
     """
-    logging.info(f"{Fore.CYAN}Evaluating on OK-VQA...{Fore.RESET}")
+    print(f"{Fore.CYAN}Evaluating on OK-VQA...{Fore.RESET}")
     
     try:
         dataset = load_dataset(
@@ -328,7 +328,7 @@ def eval_vlm_ok_vqa(
                 total += 1
         
         accuracy = correct / total if total > 0 else 0
-        logging.info(f"{Fore.GREEN}OK-VQA Accuracy: {accuracy:.4f} ({correct}/{total}){Fore.RESET}")
+        print(f"{Fore.GREEN}OK-VQA Accuracy: {accuracy:.4f} ({correct}/{total}){Fore.RESET}")
         
         return {
             "okvqa_accuracy": accuracy,
@@ -337,7 +337,7 @@ def eval_vlm_ok_vqa(
         }
         
     except Exception as e:
-        logging.error(f"{Fore.RED}OK-VQA evaluation failed: {e}{Fore.RESET}")
+        print(f"{Fore.RED}OK-VQA evaluation failed: {e}{Fore.RESET}")
         return {"okvqa_accuracy": 0.0, "error": str(e)}
 
 
@@ -362,19 +362,19 @@ def vlm_evaluator(
     Returns:
         Dictionary of evaluation results
     """
-    logging.info(f"{Fore.GREEN}=== VLM Evaluation ==={Fore.RESET}")
-    logging.info(f"{Fore.CYAN}Model: {model_path}{Fore.RESET}")
+    print(f"{Fore.GREEN}=== VLM Evaluation ==={Fore.RESET}")
+    print(f"{Fore.CYAN}Model: {model_path}{Fore.RESET}")
     
     # 기본 tasks
     if tasks is None:
         tasks = ["vqav2", "gqa", "textvqa", "okvqa"]
     
-    logging.info(f"{Fore.CYAN}Tasks: {tasks}{Fore.RESET}")
+    print(f"{Fore.CYAN}Tasks: {tasks}{Fore.RESET}")
     
     # 모델 로드
-    logging.info(f"{Fore.CYAN}Loading VLM model...{Fore.RESET}")
+    print(f"{Fore.CYAN}Loading VLM model...{Fore.RESET}")
     
-    model = AutoModelForVision2Seq.from_pretrained(
+    model = LlavaForConditionalGeneration.from_pretrained(
         model_path,
         device_map="auto",
         torch_dtype=torch.bfloat16,
@@ -384,7 +384,7 @@ def vlm_evaluator(
     processor = setup_vlm_processor(model_path)
     model.eval()
     
-    logging.info(f"{Fore.GREEN}Model loaded successfully{Fore.RESET}")
+    print(f"{Fore.GREEN}Model loaded successfully{Fore.RESET}")
     
     # Task 실행
     all_results = {}
@@ -397,7 +397,7 @@ def vlm_evaluator(
     
     for task in tasks:
         if task in task_functions:
-            logging.info(f"\n{Fore.MAGENTA}>>> Running {task.upper()} <<<{Fore.RESET}")
+            print(f"\n{Fore.MAGENTA}>>> Running {task.upper()} <<<{Fore.RESET}")
             
             try:
                 results = task_functions[task](
@@ -418,7 +418,7 @@ def vlm_evaluator(
     accuracies = [v for k, v in all_results.items() if k.endswith('_accuracy')]
     if accuracies:
         all_results['average_accuracy'] = sum(accuracies) / len(accuracies)
-        logging.info(
+        print(
             f"\n{Fore.GREEN}Average Accuracy: {all_results['average_accuracy']:.4f}{Fore.RESET}"
         )
     
@@ -429,7 +429,7 @@ def vlm_evaluator(
     with open(result_path, 'w') as f:
         json.dump(all_results, f, indent=4)
     
-    logging.info(f"{Fore.GREEN}Results saved to: {result_path}{Fore.RESET}")
+    print(f"{Fore.GREEN}Results saved to: {result_path}{Fore.RESET}")
     
     return all_results
 
@@ -457,5 +457,5 @@ def run_from_config() -> None:
         config = read_config(args.config)
         vlm_evaluator(**config)
     except Exception as e:
-        logging.error(f"{Fore.RED}Evaluation failed: {str(e)}{Fore.RESET}")
+        print(f"{Fore.RED}Evaluation failed: {str(e)}{Fore.RESET}")
         raise

@@ -11,7 +11,7 @@ import torch
 import yaml
 from colorama import Fore, init
 from tqdm import tqdm
-from transformers import AutoModelForVision2Seq
+from transformers import AutoLlavaForConditionalGenerationModel, BitsAndBytesConfig
 
 from .utils import (
     adam_method, 
@@ -86,7 +86,6 @@ def vlm_cosine_dist(
     Returns:
         Path to saved model
     """
-    from transformers import BitsAndBytesConfig
     
     device_map = "auto" if torch.cuda.is_available() else "cpu"
     quantization_config = None
@@ -99,10 +98,10 @@ def vlm_cosine_dist(
             bnb_4bit_compute_dtype=torch.bfloat16
         )
     
-    logging.info(f"{Fore.GREEN}Loading VLM model: {model_path}{Fore.RESET}")
+    print(f"{Fore.GREEN}Loading VLM model: {model_path}{Fore.RESET}")
     
     # VLM 모델 로드
-    model = AutoModelForVision2Seq.from_pretrained(
+    model = LlavaForConditionalGeneration.from_pretrained(
         model_path,
         device_map=device_map,
         quantization_config=quantization_config,
@@ -113,12 +112,10 @@ def vlm_cosine_dist(
     
     # Processor 설정
     processor = setup_vlm_processor(model_path)
-    
-    # Language model layers 가져오기
     layers, num_hidden_layers = get_vlm_layers(model)
     hidden_size = model.config.text_config.hidden_size
     
-    logging.info(f"{Fore.GREEN}Model loaded - Layers: {num_hidden_layers}, Hidden: {hidden_size}{Fore.RESET}")
+    print(f"{Fore.GREEN}Model loaded - Layers: {num_hidden_layers}, Hidden: {hidden_size}{Fore.RESET}")
     
     model.eval()
     
@@ -145,7 +142,7 @@ def vlm_cosine_dist(
             layer.mlp.register_forward_hook(save_mlp_activation(f'layer_{i}_mlp'))
         )
     
-    logging.info(f"{Fore.GREEN}Registered {len(hooks)} hooks{Fore.RESET}")
+    print(f"{Fore.GREEN}Registered {len(hooks)} hooks{Fore.RESET}")
     
     # Activation 저장 버퍼
     total_tokens = dataset_size * max_length if dataset_size else len(dataloader.dataset) * max_length
@@ -162,7 +159,7 @@ def vlm_cosine_dist(
     )
     
     if accurate:
-        logging.info(f"{Fore.YELLOW}ACCURATE MODE - More memory required{Fore.RESET}")
+        print(f"{Fore.YELLOW}ACCURATE MODE - More memory required{Fore.RESET}")
         a3 = torch.empty(
             (total_tokens, hidden_size),
             dtype=torch.bfloat16,
@@ -219,10 +216,10 @@ def vlm_cosine_dist(
     if accurate:
         a3 = a3[:cnt]
     
-    logging.info(f"{Fore.GREEN}Collected {cnt} activation samples{Fore.RESET}")
+    print(f"{Fore.GREEN}Collected {cnt} activation samples{Fore.RESET}")
     
     # Transform 추정
-    logging.info(f"{Fore.CYAN}Estimating transformation - Solver: {solver}, Loss: {loss}{Fore.RESET}")
+    print(f"{Fore.CYAN}Estimating transformation - Solver: {solver}, Loss: {loss}{Fore.RESET}")
     
     if solver == "adam":
         transform = adam_method(
@@ -240,7 +237,7 @@ def vlm_cosine_dist(
             solver=solver
         )
     
-    logging.info(f"{Fore.GREEN}Transform estimated: {transform.shape}{Fore.RESET}")
+    print(f"{Fore.GREEN}Transform estimated: {transform.shape}{Fore.RESET}")
     
     # 메모리 정리
     for hook in hooks:
@@ -251,9 +248,9 @@ def vlm_cosine_dist(
     torch.cuda.empty_cache()
     
     # 모델 재로드 및 truncate
-    logging.info(f"{Fore.CYAN}Reloading model for truncation{Fore.RESET}")
+    print(f"{Fore.CYAN}Reloading model for truncation{Fore.RESET}")
     
-    model = AutoModelForVision2Seq.from_pretrained(
+    model = LlavaForConditionalGeneration.from_pretrained(
         model_path,
         device_map='cpu',
         torch_dtype=torch.bfloat16,
@@ -276,11 +273,11 @@ def vlm_cosine_dist(
     model.save_pretrained(final_path)
     processor.save_pretrained(final_path)
     
-    logging.info(f"{Fore.GREEN}Model saved to: {final_path}{Fore.RESET}")
+    print(f"{Fore.GREEN}Model saved to: {final_path}{Fore.RESET}")
     
     if save_transform_only:
         torch.save(transform, f"{final_path}_transform.pt")
-        logging.info(f"{Fore.GREEN}Transform saved separately{Fore.RESET}")
+        print(f"{Fore.GREEN}Transform saved separately{Fore.RESET}")
     
     # 최종 정리
     del model, a1, a2
