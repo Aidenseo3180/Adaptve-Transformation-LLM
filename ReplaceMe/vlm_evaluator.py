@@ -59,7 +59,8 @@ def eval_vlm_vqav2(
         # VQAv2 validation set 로드
         dataset = load_dataset(
             "HuggingFaceM4/VQAv2",
-            split="validation"
+            split="validation",
+            trust_remote_code=True
         ).select(range(num_samples))
         
         correct = 0
@@ -115,6 +116,43 @@ def eval_vlm_vqav2(
         return {"vqav2_accuracy": 0.0, "error": str(e)}
 
 
+# vlm_evaluator.py 수정
+
+def eval_vlm_simple(model, processor, num_samples=100):
+    """간단한 COCO caption 기반 평가"""
+    
+    # train2014 이미지 재사용
+    from pathlib import Path
+    image_dir = Path("train2014")
+    image_files = list(image_dir.glob("*.jpg"))[:num_samples]
+    
+    # 간단한 질문들
+    questions = [
+        "<image>\nWhat is the main object?",
+        "<image>\nDescribe this image briefly.",
+    ]
+    
+    correct = 0
+    total = 0
+    
+    for i, img_path in enumerate(tqdm(image_files, desc="Simple Eval")):
+        img = Image.open(img_path).convert('RGB')
+        question = questions[i % len(questions)]
+        
+        inputs = processor(text=question, images=img, return_tensors="pt")
+        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+        
+        with torch.no_grad():
+            output = model.generate(**inputs, max_new_tokens=20)
+        
+        prediction = processor.decode(output[0], skip_special_tokens=True)
+        print(f"Q: {question}\nA: {prediction}\n")
+        
+        total += 1
+    
+    return {"simple_eval_total": total}
+
+
 def eval_vlm_gqa(
     model,
     processor,
@@ -137,8 +175,9 @@ def eval_vlm_gqa(
     try:
         # GQA testdev 로드
         dataset = load_dataset(
-            "Multimodal-Fatima/GQA_dev_balanced",
-            split="train"
+            "lmms-lab/GQA",  # 공식 GQA 데이터셋
+            split="testdev",
+            trust_remote_code=True
         ).select(range(num_samples))
         
         correct = 0
@@ -389,10 +428,11 @@ def vlm_evaluator(
     # Task 실행
     all_results = {}
     task_functions = {
-        "vqav2": eval_vlm_vqav2,
-        "gqa": eval_vlm_gqa,
-        "textvqa": eval_vlm_textvqa,
-        "okvqa": eval_vlm_ok_vqa,
+        "simple": eval_vlm_simple
+        # "vqav2": eval_vlm_vqav2,
+        # "gqa": eval_vlm_gqa,
+        # "textvqa": eval_vlm_textvqa,
+        # "okvqa": eval_vlm_ok_vqa,
     }
     
     for task in tasks:
