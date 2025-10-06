@@ -24,7 +24,8 @@ token: null
 
 # Evaluation
 eval_tasks:
-  - "vqav2"
-  - "gqa"
+    - "simple"
+  # - "vqav2"
+  # - "gqa"
 eval_num_samples: 500
 eval_batch_size: 4
