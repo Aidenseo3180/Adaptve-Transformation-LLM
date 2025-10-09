@@ -30,36 +30,8 @@ def ReplaceMe_pipeline(config):
     # Extract the relevant parameters based on function signatures
     signature = inspect.signature(profile_distances)
     filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-    # if config['distances_path'] is None:
-    #     # Profile distances using filtered configuration
-    #     profile_distances(**filtered_config)
-    #     config['distances_path'] = "./distances.pth"
 
-    if config["method"] == "cosine":  # Original cosine/adam methods
-        signature = inspect.signature(cosine_dist)
-        filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-        
-        # Load average distances and select non-overlapping blocks
-        average_distances = torch.load(filtered_config['distances_path'], weights_only=False)  
-        selected_blocks = select_non_overlapping_blocks(
-            average_distances, 
-            filtered_config['layers_to_skip'], 
-            num_blocks=filtered_config['num_A'], 
-            merge_consecutive=filtered_config['merge_consecutive']
-        )
-        
-        # Calculate start and end IDs, and number of layers
-        start_ids = sorted([x[0] for x in selected_blocks])
-        end_ids = sorted([x[1] for x in selected_blocks])
-        num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
-        num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
-        
-        # Iterate over each selected block
-        for i in range(len(selected_blocks)):
-            path = cosine_dist(**filtered_config, start_id=start_ids[i], end_id=end_ids[i], num_layer=num_layers[i])
-            filtered_config["model_path"] = path
-
-    elif config["method"] == "layer_quantization":
+    if config["method"] == "layer_quantization":
         from .layer_quantization import apply_layer_quantization
 
         # Profile distances if not already done
@@ -140,6 +112,7 @@ def ReplaceMe_pipeline(config):
     elif config["method"] == "vlm_cosine":
         from .vlm_cosine_dist import vlm_cosine_dist
         from .vlm_distance import vlm_profile_distances
+        import os
 
         print(f"{Fore.MAGENTA}=== VLM COSINE METHOD ==={Fore.RESET}")
         
@@ -186,31 +159,111 @@ def ReplaceMe_pipeline(config):
             )
             filtered_config["model_path"] = path
         
-        # Evaluation
-        from .vlm_evaluator import vlm_evaluator
+        return
 
-        signature = inspect.signature(evaluator)
-        eval_config = {k: v for k, v in config.items() if k in signature.parameters}
-        eval_config["model_path"] = path
+
+    elif config["method"] == "vlm_cosine":
+        from .vlm_cosine_dist import vlm_cosine_dist
+        from .vlm_distance import vlm_profile_distances
+        import os
+
+        print(f"{Fore.MAGENTA}=== VLM COSINE METHOD ==={Fore.RESET}")
         
-        # VLM Evaluation
-        print(f"{Fore.MAGENTA}=== VLM Evaluation ==={Fore.RESET}")
+        signature = inspect.signature(vlm_profile_distances)
+        filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
-        eval_config = {
-            "model_path": path,
-            "tasks": config.get("eval_tasks", ["vqav2", "gqa"]),
-            "num_samples": config.get("eval_num_samples", 500),
-            "batch_size": config.get("eval_batch_size", 4),
-            "token": config.get("token")
-        }
+        if config.get('distances_path') is None or not os.path.exists(config.get('distances_path', '')):
+            print(f"{Fore.CYAN}Profiling VLM distances...{Fore.RESET}")
+            vlm_profile_distances(**filtered_config)
+            config['distances_path'] = "./vlm_distances.pth"
         
-        vlm_evaluator(**eval_config)
+        signature = inspect.signature(vlm_cosine_dist)
+        filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
+        
+        average_distances = torch.load(config['distances_path'], weights_only=False)
+        selected_blocks = select_non_overlapping_blocks(
+            average_distances,
+            config['layers_to_skip'],
+            num_blocks=config.get('num_A', 1),
+            merge_consecutive=config.get('merge_consecutive', True)
+        )
+        
+        start_ids = sorted([x[0] for x in selected_blocks])
+        end_ids = sorted([x[1] for x in selected_blocks])
+        num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
+        num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
+
+        print(f"[DEBUG] Selected blocks: {selected_blocks}")
+        print(f"[DEBUG] start_ids: {start_ids}")
+        print(f"[DEBUG] end_ids: {end_ids}")
+        print(f"[DEBUG] num_layers: {num_layers}")
+        
+        for i in range(len(selected_blocks)):
+            print(f"{Fore.YELLOW}Processing block {i+1}/{len(selected_blocks)}{Fore.RESET}")
+            path = vlm_cosine_dist(
+                **filtered_config,
+                start_id=start_ids[i],
+                end_id=end_ids[i],
+                num_layer=num_layers[i]
+            )
+            filtered_config["model_path"] = path
+        
+        return
+
+    elif config["method"] == "vlm_modality_aware":
+        from .vlm_modality_cosine_dist import vlm_modality_cosine_dist
+        from .vlm_distance import vlm_profile_distances
+        import os
+
+        print(f"{Fore.MAGENTA}=== VLM MODALITY-AWARE COSINE METHOD ==={Fore.RESET}")
+        
+        signature = inspect.signature(vlm_profile_distances)
+        filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
+        
+        if config.get('distances_path') is None or not os.path.exists(config.get('distances_path', '')):
+            print(f"{Fore.CYAN}Profiling VLM distances...{Fore.RESET}")
+            vlm_profile_distances(**filtered_config)
+            config['distances_path'] = "./vlm_distances.pth"
+        
+        signature = inspect.signature(vlm_modality_cosine_dist)
+        filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
+        
+        average_distances = torch.load(config['distances_path'], weights_only=False)
+        selected_blocks = select_non_overlapping_blocks(
+            average_distances,
+            config['layers_to_skip'],
+            num_blocks=config.get('num_A', 1),
+            merge_consecutive=config.get('merge_consecutive', True)
+        )
+        
+        start_ids = sorted([x[0] for x in selected_blocks])
+        end_ids = sorted([x[1] for x in selected_blocks])
+        num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
+        num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
+
+        print(f"[DEBUG] Selected blocks: {selected_blocks}")
+        print(f"[DEBUG] start_ids: {start_ids}")
+        print(f"[DEBUG] end_ids: {end_ids}")
+        print(f"[DEBUG] num_layers: {num_layers}")
+        
+        for i in range(len(selected_blocks)):
+            print(f"{Fore.YELLOW}Processing block {i+1}/{len(selected_blocks)}{Fore.RESET}")
+            path = vlm_modality_cosine_dist(
+                **filtered_config,
+                start_id=start_ids[i],
+                end_id=end_ids[i],
+                num_layer=num_layers[i]
+            )
+            filtered_config["model_path"] = path
+        
+        print(f"{Fore.GREEN}✓ Modality-aware pruning completed{Fore.RESET}")
+        return
 
     else:
         raise ValueError(f"Unknown method: {config['method']}")
 
 
-    # # Evaluate using the updated configuration
+    # Evaluate using the updated configuration
     # signature = inspect.signature(evaluator)
     # filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
     # filtered_config["model_path"] = path

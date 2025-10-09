@@ -22,10 +22,10 @@ merge_consecutive: False
 accurate: False
 token: null
 
-# Evaluation
-eval_tasks:
-    - "simple"
-  # - "vqav2"
-  # - "gqa"
-eval_num_samples: 500
-eval_batch_size: 4
+# # Evaluation
+# eval_tasks:
+#     - "simple"
+#   # - "vqav2"
+#   # - "gqa"
+# eval_num_samples: 500
+# eval_batch_size: 4
