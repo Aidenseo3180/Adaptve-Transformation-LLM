@@ -7,8 +7,8 @@ image_dir: "train2014"
 batch_size: 4
 max_length: 512
 layers_to_skip: 8
-dataset_size: 500
-use_4bit: False  # 메모리 충분하면 False
+dataset_size: 2000
+use_4bit: True  # 메모리 충분하면 False
 save_path: null
 save_transform_only: True
 diag: False
