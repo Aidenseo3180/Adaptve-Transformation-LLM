@@ -543,7 +543,7 @@ def truncate_vlm_model(model: nn.Module, start_layer: int, end_layer: int) -> nn
 
 def apply_vlm_transform(model, transform: torch.Tensor, layer_idx: int):
     """Apply linear transformation to VLM language model layer."""
-    print(f"[VLM Transform] Applying to language_model.model.layers[{layer_idx}].mlp.down_proj")
+    print(f"[VLM Transform] Applying to language_model.model.layers[{layer_idx}].mlp.down_proj ")
     
     if hasattr(model, 'language_model') and hasattr(model.language_model, 'model'):
         target_layer = model.language_model.model.layers[layer_idx]
