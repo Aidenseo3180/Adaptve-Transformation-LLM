@@ -31,50 +31,7 @@ def ReplaceMe_pipeline(config):
     signature = inspect.signature(profile_distances)
     filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
 
-    if config["method"] == "layer_quantization":
-        from .layer_quantization import apply_layer_quantization
-
-        # Profile distances if not already done
-        if config['distances_path'] is None:
-            signature = inspect.signature(profile_distances)
-            filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
-            profile_distances(**filtered_config)
-            config['distances_path'] = "./distances.pth"
-        
-        # Load layer importance scores
-        logging.info(f"{Fore.CYAN}Loading layer importance scores...{Fore.RESET}")
-        layer_distances = torch.load(config['distances_path'], weights_only=False)
-        
-        # For layers_to_skip=1, each score represents individual layer importance
-        # Higher distance = less important (more similar input/output)
-        layer_indices_sorted = sorted(
-            range(len(layer_distances)), 
-            key=lambda i: layer_distances[i], 
-            reverse=True  # Most redundant first
-        )
-        
-        # Select top N least important layers for quantization
-        num_layers_to_quantize = config.get('num_layers_to_quantize', 16)
-        layers_to_quantize = layer_indices_sorted[:num_layers_to_quantize]
-        
-        logging.info(f"{Fore.YELLOW}Selected {num_layers_to_quantize} least important layers:{Fore.RESET}")
-        logging.info(f"Layers: {sorted(layers_to_quantize)}")
-        logging.info(f"Importance scores: {[layer_distances[i] for i in layers_to_quantize[:5]]}...")
-        
-        # Apply quantization
-        quantization_bits = config.get('quantization_bits', 8)
-        path = apply_layer_quantization(
-            model_path=config['model_path'],
-            layers_to_quantize=layers_to_quantize,
-            quantization_bits=quantization_bits,
-            save_path=config.get('save_path'),
-            token=config.get('token')
-        )
-        
-        # Update config for evaluation
-        config["model_path"] = path
-
-    elif config["method"] == "vlm_cosine":
+    if config["method"] == "vlm_cosine":
         from .vlm_cosine_dist import vlm_cosine_dist
         from .vlm_distance import vlm_profile_distances
         import os
