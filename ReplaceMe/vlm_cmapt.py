@@ -107,19 +107,19 @@ def identify_vision_tokens_robust(
     num_text = text_mask.sum().item()
     total = num_vision + num_text
     
-    print(f"\n{Fore.GREEN}Vision Token Identification Results:{Fore.RESET}")
-    print(f"  Total tokens: {total:,}")
-    print(f"  Vision tokens: {num_vision:,} ({num_vision/total*100:.1f}%)")
-    print(f"  Text tokens: {num_text:,} ({num_text/total*100:.1f}%)")
+    # print(f"\n{Fore.GREEN}Vision Token Identification Results:{Fore.RESET}")
+    # print(f"  Total tokens: {total:,}")
+    # print(f"  Vision tokens: {num_vision:,} ({num_vision/total*100:.1f}%)")
+    # print(f"  Text tokens: {num_text:,} ({num_text/total*100:.1f}%)")
     
     if num_vision == 0:
         raise ValueError(f"{Fore.RED}ERROR: No vision tokens detected!{Fore.RESET}")
     
     # Sanity check: vision tokens should be ~40-60% of total
-    vision_ratio = num_vision / total
-    if vision_ratio < 0.3 or vision_ratio > 0.7:
-        print(f"{Fore.YELLOW}WARNING: Unusual vision token ratio: {vision_ratio:.1%}{Fore.RESET}")
-        print(f"{Fore.YELLOW}Expected: 40-60%. Check if identification is correct.{Fore.RESET}")
+    # vision_ratio = num_vision / total
+    # if vision_ratio < 0.3 or vision_ratio > 0.7:
+    #     print(f"{Fore.YELLOW}WARNING: Unusual vision token ratio: {vision_ratio:.1%}{Fore.RESET}")
+    #     print(f"{Fore.YELLOW}Expected: 40-60%. Check if identification is correct.{Fore.RESET}")
     
     return vision_mask, text_mask
 
@@ -172,15 +172,11 @@ def compute_intra_modal_similarity(
     
     return similarity
 
-
 def alignment_preserving_loss(
     pred: torch.Tensor,
     target: torch.Tensor,
     vision_mask: torch.Tensor,
     text_mask: torch.Tensor,
-    target_alignment_vt: torch.Tensor,
-    target_similarity_v: torch.Tensor,
-    target_similarity_t: torch.Tensor,
     lambda_output: float = 1.0,
     lambda_alignment: float = 0.3,
     lambda_intra: float = 0.1,
@@ -189,22 +185,8 @@ def alignment_preserving_loss(
     """
     Compute combined loss with alignment preservation.
     
-    Args:
-        pred: Predicted activations [N, hidden_size]
-        target: Target activations [N, hidden_size]
-        vision_mask: Boolean mask for vision tokens [N]
-        text_mask: Boolean mask for text tokens [N]
-        target_alignment_vt: Target vision-text alignment matrix [V, T]
-        target_similarity_v: Target vision-vision similarity matrix [V, V]
-        target_similarity_t: Target text-text similarity matrix [T, T]
-        lambda_output: Weight for output matching loss
-        lambda_alignment: Weight for cross-modal alignment loss
-        lambda_intra: Weight for intra-modal structure loss
-        debug: Print detailed loss breakdown
-        
-    Returns:
-        total_loss: Combined loss
-        loss_dict: Dictionary with individual losses
+    NOTE: Target alignment computed from current batch (not pre-computed).
+    This ensures shape compatibility and semantic correctness.
     """
     # Ensure float64 for numerical stability
     pred = pred.to(torch.float64)
@@ -224,24 +206,41 @@ def alignment_preserving_loss(
     
     # Loss 2: Cross-Modal Alignment Preservation
     if vision_pred.shape[0] > 0 and text_pred.shape[0] > 0:
-        pred_alignment_vt = compute_alignment_matrix(vision_pred, text_pred, normalize=True)
+        # Compute BOTH target and pred alignment from current batch
+        # This ensures shape compatibility!
+        target_alignment_vt = compute_alignment_matrix(
+            vision_target, text_target, normalize=True
+        )
+        pred_alignment_vt = compute_alignment_matrix(
+            vision_pred, text_pred, normalize=True
+        )
         
-        # MSE between alignment matrices
+        # Now shapes match!
         alignment_loss = F.mse_loss(pred_alignment_vt, target_alignment_vt)
     else:
         alignment_loss = torch.tensor(0.0, device=pred.device)
     
     # Loss 3: Intra-Modal Structure Preservation
     # Vision-vision similarity
-    if vision_pred.shape[0] > 1:
-        pred_similarity_v = compute_intra_modal_similarity(vision_pred, normalize=True)
+    if vision_pred.shape[0] > 10:
+        target_similarity_v = compute_intra_modal_similarity(
+            vision_target, normalize=True
+        )
+        pred_similarity_v = compute_intra_modal_similarity(
+            vision_pred, normalize=True
+        )
         intra_vision_loss = F.mse_loss(pred_similarity_v, target_similarity_v)
     else:
         intra_vision_loss = torch.tensor(0.0, device=pred.device)
     
     # Text-text similarity
-    if text_pred.shape[0] > 1:
-        pred_similarity_t = compute_intra_modal_similarity(text_pred, normalize=True)
+    if text_pred.shape[0] > 10:
+        target_similarity_t = compute_intra_modal_similarity(
+            text_target, normalize=True
+        )
+        pred_similarity_t = compute_intra_modal_similarity(
+            text_pred, normalize=True
+        )
         intra_text_loss = F.mse_loss(pred_similarity_t, target_similarity_t)
     else:
         intra_text_loss = torch.tensor(0.0, device=pred.device)
@@ -267,6 +266,9 @@ def alignment_preserving_loss(
     
     if debug:
         print(f"\n{Fore.YELLOW}[Loss Breakdown]{Fore.RESET}")
+        print(f"  Batch shapes: V={vision_pred.shape[0]}, T={text_pred.shape[0]}")
+        if vision_pred.shape[0] > 0 and text_pred.shape[0] > 0:
+            print(f"  Alignment matrix shape: {pred_alignment_vt.shape}")
         print(f"  Output matching: {output_loss.item():.6f} (weight: {lambda_output})")
         print(f"  Cross-modal alignment: {loss_dict['alignment']:.6f} (weight: {lambda_alignment})")
         print(f"  Intra-modal (vision): {loss_dict['intra_vision']:.6f}")
@@ -275,7 +277,6 @@ def alignment_preserving_loss(
         print(f"  {Fore.GREEN}TOTAL: {loss_dict['total']:.6f}{Fore.RESET}")
     
     return total_loss, loss_dict
-
 
 def estimate_cmapt_transform(
     a1: torch.Tensor,
@@ -293,8 +294,8 @@ def estimate_cmapt_transform(
     """
     Estimate transformation matrix using CMAPT objective.
     
-    Key: Input tensors (a1, a2) are bfloat16 and on CPU.
-    Will convert to float64 per batch on GPU for optimization.
+    Key: Target alignment computed per-batch (not pre-computed).
+    This ensures shape compatibility and is semantically correct.
     """
     print(f"\n{Fore.MAGENTA}{'='*70}{Fore.RESET}")
     print(f"{Fore.MAGENTA}CMAPT: Cross-Modal Alignment Preserving Transform{Fore.RESET}")
@@ -314,68 +315,22 @@ def estimate_cmapt_transform(
     print(f"\n{Fore.CYAN}Loss Weights:{Fore.RESET}")
     print(f"  λ_output (output matching): {lambda_output}")
     print(f"  λ_alignment (cross-modal): {lambda_alignment}")
-    print(f"  λ_intra (intra-modal): {lambda_intra}\n")
+    print(f"  λ_intra (intra-modal): {lambda_intra}")
     
-    # ===== STEP 1: Compute Target Alignment/Similarity Matrices =====
-    print(f"{Fore.GREEN}[Step 1/3] Computing target alignment structures...{Fore.RESET}")
+    print(f"\n{Fore.YELLOW}Note: Target alignment computed per-batch for shape compatibility{Fore.RESET}\n")
     
-    # Sample for efficiency (use subset to compute target matrices)
-    sample_size = min(10000, num_samples)
-    sample_indices = torch.randperm(num_samples)[:sample_size]
-    
-    print(f"  Using {sample_size:,} samples for target computation...")
-    
-    with torch.no_grad():
-        # Move sample to device and convert to float64
-        a2_sample = a2[sample_indices].to(device=device, dtype=torch.float64)
-        vision_mask_sample = vision_masks[sample_indices].to(device=device)
-        text_mask_sample = text_masks[sample_indices].to(device=device)
-        
-        # Extract modality-specific features
-        vision_target = a2_sample[vision_mask_sample]
-        text_target = a2_sample[text_mask_sample]
-        
-        print(f"  Vision features: {vision_target.shape}")
-        print(f"  Text features: {text_target.shape}")
-        
-        # Compute target alignment matrix (Vision x Text)
-        print(f"  Computing vision-text alignment matrix...")
-        target_alignment_vt = compute_alignment_matrix(
-            vision_target, text_target, normalize=True
-        )
-        print(f"  Alignment matrix shape: {target_alignment_vt.shape}")
-        
-        # Compute target intra-modal similarities
-        print(f"  Computing vision-vision similarity matrix...")
-        target_similarity_v = compute_intra_modal_similarity(
-            vision_target, normalize=True
-        )
-        print(f"  Vision similarity shape: {target_similarity_v.shape}")
-        
-        print(f"  Computing text-text similarity matrix...")
-        target_similarity_t = compute_intra_modal_similarity(
-            text_target, normalize=True
-        )
-        print(f"  Text similarity shape: {target_similarity_t.shape}")
-        
-        del a2_sample, vision_target, text_target
-        torch.cuda.empty_cache()
-    
-    print(f"{Fore.GREEN}  ✓ Target structures computed{Fore.RESET}\n")
-    
-    # ===== STEP 2: Initialize Transform =====
-    print(f"{Fore.GREEN}[Step 2/3] Initializing transformation matrix...{Fore.RESET}")
+    # ===== Initialize Transform (no pre-computation needed!) =====
+    print(f"{Fore.GREEN}Initializing transformation matrix...{Fore.RESET}")
     
     transform = torch.eye(hidden_size, dtype=torch.float64, device=device, requires_grad=True)
     optimizer = torch.optim.Adam([transform], lr=lr)
     
     print(f"  Transform shape: {transform.shape}")
     print(f"  Transform dtype: {transform.dtype}")
-    print(f"  Transform device: {transform.device}")
-    print(f"  Requires grad: {transform.requires_grad}\n")
+    print(f"  Transform device: {transform.device}\n")
     
-    # ===== STEP 3: Optimization Loop =====
-    print(f"{Fore.GREEN}[Step 3/3] Optimizing transformation...{Fore.RESET}\n")
+    # ===== Optimization Loop =====
+    print(f"{Fore.GREEN}Starting optimization...{Fore.RESET}\n")
     
     num_batches = (num_samples + batch_size - 1) // batch_size
     best_loss = float('inf')
@@ -412,22 +367,18 @@ def estimate_cmapt_transform(
             # Debug first batch
             if batch_idx == 0 and epoch == 0:
                 print(f"\n{Fore.YELLOW}[DEBUG] First batch:{Fore.RESET}")
-                print(f"  a1_batch: {a1_batch.dtype}, {a1_batch.device}, {a1_batch.shape}")
-                print(f"  a2_batch: {a2_batch.dtype}, {a2_batch.device}, {a2_batch.shape}")
-                print(f"  transform: {transform.dtype}, {transform.device}, {transform.shape}")
-                print(f"  Vision tokens in batch: {vision_mask_batch.sum().item()}")
-                print(f"  Text tokens in batch: {text_mask_batch.sum().item()}\n")
+                print(f"  a1_batch: {a1_batch.shape}, {a1_batch.dtype}, {a1_batch.device}")
+                print(f"  a2_batch: {a2_batch.shape}, {a2_batch.dtype}, {a2_batch.device}")
+                print(f"  Vision tokens: {vision_mask_batch.sum().item()}")
+                print(f"  Text tokens: {text_mask_batch.sum().item()}")
             
             # Forward pass
             pred = a1_batch @ transform
             
-            # Compute loss with alignment preservation
+            # Compute loss (target computed inside from a2_batch!)
             loss, loss_dict = alignment_preserving_loss(
                 pred, a2_batch,
                 vision_mask_batch, text_mask_batch,
-                target_alignment_vt,
-                target_similarity_v,
-                target_similarity_t,
                 lambda_output=lambda_output,
                 lambda_alignment=lambda_alignment,
                 lambda_intra=lambda_intra,
@@ -476,7 +427,6 @@ def estimate_cmapt_transform(
     print(f"{Fore.GREEN}{'='*70}{Fore.RESET}\n")
     
     return transform.detach()
-
 
 def vlm_cmapt(
     model_path: str,
