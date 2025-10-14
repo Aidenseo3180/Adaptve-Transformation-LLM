@@ -263,7 +263,7 @@ def adam_method(
     dataset = ActivationDataset(a1, a2, a3)
     loader = DataLoader(dataset, batch_size=1024, shuffle=True)
 
-    with tqdm(range(10), desc="Optimizing Transformation") as pbar:
+    with tqdm(range(3), desc="Optimizing Transformation") as pbar:
         for _ in pbar:
             for X, Y, Z in loader:
                 optimizer.zero_grad()
@@ -412,8 +412,11 @@ def get_vlm_calib_dataloader(
 ) -> DataLoader:
     """Load VLM calibration dataset from local COCO images."""
     from pathlib import Path
-    from PIL import Image
+    from PIL import Image, PngImagePlugin
     import datasets
+    
+    # PIL 제한 완화
+    PngImagePlugin.MAX_TEXT_CHUNK = 10 * (1024**2)
     
     print(f"[VLM DataLoader] Loading images from {image_dir}")
     
@@ -426,9 +429,7 @@ def get_vlm_calib_dataloader(
     
     if dataset_size:
         image_files = image_files[:dataset_size]
-        print(f"[VLM DataLoader] Using {len(image_files)} samples")
     
-    # LLaVA 질문 템플릿 (<image> 토큰 포함!)
     questions = [
         "<image>\nWhat is in this image?",
         "<image>\nDescribe what you see.",
@@ -437,44 +438,36 @@ def get_vlm_calib_dataloader(
         "<image>\nCan you describe the scene?",
     ]
     
+    # ===== 경로만 저장 (메모리 효율적) =====
     data_list = []
     for i, img_path in enumerate(image_files):
-        try:
-            img = Image.open(img_path).convert('RGB')
-            data_list.append({
-                'image': img,
-                'text': questions[i % len(questions)]
-            })
-        except Exception as e:
-            print(f"[VLM DataLoader] Skip {img_path.name}: {e}")
+        data_list.append({
+            'image_path': str(img_path),
+            'text': questions[i % len(questions)]
+        })
     
     dataset = datasets.Dataset.from_list(data_list)
-    print(f"[VLM DataLoader] Dataset created: {len(dataset)} valid samples")
+    print(f"[VLM DataLoader] Dataset created: {len(dataset)} samples")
     
     def collate_fn(batch):
-        images = [item['image'] for item in batch]
+        images = []
         texts = [item['text'] for item in batch]
-
-        # ===== 텍스트 확인 =====
-        # print(f"[DEBUG COLLATE] Batch size: {len(batch)}")
-        # print(f"[DEBUG COLLATE] Sample text: {texts[0][:100]}")
-        # print(f"[DEBUG COLLATE] Has <image> token: {'<image>' in texts[0]}")
-
-        result =  processor(
+        
+        for item in batch:
+            try:
+                img = Image.open(item['image_path']).convert('RGB')
+                images.append(img)
+            except Exception as e:
+                print(f"[WARN] Failed to load {item['image_path']}: {e}")
+                images.append(Image.new('RGB', (224, 224), color='gray'))
+        
+        return processor(
             text=texts,
             images=images,
             return_tensors="pt",
             padding=True,
             truncation=False
         )
-
-        # ===== Processor 결과 확인 =====
-        # print(f"[DEBUG COLLATE] Processor output keys: {result.keys()}")
-        # for k, v in result.items():
-        #     if isinstance(v, torch.Tensor):
-        #         print(f"[DEBUG COLLATE]   {k}: {v.shape}")
-        
-        return result
     
     return DataLoader(
         dataset,
@@ -543,7 +536,7 @@ def truncate_vlm_model(model: nn.Module, start_layer: int, end_layer: int) -> nn
 
 def apply_vlm_transform(model, transform: torch.Tensor, layer_idx: int):
     """Apply linear transformation to VLM language model layer."""
-    print(f"[VLM Transform] Applying to language_model.model.layers[{layer_idx}].mlp.down_proj ")
+    print(f"[VLM Transform] Applying to language_model.model.layers[{layer_idx}].mlp.down_proj")
     
     if hasattr(model, 'language_model') and hasattr(model.language_model, 'model'):
         target_layer = model.language_model.model.layers[layer_idx]

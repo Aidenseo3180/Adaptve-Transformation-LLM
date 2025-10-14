@@ -1,7 +1,7 @@
 # ============================================================
 # vlm_modality_cosine_dist.py
 # Modality-Aware Weighted Cosine Loss Implementation
-# WITH EXTENSIVE DEBUGGING
+# WITH PRE-ALLOCATED MEMORY (OPTIMIZED)
 # ============================================================
 
 import gc
@@ -151,6 +151,9 @@ def estimate_transform_modality_aware(
 ) -> torch.Tensor:
     """
     Estimate transformation matrix using modality-aware cosine loss.
+    
+    NOTE: Input tensors can be bfloat16 - will convert to float64 per batch on GPU.
+    This avoids memory explosion from converting entire dataset at once.
     """
     print(f"\n{Fore.MAGENTA}{'='*60}{Fore.RESET}")
     print(f"{Fore.MAGENTA}STARTING MODALITY-AWARE TRANSFORM ESTIMATION{Fore.RESET}")
@@ -162,6 +165,7 @@ def estimate_transform_modality_aware(
     print(f"\n{Fore.CYAN}Configuration:{Fore.RESET}")
     print(f"  Hidden size: {hidden_size}")
     print(f"  Total samples: {num_samples}")
+    print(f"  Input dtype: {a1.dtype} (will convert to float64 per batch)")
     print(f"  Batch size: {batch_size}")
     print(f"  Learning rate: {lr}")
     print(f"  Epochs: {num_epochs}")
@@ -172,6 +176,12 @@ def estimate_transform_modality_aware(
     # Initialize transform as identity
     transform = torch.eye(hidden_size, dtype=torch.float64, device=device, requires_grad=True)
     optimizer = torch.optim.Adam([transform], lr=lr)
+    
+    print(f"\n{Fore.CYAN}Transform initialization:{Fore.RESET}")
+    print(f"  Shape: {transform.shape}")
+    print(f"  Dtype: {transform.dtype}")
+    print(f"  Device: {transform.device}")
+    print(f"  Requires grad: {transform.requires_grad}")
     
     num_batches = (num_samples + batch_size - 1) // batch_size
     
@@ -193,11 +203,18 @@ def estimate_transform_modality_aware(
             end_idx = min((i + 1) * batch_size, num_samples)
             batch_indices = indices[start_idx:end_idx]
             
-            # Get batch
-            a1_batch = a1[batch_indices].to(device)
-            a2_batch = a2[batch_indices].to(device)
-            vision_mask_batch = vision_masks[batch_indices].to(device)
-            text_mask_batch = text_masks[batch_indices].to(device)
+            # Get batch and convert to float64 on GPU (explicit dtype + device)
+            a1_batch = a1[batch_indices].to(device=device, dtype=torch.float64)
+            a2_batch = a2[batch_indices].to(device=device, dtype=torch.float64)
+            vision_mask_batch = vision_masks[batch_indices].to(device=device)
+            text_mask_batch = text_masks[batch_indices].to(device=device)
+            
+            # Debug first batch
+            if i == 0 and epoch == 0:
+                print(f"\n{Fore.YELLOW}[DEBUG] First batch dtype check:{Fore.RESET}")
+                print(f"  a1_batch: {a1_batch.dtype}, {a1_batch.device}")
+                print(f"  a2_batch: {a2_batch.dtype}, {a2_batch.device}")
+                print(f"  transform: {transform.dtype}, {transform.device}")
             
             # Forward pass
             pred = a1_batch @ transform
@@ -359,14 +376,6 @@ def vlm_modality_cosine_dist(
     
     print(f"  Registered {len(hooks)} hooks on language model layers\n")
     
-    # Storage for activations and masks
-    a1_list = []
-    a2_list = []
-    if accurate:
-        a3_list = []
-    vision_mask_list = []
-    text_mask_list = []
-    
     target_layer_before = start_id - num_layer - 1
     target_layer_after = end_id - num_layer - 1
     
@@ -375,18 +384,61 @@ def vlm_modality_cosine_dist(
     print(f"  Layer after pruned block: {target_layer_after}")
     print(f"  Accurate mode: {accurate}\n")
     
-    # Gather activations
-    print(f"{Fore.GREEN}[Step 4/7] Gathering activations...{Fore.RESET}")
+    # ===== PRE-ALLOCATE MEMORY (메모리 사전 할당) =====
+    print(f"{Fore.GREEN}[Step 4/7] Pre-allocating memory for activations...{Fore.RESET}")
     
-    batch_count = 0
+    total_samples = dataset_size if dataset_size else len(dataloader.dataset)
+    
+    # LLaVA: visual(576) + text(평균 100) + 여유 = 1000 tokens/image
+    # 안전하게 1.5배 버퍼 추가
+    estimated_tokens_per_image = 1000
+    total_tokens = int(total_samples * estimated_tokens_per_image * 1.5)
+    
+    print(f"{Fore.CYAN}Memory allocation:{Fore.RESET}")
+    print(f"  Images: {total_samples}")
+    print(f"  Estimated: {total_tokens:,} tokens (1.5x buffer)")
+    print(f"  Hidden size: {hidden_size}")
+    
+    a1 = torch.empty(
+        (total_tokens, hidden_size),
+        dtype=torch.bfloat16,
+        device='cpu'
+    )
+    a2 = torch.empty(
+        (total_tokens, hidden_size),
+        dtype=torch.bfloat16,
+        device='cpu'
+    )
+    vision_masks = torch.empty(
+        (total_tokens,),
+        dtype=torch.bool,
+        device='cpu'
+    )
+    text_masks = torch.empty(
+        (total_tokens,),
+        dtype=torch.bool,
+        device='cpu'
+    )
+    
+    if accurate:
+        print(f"{Fore.YELLOW}ACCURATE MODE (using more memory){Fore.RESET}")
+        a3 = torch.empty(
+            (total_tokens, hidden_size),
+            dtype=torch.bfloat16,
+            device='cpu'
+        )
+    
+    cnt = 0  # Current position in pre-allocated tensors
+    
+    # Gather activations
+    print(f"\n{Fore.GREEN}[Step 5/7] Gathering activations...{Fore.RESET}")
+    
     for batch_idx, batch in enumerate(tqdm(
         dataloader,
         desc=f"{Fore.RED}Gathering Activations{Fore.RESET}",
         dynamic_ncols=True,
         colour="red"
     )):
-        batch_count += 1
-        
         # Debug first batch
         if batch_idx == 0:
             print(f"\n{Fore.YELLOW}[DEBUG] First batch info:{Fore.RESET}")
@@ -419,9 +471,9 @@ def vlm_modality_cosine_dist(
         batch_size_actual = input_ids.shape[0]
         seq_len = input_ids.shape[1]
         
-        hidden_states_mlp = hidden_states_mlp.view(-1, hidden_size).to(torch.float64)
-        hidden_states_i = hidden_states[target_layer_before].view(-1, hidden_size).to(torch.float64)
-        hidden_states_n = hidden_states[target_layer_after].view(-1, hidden_size).to(torch.float64)
+        hidden_states_mlp = hidden_states_mlp.view(-1, hidden_size).to(torch.bfloat16)
+        hidden_states_i = hidden_states[target_layer_before].view(-1, hidden_size).to(torch.bfloat16)
+        hidden_states_n = hidden_states[target_layer_after].view(-1, hidden_size).to(torch.bfloat16)
         
         # Debug shapes
         if batch_idx == 0:
@@ -439,7 +491,7 @@ def vlm_modality_cosine_dist(
             vision_mask = (input_ids_flat == image_token_index)
             text_mask = ~vision_mask
         
-        # Store batch
+        # Compute activations
         a1_batch = hidden_states_mlp
         
         if accurate:
@@ -448,34 +500,61 @@ def vlm_modality_cosine_dist(
         else:
             a2_batch = hidden_states_n + hidden_states_mlp - hidden_states_i
         
-        a1_list.append(a1_batch.cpu())
-        a2_list.append(a2_batch.cpu())
-        if accurate:
-            a3_list.append(a3_batch.cpu())
-        vision_mask_list.append(vision_mask.cpu())
-        text_mask_list.append(text_mask.cpu())
+        batch_size_tokens = a1_batch.shape[0]
         
-        del hidden_states_mlp, hidden_states_i, hidden_states_n
+        # ===== BUFFER OVERFLOW CHECK =====
+        if cnt + batch_size_tokens > total_tokens:
+            print(f"\n{Fore.RED}ERROR: Buffer overflow at batch {batch_idx}!{Fore.RESET}")
+            print(f"  Current position: {cnt:,}")
+            print(f"  Batch size: {batch_size_tokens:,}")
+            print(f"  Required: {cnt + batch_size_tokens:,}")
+            print(f"  Allocated: {total_tokens:,}")
+            print(f"  Average tokens/image so far: {cnt / (batch_idx * batch_size):.1f}")
+            print(f"{Fore.YELLOW}Stopping collection early. Using {cnt:,} tokens.{Fore.RESET}")
+            break
+        
+        # Write to pre-allocated tensors
+        a1[cnt:cnt+batch_size_tokens] = a1_batch.cpu()
+        a2[cnt:cnt+batch_size_tokens] = a2_batch.cpu()
+        vision_masks[cnt:cnt+batch_size_tokens] = vision_mask.cpu()
+        text_masks[cnt:cnt+batch_size_tokens] = text_mask.cpu()
+        if accurate:
+            a3[cnt:cnt+batch_size_tokens] = a3_batch.cpu()
+        
+        cnt += batch_size_tokens
+        
+        # ===== PERIODIC PROGRESS OUTPUT =====
+        if (batch_idx + 1) % 100 == 0:
+            avg_tokens = cnt / ((batch_idx + 1) * batch_size)
+            usage_pct = (cnt / total_tokens) * 100
+            print(f"\n  [{batch_idx+1} batches] Avg tokens/image: {avg_tokens:.1f}, Buffer usage: {usage_pct:.1f}%")
+        
+        # Memory cleanup
+        del hidden_states_mlp, hidden_states_i, hidden_states_n, a1_batch, a2_batch
+        if accurate:
+            del a3_batch
         torch.cuda.empty_cache()
     
-    print(f"\n{Fore.GREEN}Processed {batch_count} batches{Fore.RESET}\n")
-    
-    # Concatenate all batches
-    print(f"{Fore.GREEN}[Step 5/7] Concatenating activations...{Fore.RESET}")
-    a1 = torch.cat(a1_list, dim=0)
-    a2 = torch.cat(a2_list, dim=0)
+    # Slice to actual used portion
+    a1 = a1[:cnt]
+    a2 = a2[:cnt]
+    vision_masks = vision_masks[:cnt]
+    text_masks = text_masks[:cnt]
     if accurate:
-        a3 = torch.cat(a3_list, dim=0)
-    vision_masks = torch.cat(vision_mask_list, dim=0)
-    text_masks = torch.cat(text_mask_list, dim=0)
+        a3 = a3[:cnt]
     
-    total_tokens = a1.shape[0]
+    # ===== FINAL STATISTICS =====
+    avg_tokens_per_image = cnt / ((batch_idx + 1) * batch_size)
+    usage_pct = (cnt / total_tokens) * 100
     num_vision = vision_masks.sum().item()
     num_text = text_masks.sum().item()
     
-    print(f"  Total tokens: {total_tokens:,}")
-    print(f"  Vision tokens: {num_vision:,} ({num_vision/total_tokens*100:.1f}%)")
-    print(f"  Text tokens: {num_text:,} ({num_text/total_tokens*100:.1f}%)")
+    print(f"\n{Fore.GREEN}Collection complete:{Fore.RESET}")
+    print(f"  Total tokens collected: {cnt:,}")
+    print(f"  Avg tokens/image: {avg_tokens_per_image:.1f}")
+    print(f"  Buffer usage: {usage_pct:.1f}% ({cnt:,} / {total_tokens:,})")
+    print(f"  Vision tokens: {num_vision:,} ({num_vision/cnt*100:.1f}%)")
+    print(f"  Text tokens: {num_text:,} ({num_text/cnt*100:.1f}%)")
     
     if num_vision == 0:
         print(f"\n{Fore.RED}ERROR: No vision tokens detected!{Fore.RESET}")
@@ -491,10 +570,11 @@ def vlm_modality_cosine_dist(
         indices = torch.randperm(a1.shape[0])[:sample_size]
         
         with torch.no_grad():
-            a1_sample = a1[indices].to(device)
-            a2_sample = a2[indices].to(device)
-            vision_mask_sample = vision_masks[indices].to(device)
-            text_mask_sample = text_masks[indices].to(device)
+            # Convert sample to float64 on GPU (explicit dtype + device)
+            a1_sample = a1[indices].to(device=device, dtype=torch.float64)
+            a2_sample = a2[indices].to(device=device, dtype=torch.float64)
+            vision_mask_sample = vision_masks[indices].to(device=device)
+            text_mask_sample = text_masks[indices].to(device=device)
             
             # Initial identity transform
             pred_sample = a1_sample
@@ -544,8 +624,11 @@ def vlm_modality_cosine_dist(
         print(f"{Fore.YELLOW}Note: Accurate mode with a3 not fully optimized for modality-aware loss{Fore.RESET}")
         print(f"{Fore.YELLOW}Using standard mode (a2 = target){Fore.RESET}\n")
     
+    # Keep bfloat16 - will convert per batch inside optimizer (like vlm_cosine_dist)
+    print(f"{Fore.YELLOW}Using bfloat16 (will convert to float64 per batch in GPU){Fore.RESET}")
+    
     transform = estimate_transform_modality_aware(
-        a1, a2,
+        a1, a2,  # bfloat16 그대로 전달!
         vision_masks, text_masks,
         lambda_vision, lambda_text,
         lr=lr,
@@ -564,7 +647,9 @@ def vlm_modality_cosine_dist(
     for hook in hooks:
         hook.remove()
     
-    del model
+    del model, a1, a2, vision_masks, text_masks
+    if accurate:
+        del a3
     gc.collect()
     torch.cuda.empty_cache()
     
@@ -609,9 +694,7 @@ def vlm_modality_cosine_dist(
         print(f"{Fore.GREEN}Transform matrix saved to: {transform_path}{Fore.RESET}\n")
     
     # Final cleanup
-    del model, a1, a2, vision_masks, text_masks
-    if accurate:
-        del a3
+    del model, transform
     gc.collect()
     torch.cuda.empty_cache()
     
