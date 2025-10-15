@@ -1,9 +1,9 @@
 # ============================================================
-# mdsr.yaml - MDSR Configuration
-# Modality-Decomposed Spectral Regularization
+# mlm.yaml - Multi-Layer Matching Configuration
+# Teacher-student inspired multi-layer supervision
 # ============================================================
 
-method: "vlm_mdsr"
+method: "vlm_mlm"
 model_path: "llava-hf/llava-1.5-7b-hf"
 image_dir: "train2014"
 batch_size: 8
@@ -14,8 +14,10 @@ use_4bit: True
 save_path: null
 save_transform_only: True
 
-# MDSR-specific parameters
-variance_threshold: 2.0  # Ratio for vision/text attribution
+# MLM-specific parameters
+weight_strategy: "linear_increasing"  # linear_increasing, exponential, uniform
+
+# Optimization (same as ReplaceMe for fair comparison)
 lr: 0.0001
 num_epochs: 10
 opt_batch_size: 1024

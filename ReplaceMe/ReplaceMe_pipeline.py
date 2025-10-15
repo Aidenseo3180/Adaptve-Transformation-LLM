@@ -179,23 +179,22 @@ def ReplaceMe_pipeline(config):
         print(f"{Fore.GREEN}✓ CMAPT pruning completed{Fore.RESET}")
         return
 
-
-    elif config["method"] == "vlm_mdsr":
-        from .vlm_mdsr import vlm_mdsr
+    elif config["method"] == "vlm_mlm":
+        from .vlm_mlm import vlm_mlm
         from .vlm_distance import vlm_profile_distances
         import os
 
-        print(f"{Fore.MAGENTA}=== VLM MDSR METHOD ==={Fore.RESET}")
+        print(f"{Fore.MAGENTA}=== VLM MLM METHOD ==={Fore.RESET}")
         
         signature = inspect.signature(vlm_profile_distances)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
         if config.get('distances_path') is None or not os.path.exists(config.get('distances_path', '')):
-            print(f"{Fore.CYAN}Profiling VLM distances...{Fore.RESET}")
+            print(f"{Fore.CYAN}Profiling distances...{Fore.RESET}")
             vlm_profile_distances(**filtered_config)
             config['distances_path'] = "./vlm_distances.pth"
         
-        signature = inspect.signature(vlm_mdsr)
+        signature = inspect.signature(vlm_mlm)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
         average_distances = torch.load(config['distances_path'], weights_only=False)
@@ -210,15 +209,10 @@ def ReplaceMe_pipeline(config):
         end_ids = sorted([x[1] for x in selected_blocks])
         num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
         num_layers = [sum(num_layers[:i]) for i in range(len(start_ids) + 1)]
-
-        print(f"[DEBUG] Selected blocks: {selected_blocks}")
-        print(f"[DEBUG] start_ids: {start_ids}")
-        print(f"[DEBUG] end_ids: {end_ids}")
-        print(f"[DEBUG] num_layers: {num_layers}")
         
         for i in range(len(selected_blocks)):
-            print(f"{Fore.YELLOW}Processing block {i+1}/{len(selected_blocks)}{Fore.RESET}")
-            path = vlm_mdsr(
+            print(f"{Fore.YELLOW}Block {i+1}/{len(selected_blocks)}{Fore.RESET}")
+            path = vlm_mlm(
                 **filtered_config,
                 start_id=start_ids[i],
                 end_id=end_ids[i],
@@ -226,7 +220,7 @@ def ReplaceMe_pipeline(config):
             )
             filtered_config["model_path"] = path
         
-        print(f"{Fore.GREEN}✓ MDSR pruning completed{Fore.RESET}")
+        print(f"{Fore.GREEN}✓ MLM completed{Fore.RESET}")
         return
 
     else:
