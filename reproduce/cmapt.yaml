@@ -16,8 +16,8 @@ save_transform_only: True
 
 # CMAPT-specific hyperparameters
 lambda_output: 1.0      # Weight for output matching (standard ReplaceMe)
-lambda_alignment: 0.1   # Weight for cross-modal alignment preservation
-lambda_intra: 0.05       # Weight for intra-modal structure preservation
+lambda_alignment: 0.3   # Weight for cross-modal alignment preservation
+lambda_intra: 0.1       # Weight for intra-modal structure preservation
 
 # Optimization settings
 lr: 0.0001

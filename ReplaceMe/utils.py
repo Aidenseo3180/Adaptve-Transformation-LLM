@@ -431,11 +431,21 @@ def get_vlm_calib_dataloader(
         image_files = image_files[:dataset_size]
     
     questions = [
-        "<image>\nWhat is in this image?",
-        "<image>\nDescribe what you see.",
-        "<image>\nWhat objects are present?",
-        "<image>\nWhat is the main subject?",
-        "<image>\nCan you describe the scene?",
+        "<image>\nPlease provide a detailed description of this image. What objects, people, or animals do you see? Describe their appearance, positions, and any actions they are performing. What is the setting or environment? What colors, textures, and patterns are prominent? What mood or atmosphere does the image convey?",
+        
+        "<image>\nAnalyze this image carefully and describe everything you observe. Start with the main subject or focal point, then describe the background and surrounding elements. Mention any text, symbols, or notable details. How do the different elements relate to each other? What story might this image be telling?",
+        
+        "<image>\nExamine this image and provide a comprehensive analysis. What are the most important visual elements? How are they arranged in the composition? What relationships exist between different objects or subjects? What emotions or messages does this image communicate? Are there any interesting or unusual aspects?",
+        
+        "<image>\nDescribe this image in detail, as if explaining it to someone who cannot see it. What is happening in the scene? Who or what is present? What are their characteristics and what are they doing? What is the context or setting? What details stand out or seem most significant?",
+        
+        "<image>\nLooking at this image, tell me everything you can observe. What objects are visible and what are their properties? How is the space organized? What actions or interactions are taking place? What can you infer about the situation or context? What makes this image interesting or noteworthy?",
+        
+        "<image>\nProvide a thorough examination of this image. Identify and describe all visible elements, including their colors, shapes, sizes, and positions. Explain the relationships and interactions between these elements. What is the overall composition and how does it guide the viewer's attention? What interpretations or meanings might this image convey?",
+        
+        "<image>\nInspect this image carefully and give a detailed account of what you see. Start with a general overview, then progressively describe specific details. Consider the foreground, middle ground, and background. What activities or states are depicted? How do lighting, perspective, and framing contribute to the image? What questions does this image raise or answer?",
+        
+        "<image>\nAnalyze the contents of this image systematically. What categories of objects or subjects are present? How do they interact or relate spatially and conceptually? What cultural, social, or artistic context might be relevant? What techniques or conventions are used in this image? What response or understanding is the image designed to evoke?",
     ]
     
     # ===== 경로만 저장 (메모리 효율적) =====
