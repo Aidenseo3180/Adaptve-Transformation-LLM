@@ -179,12 +179,12 @@ def ReplaceMe_pipeline(config):
         print(f"{Fore.GREEN}✓ CMAPT pruning completed{Fore.RESET}")
         return
 
-    elif config["method"] == "vlm_hybrid":
-        from .vlm_hybrid import vlm_hybrid
+    elif config["method"] == "vlm_two_phase":
+        from .vlm_two_phase import vlm_two_phase
         from .vlm_distance import vlm_profile_distances
         import os
 
-        print(f"{Fore.MAGENTA}=== VLM HYBRID METHOD ==={Fore.RESET}")
+        print(f"{Fore.MAGENTA}=== VLM TWO-PHASE METHOD ==={Fore.RESET}")
         
         signature = inspect.signature(vlm_profile_distances)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
@@ -194,7 +194,7 @@ def ReplaceMe_pipeline(config):
             vlm_profile_distances(**filtered_config)
             config['distances_path'] = "./vlm_distances.pth"
         
-        signature = inspect.signature(vlm_hybrid)
+        signature = inspect.signature(vlm_two_phase)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
         
         average_distances = torch.load(config['distances_path'], weights_only=False)
@@ -212,7 +212,7 @@ def ReplaceMe_pipeline(config):
         
         for i in range(len(selected_blocks)):
             print(f"{Fore.YELLOW}Block {i+1}/{len(selected_blocks)}{Fore.RESET}")
-            path = vlm_hybrid(
+            path = vlm_two_phase(
                 **filtered_config,
                 start_id=start_ids[i],
                 end_id=end_ids[i],
@@ -220,7 +220,7 @@ def ReplaceMe_pipeline(config):
             )
             filtered_config["model_path"] = path
         
-        print(f"{Fore.GREEN}✓ Hybrid completed{Fore.RESET}")
+        print(f"{Fore.GREEN}✓ Two-Phase pruning completed{Fore.RESET}")
         return
 
     else:
