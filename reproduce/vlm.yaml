@@ -6,7 +6,7 @@ model_path: "llava-hf/llava-1.5-7b-hf"  # 검증된 모델
 image_dir: "train2014"
 batch_size: 8
 max_length: 512
-layers_to_skip: 8
+layers_to_skip: 12
 dataset_size: 8000
 use_4bit: True  # 메모리 충분하면 False
 save_path: null
@@ -16,7 +16,7 @@ two_vectors: False
 thri: False
 solver: "adam"
 loss: "cosine"
-distances_path: "distances_8.pth"
+distances_path: "distances_12.pth"
 num_A: 1
 merge_consecutive: False
 accurate: False
