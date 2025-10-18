@@ -378,12 +378,12 @@ def ensemble_transforms(
     print(f"  T_final norm: {stats['T_final_norm']:.4f}")
     print(f"  ||T_refined - T_base||: {stats['difference_norm']:.4f}")
     
-    if stats['difference_norm'] > 10.0:
-        print(f"\n{Fore.YELLOW}  ⚠ Large difference between phases (may indicate divergence){Fore.RESET}")
-    elif stats['difference_norm'] < 1.0:
-        print(f"\n{Fore.YELLOW}  ⚠ Small difference between phases (Phase 2 had little effect){Fore.RESET}")
-    else:
-        print(f"\n{Fore.GREEN}  ✓ Reasonable difference (Phase 2 refined successfully){Fore.RESET}")
+    # if stats['difference_norm'] > 10.0:
+    #     print(f"\n{Fore.YELLOW}  ⚠ Large difference between phases (may indicate divergence){Fore.RESET}")
+    # elif stats['difference_norm'] < 1.0:
+    #     print(f"\n{Fore.YELLOW}  ⚠ Small difference between phases (Phase 2 had little effect){Fore.RESET}")
+    # else:
+    #     print(f"\n{Fore.GREEN}  ✓ Reasonable difference (Phase 2 refined successfully){Fore.RESET}")
     
     print(f"\n{Fore.GREEN}✓ Ensemble completed{Fore.RESET}\n")
     
@@ -444,7 +444,6 @@ def vlm_two_phase(
     print(f"  Layers to skip: {layers_to_skip}")
     print(f"  Start layer ID: {start_id}")
     print(f"  End layer ID: {end_id}")
-    print(f"  Already pruned: {num_layer} layers")
     print(f"  Phase 1 epochs: {num_epochs_phase1}")
     print(f"  Phase 2 epochs: {num_epochs_phase2}")
     print(f"  Ensemble alpha: {ensemble_alpha}\n")
