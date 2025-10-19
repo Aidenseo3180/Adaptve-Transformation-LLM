@@ -1,0 +1,34 @@
+# llm_two_phase.yaml
+method: "two_phase"
+model_path: "meta-llama/Meta-Llama-3-8B-Instruct"
+dataset: "HuggingFaceFW/fineweb"
+dataset_column: "text"
+dataset_subset: "eval"
+batch_size: 8
+max_length: 512
+layers_to_skip: 12
+dataset_size: 8000
+use_4bit: True
+save_path: null
+save_transform_only: True
+
+# Two-Phase specific parameters
+ensemble_alpha: 0.7      # T_final = 0.7*T_base + 0.3*T_refined
+
+# Phase 1: Standard ReplaceMe (MLP-level)
+lr_phase1: 0.0001
+num_epochs_phase1: 10
+
+# Phase 2: Teacher-guided (Layer-level)
+lr_phase2: 0.000001      # Lower LR for fine-tuning
+num_epochs_phase2: 3     # Fewer epochs
+
+# Optimization
+opt_batch_size: 1024
+
+# Layer selection
+distances_path: null  # Will auto-generate
+num_A: 1
+merge_consecutive: False
+
+token: null
