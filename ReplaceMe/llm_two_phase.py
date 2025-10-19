@@ -148,9 +148,12 @@ def collect_layer_outputs(
     
     hidden_size = model.config.hidden_size
     
-    L_before_list = []
-    L_after_list = []
+    # Pre-allocate (메모리 효율적)
+    total_tokens = (max_samples if max_samples else len(dataloader.dataset)) * max_length
+    L_before = torch.empty((total_tokens, hidden_size), dtype=torch.bfloat16, device='cpu')
+    L_after = torch.empty((total_tokens, hidden_size), dtype=torch.bfloat16, device='cpu')
     
+    cnt = 0
     total_samples = 0
     
     model.eval()
@@ -180,7 +183,6 @@ def collect_layer_outputs(
             outputs = model(**inputs, output_hidden_states=True)
         
         # Extract specific layers
-        # hidden_states[0] = embeddings, hidden_states[1] = layer 0, ...
         L_before_batch = outputs.hidden_states[layer_before + 1]
         L_after_batch = outputs.hidden_states[layer_after + 1]
         
@@ -188,19 +190,32 @@ def collect_layer_outputs(
         L_before_batch = L_before_batch.view(-1, hidden_size).cpu().to(torch.bfloat16)
         L_after_batch = L_after_batch.view(-1, hidden_size).cpu().to(torch.bfloat16)
         
-        L_before_list.append(L_before_batch)
-        L_after_list.append(L_after_batch)
+        batch_size_tokens = L_before_batch.shape[0]
         
+        # 버퍼 체크
+        if cnt + batch_size_tokens > total_tokens:
+            print(f"\n{Fore.RED}Buffer overflow! Stopping at {cnt:,} tokens{Fore.RESET}\n")
+            break
+        
+        # 직접 쓰기 (List append 대신)
+        L_before[cnt:cnt+batch_size_tokens] = L_before_batch
+        L_after[cnt:cnt+batch_size_tokens] = L_after_batch
+        
+        cnt += batch_size_tokens
         total_samples += inputs['input_ids'].shape[0]
         
         # Memory cleanup
-        del outputs
+        del outputs, L_before_batch, L_after_batch
         torch.cuda.empty_cache()
+        
+        # 주기적 메모리 정리
+        if batch_idx % 100 == 0:
+            gc.collect()
     
-    # Concatenate
-    print(f"\n{Fore.GREEN}Concatenating layer outputs...{Fore.RESET}")
-    L_before = torch.cat(L_before_list, dim=0)
-    L_after = torch.cat(L_after_list, dim=0)
+    # 실제 사용한 부분만 slice
+    print(f"\n{Fore.GREEN}Slicing to actual size: {cnt:,} tokens{Fore.RESET}")
+    L_before = L_before[:cnt]
+    L_after = L_after[:cnt]
     
     print(f"  L_before: {L_before.shape}, {L_before.dtype}")
     print(f"  L_after: {L_after.shape}, {L_after.dtype}")
