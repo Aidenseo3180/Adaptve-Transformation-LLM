@@ -262,31 +262,3 @@ def profile_distances(
     
     torch.save(average_distances, "distances.pth")
     logging.info(f"{Fore.BLUE}Distances saved to distances.pth{Fore.RESET}")
-
-def read_config(config_path: str) -> dict:
-    """Read and parse YAML configuration file.
-
-    Args:
-        config_path: Path to YAML configuration file
-
-    Returns:
-        Parsed configuration dictionary
-    """
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
-
-
-def run_from_config() -> None:
-    """Run distance profiling from configuration file."""
-    parser = argparse.ArgumentParser(
-        description="Run distance analysis based on a configuration file."
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        required=True,
-        help="Path to the configuration file.",
-    )
-    args = parser.parse_args()
-    config = read_config(args.config)
-    profile_distances(**config)

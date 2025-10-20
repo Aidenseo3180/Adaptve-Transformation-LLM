@@ -2,12 +2,12 @@
 # vlm_pipeline_config.yaml - 최종 설정
 # ============================================================
 method: "vlm_cosine"
-model_path: "llava-hf/llava-1.5-7b-hf"  # 검증된 모델
+model_path: "llava-hf/llava-1.5-13b-hf"  # 검증된 모델
 image_dir: "train2014"
 batch_size: 8
 max_length: 512
-layers_to_skip: 12
-dataset_size: 8000
+layers_to_skip: 1
+dataset_size: 4000
 use_4bit: True  # 메모리 충분하면 False
 save_path: null
 save_transform_only: True
@@ -16,16 +16,10 @@ two_vectors: False
 thri: False
 solver: "adam"
 loss: "cosine"
-distances_path: "distances_12.pth"
+distances_path: null
 num_A: 1
 merge_consecutive: False
 accurate: False
 token: null
 
-# # Evaluation
-# eval_tasks:
-#     - "simple"
-#   # - "vqav2"
-#   # - "gqa"
-# eval_num_samples: 500
-# eval_batch_size: 4
+# output_prefix: "llava15_analysis"
