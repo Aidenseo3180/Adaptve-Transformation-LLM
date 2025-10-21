@@ -45,9 +45,7 @@ def ReplaceMe_pipeline(config):
             print(f"{Fore.CYAN}Profiling VLM distances...{Fore.RESET}")
             vlm_profile_distances(**filtered_config)
             config['distances_path'] = "./vlm_distances.pth"
-            # test_this()
-
-        return
+            return
         
         signature = inspect.signature(vlm_cosine_dist)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
