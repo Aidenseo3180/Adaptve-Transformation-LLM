@@ -45,7 +45,6 @@ def ReplaceMe_pipeline(config):
             print(f"{Fore.CYAN}Profiling VLM distances...{Fore.RESET}")
             vlm_profile_distances(**filtered_config)
             config['distances_path'] = "./vlm_distances.pth"
-            return
         
         signature = inspect.signature(vlm_cosine_dist)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
@@ -67,6 +66,7 @@ def ReplaceMe_pipeline(config):
         print(f"[DEBUG] start_ids: {start_ids}")
         print(f"[DEBUG] end_ids: {end_ids}")
         print(f"[DEBUG] num_layers: {num_layers}")
+        # return
         
         for i in range(len(selected_blocks)):
             print(f"{Fore.YELLOW}Processing block {i+1}/{len(selected_blocks)}{Fore.RESET}")

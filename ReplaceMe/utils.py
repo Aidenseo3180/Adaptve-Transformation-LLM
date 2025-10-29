@@ -233,17 +233,17 @@ def adam_method(
     # Initialize model and optimizer
     if diag:
         transform = torch.ones(a1.shape[1], requires_grad=True, device="cuda")
-        optimizer = torch.optim.Adam([transform], lr=1e-4)
+        optimizer = torch.optim.Adam([transform], lr=1e-5)
     elif two_vectors:
         t1 = torch.ones((a1.shape[1], 1), requires_grad=True, device="cuda")
         t2 = torch.ones((a1.shape[1], 1), requires_grad=True, device="cuda")
-        optimizer = torch.optim.Adam([t1, t2], lr=1e-4)
+        optimizer = torch.optim.Adam([t1, t2], lr=1e-5)
     else:
         model = LowerTriangularLinear(a1.shape[1], a1.shape[1]).to("cuda") if thri \
                else nn.Linear(a1.shape[1], a1.shape[1], bias=False).to("cuda")
         if not thri:
             model.weight.data.copy_(torch.eye(a1.shape[1]))
-        optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
 
     # Define loss functions
     def cosine_loss(XA: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
