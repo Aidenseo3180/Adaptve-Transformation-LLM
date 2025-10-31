@@ -736,10 +736,21 @@ def vlm_profile_distances(
 
     # Calculate average distances
     average_distances = [np.mean(dists) for dists in all_distances]
+
+    # Find minimum distance (skip first 10 blocks)
+    skip_first_n_blocks = 8
     
-    # Find minimum distance
-    min_distance = min(average_distances)
-    min_distance_layer = average_distances.index(min_distance) + 1
+    if len(average_distances) > skip_first_n_blocks:
+        print("Disregarding the first 8 layers")
+        # Search for minimum in remaining blocks
+        min_distance = min(average_distances[skip_first_n_blocks:])
+        # Get the actual index (accounting for skipped blocks)
+        min_distance_layer = average_distances[skip_first_n_blocks:].index(min_distance) + skip_first_n_blocks + 1
+    else:
+        # Fallback if total blocks <= 8
+        print(f"{Fore.YELLOW}Warning: Only {len(average_distances)} blocks, using all for minimum{Fore.RESET}")
+        min_distance = min(average_distances)
+        min_distance_layer = average_distances.index(min_distance) + 1
 
     # Save to CSV
     with open("vlm_layer_distances.csv", "w", newline="") as csvfile:
@@ -775,3 +786,8 @@ def vlm_profile_distances(
     torch.cuda.empty_cache()
 
     return average_distances
+
+
+
+
+

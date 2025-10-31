@@ -233,17 +233,17 @@ def adam_method(
     # Initialize model and optimizer
     if diag:
         transform = torch.ones(a1.shape[1], requires_grad=True, device="cuda")
-        optimizer = torch.optim.Adam([transform], lr=1e-5)
+        optimizer = torch.optim.Adam([transform], lr=1e-4)
     elif two_vectors:
         t1 = torch.ones((a1.shape[1], 1), requires_grad=True, device="cuda")
         t2 = torch.ones((a1.shape[1], 1), requires_grad=True, device="cuda")
-        optimizer = torch.optim.Adam([t1, t2], lr=1e-5)
+        optimizer = torch.optim.Adam([t1, t2], lr=1e-4)
     else:
         model = LowerTriangularLinear(a1.shape[1], a1.shape[1]).to("cuda") if thri \
                else nn.Linear(a1.shape[1], a1.shape[1], bias=False).to("cuda")
         if not thri:
             model.weight.data.copy_(torch.eye(a1.shape[1]))
-        optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 
     # Define loss functions
     def cosine_loss(XA: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
@@ -355,11 +355,13 @@ def select_non_overlapping_blocks(
     average_distances: List[float],
     layers_to_skip: int,
     num_blocks: int = 4,
-    merge_consecutive: bool = False
+    merge_consecutive: bool = False,
+    skip_first_n: int = 8
 ) -> List[Tuple[int, int]]:
     """Select optimal non-overlapping layer blocks based on distances."""
+
     blocks = [
-        (i + 1, i + layers_to_skip + 1, avg)
+        (i + 1 + skip_first_n, i + layers_to_skip + 1 + skip_first_n, avg)
         for i, avg in enumerate(average_distances)
     ]
     
@@ -393,6 +395,7 @@ def select_non_overlapping_blocks(
         merged.append((current_start, current_end))
         print(f"List of layers to prune {merged}")
         return merged
+    
     selected = [(start, end) for start, end, _ in selected]
     print(f"List of layers to prune {selected}")
     return selected
@@ -410,66 +413,65 @@ def get_vlm_calib_dataloader(
     batch_size: int,
     processor
 ) -> DataLoader:
-    """Load VLM calibration dataset from local COCO images."""
+    """Load LLaVA-Instruct (train2014)."""
     from pathlib import Path
-    from PIL import Image, PngImagePlugin
+    from PIL import Image
     import datasets
+    import json
+
+    json_path = "llava_instruct_150k.json"
     
-    # PIL 제한 완화
-    PngImagePlugin.MAX_TEXT_CHUNK = 10 * (1024**2)
+    print(f"[VLM DataLoader] Loading LLaVA-Instruct")
     
-    print(f"[VLM DataLoader] Loading images from {image_dir}")
+    with open(json_path, 'r') as f:
+        llava_data = json.load(f)
     
+    # train2014 필터링
+    filtered_data = []
     image_path = Path(image_dir)
-    if not image_path.exists():
-        raise FileNotFoundError(f"Image directory not found: {image_dir}")
     
-    image_files = list(image_path.glob("*.jpg"))
-    print(f"[VLM DataLoader] Found {len(image_files)} images")
+    for item in llava_data:
+        img_file = item['image']
+        # COCO_train2014_ 접두사 추가
+        full_filename = f"COCO_train2014_{img_file}"
+        full_path = image_path / full_filename
+        
+        if full_path.exists():
+            filtered_data.append({
+                **item,
+                'full_image_path': str(full_path)  # 전체 경로 저장
+            })
+        
+        if dataset_size and len(filtered_data) >= dataset_size:
+            break
     
-    if dataset_size:
-        image_files = image_files[:dataset_size]
+    print(f"[VLM DataLoader] Filtered: {len(filtered_data)} samples")
     
-    questions = [
-        "<image>\nPlease provide a detailed description of this image. What objects, people, or animals do you see? Describe their appearance, positions, and any actions they are performing. What is the setting or environment? What colors, textures, and patterns are prominent? What mood or atmosphere does the image convey?",
-        
-        "<image>\nAnalyze this image carefully and describe everything you observe. Start with the main subject or focal point, then describe the background and surrounding elements. Mention any text, symbols, or notable details. How do the different elements relate to each other? What story might this image be telling?",
-        
-        "<image>\nExamine this image and provide a comprehensive analysis. What are the most important visual elements? How are they arranged in the composition? What relationships exist between different objects or subjects? What emotions or messages does this image communicate? Are there any interesting or unusual aspects?",
-        
-        "<image>\nDescribe this image in detail, as if explaining it to someone who cannot see it. What is happening in the scene? Who or what is present? What are their characteristics and what are they doing? What is the context or setting? What details stand out or seem most significant?",
-        
-        "<image>\nLooking at this image, tell me everything you can observe. What objects are visible and what are their properties? How is the space organized? What actions or interactions are taking place? What can you infer about the situation or context? What makes this image interesting or noteworthy?",
-        
-        "<image>\nProvide a thorough examination of this image. Identify and describe all visible elements, including their colors, shapes, sizes, and positions. Explain the relationships and interactions between these elements. What is the overall composition and how does it guide the viewer's attention? What interpretations or meanings might this image convey?",
-        
-        "<image>\nInspect this image carefully and give a detailed account of what you see. Start with a general overview, then progressively describe specific details. Consider the foreground, middle ground, and background. What activities or states are depicted? How do lighting, perspective, and framing contribute to the image? What questions does this image raise or answer?",
-        
-        "<image>\nAnalyze the contents of this image systematically. What categories of objects or subjects are present? How do they interact or relate spatially and conceptually? What cultural, social, or artistic context might be relevant? What techniques or conventions are used in this image? What response or understanding is the image designed to evoke?",
-    ]
-    
-    # ===== 경로만 저장 (메모리 효율적) =====
+    # 데이터 준비
     data_list = []
-    for i, img_path in enumerate(image_files):
+    for item in filtered_data:
+        conversations = item['conversations']
+        if conversations and conversations[0]['from'] == 'human':
+            question = conversations[0]['value']
+            text = question if '<image>' in question else f"<image>\n{question}"
+        else:
+            text = "<image>\nDescribe this image."
+        
         data_list.append({
-            'image_path': str(img_path),
-            'text': questions[i % len(questions)]
+            'image_path': item['full_image_path'],
+            'text': text
         })
     
     dataset = datasets.Dataset.from_list(data_list)
-    print(f"[VLM DataLoader] Dataset created: {len(dataset)} samples")
+    print(f"[VLM DataLoader] Dataset ready: {len(dataset)} samples")
     
     def collate_fn(batch):
         images = []
         texts = [item['text'] for item in batch]
         
         for item in batch:
-            try:
-                img = Image.open(item['image_path']).convert('RGB')
-                images.append(img)
-            except Exception as e:
-                print(f"[WARN] Failed to load {item['image_path']}: {e}")
-                images.append(Image.new('RGB', (224, 224), color='gray'))
+            img = Image.open(item['image_path']).convert('RGB')
+            images.append(img)
         
         return processor(
             text=texts,

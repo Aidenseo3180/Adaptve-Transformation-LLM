@@ -40,6 +40,8 @@ def ReplaceMe_pipeline(config):
         
         signature = inspect.signature(vlm_profile_distances)
         filtered_config = {k: v for k, v in config.items() if k in signature.parameters}
+
+        skip_first_n = 8
         
         if config.get('distances_path') is None or not os.path.exists(config.get('distances_path', '')):
             print(f"{Fore.CYAN}Profiling VLM distances...{Fore.RESET}")
@@ -51,12 +53,13 @@ def ReplaceMe_pipeline(config):
         
         average_distances = torch.load(config['distances_path'], weights_only=False)
         selected_blocks = select_non_overlapping_blocks(
-            average_distances,
+            average_distances[skip_first_n:],
             config['layers_to_skip'],
             num_blocks=config.get('num_A', 1),
-            merge_consecutive=config.get('merge_consecutive', True)
+            merge_consecutive=config.get('merge_consecutive', True),
+            skip_first_n=skip_first_n
         )
-        
+
         start_ids = sorted([x[0] for x in selected_blocks])
         end_ids = sorted([x[1] for x in selected_blocks])
         num_layers = [end_ids[i] - start_ids[i] for i in range(len(start_ids))]
