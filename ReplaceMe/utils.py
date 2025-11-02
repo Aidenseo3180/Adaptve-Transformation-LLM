@@ -263,7 +263,7 @@ def adam_method(
     dataset = ActivationDataset(a1, a2, a3)
     loader = DataLoader(dataset, batch_size=1024, shuffle=True)
 
-    with tqdm(range(10), desc="Optimizing Transformation") as pbar:
+    with tqdm(range(5), desc="Optimizing Transformation") as pbar:
         for _ in pbar:
             for X, Y, Z in loader:
                 optimizer.zero_grad()
